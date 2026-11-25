@@ -7,18 +7,18 @@
 es el examen del 1 de diciembre de 2026: montar un escenario (pfSense + VLANs + NAT +
 clientes) desde la terminal, con el VNC sólo como último recurso.
 
-## Estado (2026-11-25, pasada de cobertura total)
+## Estado (2026-11-25, GUI portada + REA)
 
-- `gns3core.py`: superficie v2 completa (computes, statistics, symbols, appliances, imágenes,
-  proyectos, plantillas, nodos, enlaces, capturas, dibujos, snapshots, consola y monitor).
-  `API_V2_MAP` declara las 8 áreas cubiertas.
-- MCP: **26 tools**, verificadas con `hermes mcp test gns3` (Connected, 26 discovered).
-- CLI: **30 comandos**, verificados contra GNS3 2.2.61 local.
-- **Tests: 307 passed, cobertura 100 % de `gns3core.py`** (576 sentencias, 0 miss;
-  `--cov-fail-under=100`), sin servidor GNS3.
-- Kit `examen-kit` arrancado y `gns3lab doctor` → **sin hallazgos**.
-- Documentación: `COMANDOS`, `EXAMEN`, `ARQUITECTURA`, `TROUBLESHOOTING`, `API-COVERAGE`,
-  `COMPATIBILIDAD` y `PARIDAD` (matrices de 47 y 70 filas, 0 enlaces rotos).
+- `gns3core.py`: **11 áreas** de la API v2 (`API_V2_MAP`), con la GUI operativa portada:
+  computes, GNS3 VM, notificaciones, símbolos, base-configs, resize_disk, consola WS/reset,
+  idle-pc, qemu binaries/capabilities, docker images y redes. Inventario real de 78 rutas
+  extraído de `gns3server/handlers` en `orchestration/inventario-rutas-gns3.txt`.
+- CLI: **36 comandos**; MCP: **34 tools** (`hermes mcp test gns3` → Connected, 34 discovered).
+- **Tests: 416 passed, cobertura 100 % de `gns3core.py`** (677 sentencias, 0 miss).
+- Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**.
+- Documentación nueva: `docs/GUI-PORTADA.md` (50 filas), `API-COVERAGE.md` (97 filas),
+  `COMPATIBILIDAD.md`, `PARIDAD.md` y el informe de REA
+  `docs/research/ubridge-console-enganche.md` (23 KB). 0 enlaces rotos.
 
 ## Hitos
 
@@ -31,7 +31,9 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 | 5 | Paridad MCP/CLI (26 tools / 30 comandos) | hecho (`opencode/mcp`, `opencode/cli`) |
 | 6 | Documentación completa | hecho (`opencode/docs`, `opencode/covdocs`) |
 | 7 | Cobertura total de la API v2 operativa (8/8 áreas) | hecho (`bc75bc0` + carriles `gk2-*`) |
-| 8 | Publicar el repo (privado) | propuesto |
+| 8 | GUI operativa portada (11 áreas, 78 rutas inventariadas) | hecho (`a5993aa` + carriles `gk3-*`) |
+| 9 | REA de `ubridge` y vías de enganche documentadas | hecho (`opencode/rea`) |
+| 10 | Publicar el repo (privado) | propuesto |
 
 ## Bitácora de los carriles paralelos (2026-11-25)
 
@@ -71,6 +73,31 @@ No hubo que arreglar ningún bug nuevo: los cuatro carriles llegaron limpios.
 
 **Compatibilidad 3.x no declarada**: usa `/v3` con token y no hay servidor 3.x donde
 verificarla. El detalle está en `docs/COMPATIBILIDAD.md`.
+
+### Tercera tanda: GUI operativa + REA (2026-11-25)
+
+El inventario de 78 rutas se extrajo del código de `gns3server` 2.2.61, que es Python
+legible en `~/Applications/gns3/venv/lib/python3.14/site-packages/gns3server/handlers`.
+El núcleo se amplió en ~40 métodos antes de repartir trabajo, para que CLI y MCP
+programaran contra un contrato único.
+
+Cinco worktrees desde `a5993aa`, agentes `gk3-*` en Herdr con `hy4-flash-free`
+(CLI, docs) y `hungerg-free` (MCP, tests, REA). Modelos fijados con `/models` en la TUI.
+Ningún agente pidió decisiones bloqueantes y los cinco mergearon sin conflictos.
+
+- `opencode/guicli` → 36 comandos; GUI a CLI (computes, gns3vm, símbolos, notificaciones,
+  emuladores, project file/stats, resize_disk, idle-pc…).
+- `opencode/guimcp` → 34 tools con la misma superficie; acciones destructivas con `confirm`.
+- `opencode/guitests` → 416 tests, 100 % de cobertura (677 sentencias).
+- `opencode/guidocs` → `GUI-PORTADA.md`, matriz de 78 rutas y compatibilidad honesta.
+- `opencode/rea` → `docs/research/ubridge-console-enganche.md`: ubridge 1.3.2 no stripped
+  (SHA-256 `b72944a4…f326c`), UDP/UNIX como NIO, TCP/UNIX como hipervisor de control,
+  pcap para capturas, y **sin evidencia estática de Telnet/VNC/WebSocket**: la consola la
+  sirve `gns3server`, no ubridge. Por eso la recomendación del informe es API primero.
+
+Gates repetidos en `master`: 416 passed con `--cov-fail-under=100`, 34 tools conectadas,
+36 comandos y `doctor` sin hallazgos. Al reiniciar el servidor hubo que levantar
+`gns3-server` y `libvirtd` de nuevo; están activos y los cinco nodos del kit arrancados.
 
 
 ## Límites conocidos
