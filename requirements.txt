@@ -1,0 +1,5 @@
+fastmcp
+httpx
+pillow
+pytest
+pytest-cov

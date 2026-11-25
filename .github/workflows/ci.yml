@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Tests con cobertura
+        run: |
+          env -u PYTHONPATH -u VIRTUAL_ENV python -m pytest -q \
+            --cov=gns3core --cov=pfsense \
+            --cov-report=term-missing --cov-precision=2 --cov-fail-under=100
+
+      - name: Guard de deriva docs/código
+        run: env -u PYTHONPATH -u VIRTUAL_ENV python scripts/verify.py
+
+      - name: Compilar módulos
+        run: env -u PYTHONPATH -u VIRTUAL_ENV python -m py_compile gns3core.py gns3_mcp_server.py cli/gns3lab
+
+      - name: Smoke de CLI
+        run: |
+          set -euo pipefail
+          env -u PYTHONPATH -u VIRTUAL_ENV ./cli/gns3lab --help >/dev/null
+          env -u PYTHONPATH -u VIRTUAL_ENV ./cli/gns3lab pf detect --help >/dev/null
+          salida="$(mktemp)"
+          set +e
+          env -u PYTHONPATH -u VIRTUAL_ENV ./cli/gns3lab doctor --json >"$salida"
+          estado=$?
+          set -e
+          cat "$salida"
+          # Sin servidor GNS3 en el runner: 2 es el retorno previsto (alive=false).
+          test "$estado" -eq 0 -o "$estado" -eq 2
+          python -c 'import json, sys; d = json.load(open(sys.argv[1], encoding="utf-8")); assert "server" in d and "problems" in d, d; print("doctor ok: alive=%s problemas=%d" % (d.get("alive"), len(d["problems"])))' "$salida"
