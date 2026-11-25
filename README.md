@@ -1,12 +1,12 @@
 # gns3-toolkit
 
 Operar un servidor **GNS3 2.2** desde la terminal o desde un agente MCP, sin GUI. Núcleo
-compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **39 tools** y CLI
-`gns3lab` con **42 subcomandos**. Repo público:
+compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **41 tools** y CLI
+`gns3lab` con **45 subcomandos**. Repo público:
 https://github.com/PabloJustDevelops/gns3-toolkit
 
-Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **39 tools**
-(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **42 subcomandos** (`handlers` en
+Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **41 tools**
+(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **45 subcomandos** (`handlers` en
 `cli/gns3lab`). Las
 acciones de la GUI operativa portadas al núcleo están en
 [docs/GUI-PORTADA.md](docs/GUI-PORTADA.md); las que aún no tienen comando o tool se marcan
@@ -49,12 +49,12 @@ gns3lab -s clase port examen-kit --name "Pablo Rodriguez" --start
 
 ## Superficie
 
-**CLI** — 42 subcomandos: `servers status up down test export import fix port compute stats
+**CLI** — 45 subcomandos: `servers status up down test export import fix port compute stats
 symbols appliances images templates snap template console capture exec shot key type mon new
 node upload draw link doctor project notify symbol iou-license server emulator nio capture-port
-all disk vm watch`. Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
+all disk vm watch report`. Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
 
-**MCP** — 39 tools: `gns3_appliances gns3_capture gns3_command_line gns3_compute gns3_console
+**MCP** — 41 tools: `gns3_appliances gns3_capture gns3_command_line gns3_compute gns3_console
 gns3_console_control gns3_drawings gns3_emulator gns3_events gns3_events_url gns3_exec
 gns3_gns3vm gns3_images gns3_iou_license gns3_link_edit gns3_links gns3_monitor gns3_nio
 gns3_node_action gns3_node_edit gns3_node_files gns3_nodes gns3_nodes_bulk gns3_notifications
@@ -96,11 +96,10 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 - `upload`, `node disk` y todo lo que lee `/proc` (`shot`, `key`, `type`, `mon`) actúan sobre el
   compute **local**. En un servidor remoto, el disco tiene que estar ya allí.
 - El puerto de consola no se puede fijar por `PUT` en un nodo: se fija en la plantilla.
+Declaración de alcance: 12 áreas, 41 tools y 45 comandos, recalculados por `scripts/verify.py`.
 - El OCR lee bien 720x400 con fuente VGA; no espera texto pequeño.
-- Tests: 416 recogidos, 415 pasan y 1 falla:
-  `test_api_map.py::test_api_v2_map_declara_las_once_areas` sigue esperando 11 áreas mientras
-  `API_V2_MAP` declara 12 (test no actualizado por el carril del núcleo; este brief no puede
-  tocar `tests/`). Sin servidor: dobles de HTTP, telnet y HMP. La matriz de lo que cubre cada
+- Tests: 483 passed, cobertura 100 % de `gns3core.py` (718 sentencias, 0 miss), con dobles
+  de HTTP, telnet y HMP y sin servidor GNS3. La matriz de lo que cubre cada
   endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).
 
 Proyecto y estado: [PROJECT.md](PROJECT.md). Reglas para agentes: [AGENTS.md](AGENTS.md).

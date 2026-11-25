@@ -18,10 +18,8 @@ iniciada; timeout = descarga o stream en curso. El inventario se contrastó con
 - `contrato`: nombre acordado en `orchestration/BRIEF-cli.md` o `BRIEF-mcp-paridad.md`; ese
   carril aún no está en este árbol.
 - `pendiente`: sin test en `tests/`.
-- `en curso`: nombre acordado en los briefs de carril que aún no está en este árbol. Medido
-  aquí: `gns3lab --help` da 37 subcomandos y `mcp.list_tools()` da 34 tools; ni `nio`,
-  `capture-port`, `watch`, `gns3_nio`, `gns3_port_capture` ni `gns3_events` figuran en esas
-  listas. El método del núcleo sí existe y está verificado.
+- `†`: el método del núcleo existe y está consumido por el verbo/tool indicado en la fila.
+  `scripts/verify.py` recuenta las cifras reales desde el código al ejecutarse.
 
 La superficie ampliada de `Client` (`computes`, `compute`, `statistics`, `symbols`,
 `appliances`, `images`, `project_get/close/delete`, `template_get/update/delete`,

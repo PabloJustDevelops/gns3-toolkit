@@ -3,7 +3,7 @@
 ## Qué es
 
 `gns3-toolkit` empaqueta la operación de un servidor GNS3 2.2 sin GUI: una librería
-(`gns3core`), un servidor MCP de 18 tools y una CLI de 22 comandos. El objetivo inmediato
+(`gns3core`), un servidor MCP de 41 tools y una CLI de 45 comandos. El objetivo inmediato
 es el examen del 1 de diciembre de 2026: montar un escenario (pfSense + VLANs + NAT +
 clientes) desde la terminal, con el VNC sólo como último recurso.
 
@@ -13,11 +13,11 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   `nio_ports` (NIO y captura por puerto, acciones masivas, `resume`/`pause`, qemu img, VMs
   invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
-- CLI: **42 comandos**; MCP: **39 tools** (`hermes mcp test gns3` → Connected, 39 discovered).
+- CLI: **45 comandos**; MCP: **41 tools** (`hermes mcp test gns3` → Connected, 41 discovered).
 - **Tests: 466 passed, cobertura 100 % de `gns3core.py`** (718 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
-- MCP: 39 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
+- MCP: 41 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
   **2 prompts** (`gns3-diagnostico`, `gns3-examen`).
 - Skill `gns3-lab-automation` reescrita como envoltorio del repo público, con backup en
   `/tmp/gns3-skill-backup-20261125-1909.tar.gz`.

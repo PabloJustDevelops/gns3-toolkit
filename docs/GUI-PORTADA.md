@@ -32,7 +32,7 @@ Los nombres de comando y tool vienen de los contratos de `orchestration/BRIEF-gu
 
 | Lo que hacías en la GUI | Comando CLI | Tool MCP | Método del núcleo | Endpoint |
 |---|---|---|---|---|
-| Listar / ver compute | `gns3lab compute [id]` (parcial: sólo info) | `gns3_compute(cid="local")` (parcial; `action="info\|list"` en curso) | `computes()`, `compute()` † | `GET /v2/computes`, `GET /v2/computes/{id}` |
+| Listar / ver compute | `gns3lab compute [id]` (parcial: sólo info) | `gns3_compute(action="info\|list")` | `computes()`, `compute()` † | `GET /v2/computes`, `GET /v2/computes/{id}` |
 | Añadir compute | `gns3lab compute add …` | `gns3_compute(action="add", …)` | `compute_create()` † | `POST /v2/computes` |
 | Editar compute | `gns3lab compute update …` | `gns3_compute(action="update", …)` | `compute_update()` † | `PUT /v2/computes/{id}` |
 | Borrar compute | `gns3lab compute rm …` | `gns3_compute(action="delete", …)` | `compute_delete()` † | `DELETE /v2/computes/{id}` |
@@ -58,7 +58,7 @@ Los nombres de comando y tool vienen de los contratos de `orchestration/BRIEF-gu
 | Duplicar plantilla | `gns3lab template duplicate …` | `gns3_template(action="duplicate", …)` | `template_duplicate()` † | `POST /v2/templates/{id}/duplicate` |
 | Listar base-configs | `gns3lab template base-config …` | `gns3_template(action="base-config", …)` | `template_base_configs()` † | `GET /v2/templates/base-configs` |
 | Leer / fijar base-config | `gns3lab template base-config …` | `gns3_template(action="base-config", …)` | `template_base_config()` † | `GET/PUT /v2/templates/{id}/base-config/{filename}` |
-| Listar símbolos | `gns3lab symbols [--filter] [--json]` (existe) | `gns3_symbols(pattern=…)` (existe; `action="list"` en curso) | `symbols()` † | `GET /v2/symbols` |
+| Listar símbolos | `gns3lab symbols [--filter] [--json]` (existe) | `gns3_symbols(pattern=…)` | `symbols()` † | `GET /v2/symbols` |
 | Dimensiones de un símbolo | `gns3lab symbol dimensions <id>` | `gns3_symbols(action="dimensions", …)` | `symbol_dimensions()` † | `GET /v2/symbols/{id}/dimensions` |
 | SVG de un símbolo | `gns3lab symbol raw <id>` | `gns3_symbols(action="raw", …)` | `symbol_raw()` † | `GET /v2/symbols/{id}/raw` |
 | Subir SVG de un símbolo | `gns3lab symbol upload <id> …` | `gns3_symbols(action="upload", …)` | `symbol_raw_upload()` † | `POST /v2/symbols/{id}/raw` |
@@ -116,7 +116,7 @@ PY
 grep -n 'def node_resize_disk\|def console_reset\|def gns3vm\|def symbols' gns3core.py
 ```
 
-Verificado en este árbol: `mcp.list_tools()` devuelve 39 tools y `gns3lab` registra 42
+Verificado en este árbol: `mcp.list_tools()` devuelve 41 tools y `gns3lab` registra 45
 subcomandos. Las operaciones de la última tabla (NIO, captura por puerto, acciones masivas,
 eventos WS y versión v1) figuran en ambas listas; los métodos del núcleo y los endpoints están
 en `gns3core.py` y en el inventario de rutas.
