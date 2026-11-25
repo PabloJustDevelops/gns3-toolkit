@@ -15,22 +15,30 @@ Uso:
     gns3lab export <destino> [proyecto] # guarda un .gns3p
     gns3lab import <fichero.gns3p> <nombre>
     gns3lab fix [proyecto]              # repara un proyecto importado (clouds, clones, imágenes)
-    gns3lab snap list|create <nombre>|restore <nombre> [proyecto]
+    gns3lab compute [id] [--json]       # compute(s): conexión, CPU y memoria
+    gns3lab stats [--json]              # estadísticas del servidor
+    gns3lab symbols [--filter texto]    # símbolos de dispositivo del servidor
+    gns3lab appliances [--filter texto] # appliances (catálogo de plantillas)
+    gns3lab snap list|create <nombre>|restore <nombre>|delete <nombre> [proyecto]
     gns3lab images                      # imágenes QEMU del servidor
     gns3lab templates                   # plantillas del servidor
-    gns3lab template list|create|delete  # plantillas: listar, crear y borrar
+    gns3lab template list|create|update|delete  # plantillas: listar, crear, editar y borrar
 
 Sin VNC (lo que se usa de verdad en un examen):
 
+    gns3lab console <nodo> [-p proyecto] [--send "cmd"]  # consola única (interactiva sin --send)
     gns3lab exec <nodo> <cmd>... [-p proyecto]   # consola telnet leída por prompt
+    gns3lab capture <link_id> start|stop|pcap [-p proyecto]
     gns3lab shot <nodo> [-p proyecto]            # pantalla real + OCR
     gns3lab key  <nodo> ret|down|shift-2 ...     # teclas por el monitor QEMU
     gns3lab type <nodo> "texto" [--enter]        # escribir en un menú gráfico
     gns3lab mon  <nodo> <cmd HMP>                # info status, system_reset...
-    gns3lab node add|rm|dup|props|switch|disk    # montar el escenario por API
+    gns3lab node add|rm|dup|props|switch|disk|start|stop|reload|suspend|line
     gns3lab upload <disco.qcow2>                 # subir/comprimir imagen al servidor
     gns3lab new <nombre>                         # proyecto esqueleto vacío
     gns3lab draw "192.168.10.0/24 -> OPT1"       # nota en el canvas
+    gns3lab draw list|edit <id> --set k=v|rm <id>
+    gns3lab link list|add|rm|edit <link_id> --set k=v
     gns3lab doctor [proyecto]                    # chequeo integral antes de entregar
 
 El servidor se elige con --server (por defecto `local`). Un proyecto se puede dar
@@ -358,6 +366,221 @@ def _set_state(s: Server, pid: str, ids: list[str], action: str) -> int:
             print(f"    fallo en {nid[:8]}: [{st}] {msg}")
             fails += 1
     return fails
+
+
+def _wait_node_status(c, pid: str, nid: str, want: str, timeout: float = 45.0) -> str:
+    """Relee el nodo hasta que la API confirme `want` (un 200 no prueba nada)."""
+    end = time.time() + timeout
+    last = None
+    while True:
+        st, detail = c.get(f"/v2/projects/{pid}/nodes/{nid}")
+        if st == 200 and isinstance(detail, dict):
+            last = detail.get("status")
+            if last == want:
+                return last
+        if time.time() >= end:
+            return last or "?"
+        time.sleep(1.0)
+
+
+def _json_out(obj) -> None:
+    print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
+
+
+def _core_call(fn, *a, **kw):
+    """Llama al núcleo y convierte un corte de red en un error legible.
+
+    El servidor puede reiniciarse a mitad de una consulta larga (`/v2/appliances`
+    devuelve un JSON grande): sin esto sale un traceback de `ConnectionReset`.
+    """
+    try:
+        return fn(*a, **kw)
+    except BrokenPipeError:
+        raise                     # stdout cerrado (| head): no es un fallo de red
+    except (ConnectionError, TimeoutError) as e:
+        raise SystemExit(f"fallo de conexión con el servidor: {e}")
+
+
+COMPUTE_FIELDS = ("compute_id", "name", "connected", "protocol", "host", "port", "user",
+                  "cpu_usage_percent", "memory_usage_percent", "last_error")
+
+
+def _compute_row(comp: dict) -> dict:
+    return {k: comp.get(k) for k in COMPUTE_FIELDS}
+
+
+def cmd_compute(args, conf):
+    """Compute(s): `compute` lista, `compute <id|nombre>` da el detalle."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    comps = _core_call(c.computes)
+    if not comps:
+        print(f"GET /v2/computes no devolvió computes en {s.url}", file=sys.stderr)
+        return 1
+    if not args.cid:
+        filas = [_compute_row(x) for x in comps]
+        if args.json:
+            _json_out({"count": len(filas), "computes": filas})
+            return 0
+        for r in filas:
+            estado = "conectado" if r["connected"] else "DESCONECTADO"
+            print(f"  {str(r['compute_id']):<10} {str(r['name']):<24} {estado:<12} "
+                  f"{r['protocol']}://{r['host']}:{r['port']}")
+        return 0
+
+    needle = args.cid.lower()
+    hits = [x for x in comps
+            if str(x.get("compute_id", "")).lower() == needle
+            or str(x.get("name", "")).lower() == needle]
+    if not hits:
+        raise SystemExit(f"compute no encontrado: {args.cid!r}. Hay: "
+                         + ", ".join(str(x.get("compute_id")) for x in comps))
+    if len(hits) > 1:
+        raise SystemExit(f"'{args.cid}' es ambiguo: "
+                         + ", ".join(str(x.get("compute_id")) for x in hits))
+    cid = hits[0]["compute_id"]
+    comp = _core_call(c.compute, cid)
+    if not isinstance(comp, dict):
+        print(f"GET /v2/computes/{cid} no devolvió datos", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out(comp)
+        return 0
+    row = _compute_row(comp)
+    caps = comp.get("capabilities") or {}
+    print(f"  {row['name']} ({row['compute_id']}) "
+          f"{'conectado' if row['connected'] else 'DESCONECTADO'}")
+    print(f"    {row['protocol']}://{row['host']}:{row['port']} user={row['user']}")
+    print(f"    plataforma={caps.get('platform')} versión={caps.get('version')} "
+          f"cpu={row['cpu_usage_percent']}% mem={row['memory_usage_percent']}%")
+    if row["last_error"]:
+        print(f"    último error: {row['last_error']}")
+    return 0
+
+
+def _gib(n) -> str:
+    try:
+        return f"{int(n) / 2**30:.1f} GB"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def cmd_stats(args, conf):
+    """Estadísticas de CPU, memoria y disco de cada compute."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    rows = _core_call(c.statistics)
+    if not rows:
+        print("GET /v2/statistics no devolvió estadísticas", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out({"count": len(rows), "computes": rows})
+        return 0
+    for r in rows:
+        st = r.get("statistics") or {}
+        print(f"  {r.get('compute_name')} ({r.get('compute_id')})")
+        print(f"    cpu {st.get('cpu_usage_percent')}%  "
+              f"mem {st.get('memory_usage_percent')}% "
+              f"({_gib(st.get('memory_used'))}/{_gib(st.get('memory_total'))})  "
+              f"disco {st.get('disk_usage_percent')}%")
+        print(f"    carga {st.get('load_average_percent')}  "
+              f"swap {st.get('swap_usage_percent')}% "
+              f"({_gib(st.get('swap_used'))}/{_gib(st.get('swap_total'))})")
+    return 0
+
+
+def cmd_symbols(args, conf):
+    """Símbolos de dispositivo que ofrece el servidor, filtrables por texto."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    syms = _core_call(c.symbols)
+    if not syms:
+        print("GET /v2/symbols no devolvió símbolos", file=sys.stderr)
+        return 1
+    filas = [{"symbol_id": x.get("symbol_id"), "filename": x.get("filename"),
+              "theme": x.get("theme"), "builtin": x.get("builtin")} for x in syms]
+    low = (args.filter or "").lower()
+    if low:
+        filas = [f for f in filas
+                 if low in str(f["symbol_id"]).lower()
+                 or low in str(f["filename"]).lower()
+                 or low in str(f["theme"]).lower()]
+    if args.json:
+        _json_out({"count": len(filas), "filter": args.filter, "symbols": filas})
+        return 0 if filas else 1
+    if not filas:
+        print(f"ningún símbolo coincide con '{args.filter}' ({len(syms)} en total)",
+              file=sys.stderr)
+        return 1
+    for f in filas:
+        print(f"  {str(f['theme'] or '-'):<26} {f['symbol_id']}")
+    return 0
+
+
+def cmd_appliances(args, conf):
+    """Appliances del catálogo GNS3 (nombre, categoría y descripción)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    apps = _core_call(c.appliances)
+    if not apps:
+        print("GET /v2/appliances no devolvió appliances", file=sys.stderr)
+        return 1
+    filas = [{"name": a.get("name"), "category": a.get("category"),
+              "vendor": a.get("vendor"), "builtin": a.get("builtin"),
+              "description": a.get("description"),
+              "versions": len(a.get("versions") or [])} for a in apps]
+    low = (args.filter or "").lower()
+    if low:
+        filas = [f for f in filas
+                 if low in str(f["name"]).lower()
+                 or low in str(f["category"]).lower()
+                 or low in str(f["vendor"]).lower()
+                 or low in str(f["description"]).lower()]
+        # Las coincidencias por nombre primero: buscar «pfsense» y ver OPNsense
+        # delante (por la descripción) confunde.
+        filas.sort(key=lambda f: (low not in str(f["name"]).lower(),
+                                  str(f["name"]).lower()))
+    if args.json:
+        _json_out({"count": len(filas), "filter": args.filter, "appliances": filas})
+        return 0 if filas else 1
+    if not filas:
+        print(f"ningún appliance coincide con '{args.filter}' ({len(apps)} en total)",
+              file=sys.stderr)
+        return 1
+    for f in filas:
+        print(f"  {str(f['category'] or '-'):<16} {str(f['name']):<32} "
+              f"{f['versions']} versión(es)")
+    return 0
+
+
+def _set_body(kvs: list[str]) -> dict:
+    """Convierte `--set clave=valor` repetidos en un dict (valores JSON si se puede)."""
+    body: dict = {}
+    for kv in kvs or []:
+        if "=" not in kv:
+            raise SystemExit(f"--set espera clave=valor, no {kv}")
+        k, v = kv.split("=", 1)
+        body[k] = _kv_value(v)
+    return body
+
+
+def _resolve_id(items: list[dict], needle: str, key: str, what: str) -> dict:
+    """Busca un objeto por id exacto, prefijo de id o nombre exacto."""
+    exact = [x for x in items if str(x.get(key, "")) == needle]
+    if exact:
+        return exact[0]
+    pref = [x for x in items if str(x.get(key, "")).startswith(needle)]
+    if len(pref) == 1:
+        return pref[0]
+    named = [x for x in items if str(x.get("name", "")).lower() == needle.lower()]
+    hits = pref or named
+    if not hits:
+        raise SystemExit(f"{what} no encontrado: {needle!r}")
+    if len(hits) > 1:
+        raise SystemExit(f"'{needle}' es ambiguo: "
+                         + ", ".join(f"{x.get('name') or str(x.get(key))[:8]}"
+                                     for x in hits))
+    return hits[0]
 
 
 def cmd_up(args, conf):
@@ -890,9 +1113,17 @@ def cmd_port(args, conf):
 
 
 def cmd_images(args, conf):
+    """Imágenes de un emulador del compute local (qemu por defecto)."""
     s = Server(args.server, conf)
-    for i in s.qemu_images():
-        print("  " + i)
+    c = _core_client(s)
+    emulador = args.emulator
+    imagenes = _core_call(c.images, emulador)
+    if args.json:
+        _json_out({"emulator": emulador, "count": len(imagenes),
+                   "images": [i.get("filename") for i in imagenes]})
+        return 0
+    for i in imagenes:
+        print("  " + str(i.get("filename")))
     return 0
 
 
@@ -927,13 +1158,14 @@ def _template_row(t: dict) -> dict:
 
 
 def cmd_template(args, conf):
-    """Plantillas: list, create (--from-node o --type) y delete.
+    """Plantillas: list, create (--from-node o --type), update y delete.
 
     `console` no se puede fijar en un nodo (`PUT` lo ignora con un 200 mentiroso),
     pero sí en la plantilla: se crea y se fija con un `PUT` aparte, porque el POST
     de plantillas rechaza `console` y `properties` anidado con un 400 de schema.
     """
     s = Server(args.server, conf)
+    c = _core_client(s)
     act = args.action
 
     if act == "list":
@@ -1022,6 +1254,37 @@ def cmd_template(args, conf):
               f"{'verificado' if ok else f'NO es el pedido ({args.console})'}")
         return 0 if ok else 1
 
+    if act == "update":
+        if not args.target:
+            raise SystemExit("update exige el nombre o id de la plantilla")
+        body = _set_body(args.set)
+        if not body:
+            raise SystemExit("update exige --set clave=valor (repetible)")
+        st, tpls = c.get("/v2/templates")
+        if st != 200 or not isinstance(tpls, list):
+            print(f"GET /v2/templates -> [{st}] {_err(tpls)}", file=sys.stderr)
+            return 1
+        t = _resolve_id(tpls, args.target, "template_id", "plantilla")
+        tid = t["template_id"]
+        st, res = c.template_update(tid, body)
+        if st not in (200, 201):
+            print(f"no se pudo editar {t.get('name')}: [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        # El 200 del PUT no prueba nada: se relee y se comparan los campos pedidos.
+        st, check = c.template_get(tid)
+        if st != 200 or not isinstance(check, dict):
+            print(f"editada {str(tid)[:8]}, pero no puedo releerla: [{st}] {_err(check)}",
+                  file=sys.stderr)
+            return 1
+        cambios = ", ".join(f"{k}={check.get(k)!r}" for k in body)
+        print(f"{check.get('name')} ({str(tid)[:8]}) editada: {cambios}")
+        malos = {k: {"pedido": v, "leído": check.get(k)}
+                 for k, v in body.items() if check.get(k) != v}
+        if malos:
+            print(f"  la API no aplicó: {malos}", file=sys.stderr)
+            return 1
+        return 0
+
     if act == "delete":
         if not args.target:
             raise SystemExit("delete exige el nombre o id de la plantilla")
@@ -1049,7 +1312,7 @@ def cmd_template(args, conf):
                              + ", ".join(f"{t.get('name')} ({str(t.get('template_id'))[:8]})"
                                          for t in hits))
         t = hits[0]
-        st, res = s.delete(f"/v2/templates/{t['template_id']}")
+        st, res = c.template_delete(t["template_id"])
         if st not in (200, 204):
             print(f"no se pudo borrar: [{st}] {_err(res)}", file=sys.stderr)
             return 1
@@ -1061,16 +1324,18 @@ def cmd_template(args, conf):
 
 
 def cmd_snap(args, conf):
+    """Snapshots del proyecto: list, create, restore y delete."""
     s = Server(args.server, conf)
-    proj = s.resolve(args.project)
+    c = _core_client(s)
+    proj = c.resolve_project(args.project)
     pid = proj["project_id"]
     if args.action == "list":
-        st, body = s.get(f"/v2/projects/{pid}/snapshots")
-        if st != 200 or not body:
+        snaps = c.snapshots(pid)
+        if not snaps:
             print("  sin snapshots")
             return 0
-        for snap in body:
-            print(f"  {snap.get('name')}")
+        for snap in snaps:
+            print(f"  {snap.get('name')}  ({str(snap.get('snapshot_id'))[:8]})")
         return 0
     if args.action == "create":
         if not args.name:
@@ -1083,25 +1348,41 @@ def cmd_snap(args, conf):
             print(f"  parando {len(estaban)} nodo(s) para poder congelar")
             _set_state(s, pid, estaban, "stop")
             time.sleep(2)
-        st, body = s.post(f"/v2/projects/{pid}/snapshots", {"name": args.name})
-        msg = body.get("message") if isinstance(body, dict) else body
-        print(f"  crear '{args.name}' -> [{st}]" + (f" {msg}" if st not in (200, 201) else ""))
+        st, body = c.snapshot_create(pid, args.name)
+        print(f"  crear '{args.name}' -> [{st}]"
+              + ("" if st in (200, 201) else f" {_err(body)}"))
         if estaban:
             print(f"  arrancando de nuevo {len(estaban)} nodo(s)")
             _set_state(s, pid, estaban, "start")
         return 0 if st in (200, 201) else 1
-    if args.action == "restore":
+    if args.action in ("restore", "delete"):
         if not args.name:
-            raise SystemExit("falta el nombre del snapshot")
+            raise SystemExit(f"falta el nombre del snapshot para {args.action}")
+        snaps = c.snapshots(pid)
+        if not snaps:
+            nombre = proj.get("name")
+            raise SystemExit(f"'{nombre}' no tiene snapshots")
+        snap = _resolve_id(snaps, args.name, "snapshot_id", "snapshot")
+        sid = str(snap["snapshot_id"])
+        if args.action == "delete":
+            st, body = c.snapshot_delete(pid, sid)
+            if st not in (200, 204):
+                print(f"no se pudo borrar '{args.name}': [{st}] {_err(body)}", file=sys.stderr)
+                return 1
+            nombre_snap = snap.get("name")
+            print(f"  borrado '{nombre_snap}' ({sid[:8]}); "
+                  f"quedan {len(c.snapshots(pid))}")
+            return 0
         nodos = s.nodes(pid)
         estaban = [n["node_id"] for n in nodos if n.get("status") == "started"]
         if estaban:
             print(f"  parando {len(estaban)} nodo(s) para restaurar")
             _set_state(s, pid, estaban, "stop")
             time.sleep(2)
-        st, body = s.post(f"/v2/projects/{pid}/snapshots/{args.name}/restore", {}, timeout=300)
-        msg = body.get("message") if isinstance(body, dict) else body
-        print(f"  restaurar '{args.name}' -> [{st}]" + (f" {msg}" if st not in (200, 201) else ""))
+        st, body = c.snapshot_restore(pid, sid)
+        nombre_snap = snap.get("name")
+        print(f"  restaurar '{nombre_snap}' -> [{st}]"
+              + ("" if st in (200, 201) else f" {_err(body)}"))
         if estaban:
             print(f"  arrancando {len(estaban)} nodo(s)")
             _set_state(s, pid, estaban, "start")
@@ -1116,10 +1397,15 @@ def _core_client(s: Server) -> "core.Client":
     return core.Client(s.url, s.auth, s.matcher, s.name)
 
 
-def _core_target(s: Server, project: str | None, node: str | None):
+def _core_project(s: Server, project: str | None):
     c = _core_client(s)
     proj = c.resolve_project(project)
     c.ensure_open(proj["project_id"])
+    return c, proj
+
+
+def _core_target(s: Server, project: str | None, node: str | None):
+    c, proj = _core_project(s, project)
     if node is None:
         raise SystemExit("falta el nombre del nodo")
     obj = c.find_node(proj["project_id"], node)
@@ -1153,6 +1439,72 @@ def cmd_exec(args, conf):
                 fails += 1
             print()
         return 1 if fails else 0
+    finally:
+        con.close()
+
+
+def cmd_console(args, conf):
+    """Consola única del nodo: interactiva por stdin o `--send` sin TTY.
+
+    Es el atajo contra el VNC: una sola sesión telnet con prompt real, en vez de
+    abrir y cerrar el socket en cada comando. `exit` (o Ctrl-D) sale sin mandar nada
+    al nodo. En un nodo gráfico se remite a `shot`/`type`/`key`, igual que `exec`.
+    """
+    s = Server(args.server, conf)
+    c, proj, node = _core_target(s, args.project, args.node)
+    if node.get("status") != "started":
+        print(f"{node['name']} no está arrancado (status={node.get('status')})", file=sys.stderr)
+        return 1
+    try:
+        con = core.console_for(c, proj["project_id"], node)
+    except core.ConsoleError as e:
+        print(str(e), file=sys.stderr)
+        print("  consola gráfica: usa `gns3lab shot`, `gns3lab type` o `gns3lab key` "
+              "(el VNC es el último recurso)", file=sys.stderr)
+        return 1
+    try:
+        ready = con.wait_ready(timeout=args.ready_timeout)
+        print(f"{proj['name']} / {node['name']}  prompt={ready.get('prompt')!r} "
+              f"ready={ready.get('ready')}", file=sys.stderr)
+        if args.send:
+            fails = 0
+            for cmd in args.send:
+                r = con.run(cmd, expect=args.expect, idle=args.idle, timeout=args.timeout)
+                if r["output"]:
+                    print(r["output"])
+                if r["timed_out"]:
+                    print(f"  [timeout tras {r['ms']} ms — la salida no se estabilizó]",
+                          file=sys.stderr)
+                    fails += 1
+            return 1 if fails else 0
+
+        if sys.stdin.isatty():
+            print("escribe comandos; `exit` para salir", file=sys.stderr)
+        while True:
+            sys.stderr.write(f"{node['name']}> ")
+            sys.stderr.flush()
+            linea = sys.stdin.readline()
+            if not linea:                    # EOF: tubería cerrada o Ctrl-D
+                sys.stderr.write("\n")
+                break
+            linea = linea.rstrip("\r\n")
+            if linea.strip().lower() in ("exit", "quit", "salir"):
+                break
+            if not linea.strip():
+                continue
+            try:
+                r = con.run(linea, expect=args.expect, idle=args.idle, timeout=args.timeout)
+            except core.ConsoleError as e:
+                print(f"consola cerrada: {e}", file=sys.stderr)
+                return 1
+            if r["output"]:
+                print(r["output"])
+            if r["timed_out"]:
+                print(f"  [timeout tras {r['ms']} ms]", file=sys.stderr)
+        return 0
+    except KeyboardInterrupt:
+        print("\nsalgo", file=sys.stderr)
+        return 130
     finally:
         con.close()
 
@@ -1290,6 +1642,27 @@ def cmd_node(args, conf):
     node = c.find_node(pid, args.node)
     nid = node["node_id"]
 
+    if act in ("start", "stop", "reload", "suspend"):
+        want = {"start": "started", "stop": "stopped", "reload": "started",
+                "suspend": "suspended"}[act]
+        st, body = c.node_action(pid, nid, act)
+        if st not in (200, 201, 204):
+            print(f"{node['name']} {act} falló: [{st}] {_err(body)}", file=sys.stderr)
+            return 1
+        estado = _wait_node_status(c, pid, nid, want, timeout=args.wait)
+        ok = estado == want
+        print(f"{node['name']}: {act} -> status={estado}"
+              + ("" if ok else f" (no llegó a {want} en {args.wait:.0f} s)"))
+        return 0 if ok else 1
+
+    if act == "line":
+        cmdline = c.node_command_line(pid, nid)
+        if not cmdline:
+            print(f"{node['name']}: la API no devuelve command_line", file=sys.stderr)
+            return 1
+        print(cmdline)
+        return 0
+
     if act == "rm":
         st, _ = c.delete(f"/v2/projects/{pid}/nodes/{nid}", timeout=120)
         print(f"{node['name']} borrado={st in (200, 204)}")
@@ -1402,8 +1775,7 @@ def cmd_upload(args, conf):
             tmp = None
     data = payload.read_bytes()
     print(f"subiendo {name} ({len(data)/2**20:.0f} MB)")
-    st, body = c.req("POST", f"/v2/computes/local/qemu/images/{name}", data=data,
-                     ctype="application/octet-stream", timeout=1800)
+    st, body = c.compute_write_file("local", "qemu", name, data)
     if tmp:
         tmp.unlink(missing_ok=True)
     if st not in (200, 201, 204):
@@ -1415,27 +1787,95 @@ def cmd_upload(args, conf):
     return 0 if name in listed else 1
 
 
+def _draw_text(svg: str) -> str:
+    """Texto visible de una nota SVG, para listarla sin volcar el SVG entero."""
+    trozos = re.findall(r"<text[^>]*>(.*?)</text>", svg or "", re.S)
+    return " | ".join(re.sub(r"<[^>]+>", "", t).strip() for t in trozos if t.strip())
+
+
+DRAW_FIELDS = {"x", "y", "z", "rotation", "locked", "svg"}
+
+
 def cmd_draw(args, conf):
-    """Nota de texto en el canvas (direccionamiento, VLANs, contraseñas)."""
+    """Notas del canvas: crear con texto, list, edit <id> --set k=v y rm <id>."""
     s = Server(args.server, conf)
     c = _core_client(s)
     proj = c.resolve_project(args.project)
     pid = proj["project_id"]
     c.ensure_open(pid)
-    w = max(220, 9 * len(args.text))
+    palabras = args.text
+    act = palabras[0].lower() if palabras else "list"
+
+    if act in ("list", "ls"):
+        notas = c.drawings(pid)
+        if not notas:
+            print("  sin notas")
+            return 0
+        for d in notas:
+            texto = _draw_text(d.get("svg", "")) or "(sin texto)"
+            print(f"  {str(d.get('drawing_id'))[:8]}  x={d.get('x')} y={d.get('y')}  "
+                  f"{texto[:72]}")
+        return 0
+
+    if act in ("edit", "rm"):
+        if len(palabras) < 2:
+            raise SystemExit(f"{act} exige el drawing_id "
+                             "(míralos con `gns3lab draw list`)")
+        nota = _resolve_id(c.drawings(pid), palabras[1], "drawing_id", "nota")
+        did = nota["drawing_id"]
+        if act == "rm":
+            st, res = c.drawing_delete(pid, did)
+            if st not in (200, 204):
+                print(f"no se pudo borrar la nota {did[:8]}: [{st}] {_err(res)}",
+                      file=sys.stderr)
+                return 1
+            print(f"nota {did[:8]} borrada; quedan {len(c.drawings(pid))}")
+            return 0
+        body = _set_body(args.set)
+        if not body:
+            raise SystemExit("edit exige --set clave=valor (repetible)")
+        raros = sorted(set(body) - DRAW_FIELDS)
+        if raros:
+            raise SystemExit(f"campos no editables en una nota: {', '.join(raros)}. "
+                             f"Válidos: {', '.join(sorted(DRAW_FIELDS))}")
+        st, res = c.drawing_update(pid, did, body)
+        if st not in (200, 201):
+            print(f"no se pudo editar la nota {did[:8]}: [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        # Releer: un 200 del PUT no prueba que el campo haya cambiado.
+        st, check = c.get(f"/v2/projects/{pid}/drawings/{did}")
+        if st != 200 or not isinstance(check, dict):
+            print(f"editada {did[:8]}, pero no puedo releerla: [{st}] {_err(check)}",
+                  file=sys.stderr)
+            return 1
+        print(f"nota {did[:8]}: " + ", ".join(f"{k}={check.get(k)!r}" for k in body))
+        malos = {k: {"pedido": v, "leído": check.get(k)}
+                 for k, v in body.items() if check.get(k) != v}
+        if malos:
+            print(f"  la API no aplicó: {malos}", file=sys.stderr)
+            return 1
+        return 0
+
+    texto = " ".join(palabras)
+    w = max(220, 9 * len(texto))
     svg = (f'<svg width="{w}" height="60" viewBox="0 0 {w} 60" xmlns="http://www.w3.org/2000/svg">'
            f'<rect width="{w}" height="60" fill="none" stroke="{args.color}" stroke-width="2" rx="6"/>'
            f'<text x="8" y="24" font-size="14" fill="{args.color}">'
-           f'{args.text.replace("&", "&amp;").replace("<", "&lt;")}</text></svg>')
-    st, body = c.post(f"/v2/projects/{pid}/drawings",
-                     {"x": args.x, "y": args.y, "z": 0, "rotation": 0, "svg": svg})
+           f'{texto.replace("&", "&amp;").replace("<", "&lt;")}</text></svg>')
+    st, body = c.drawing_create(pid, {"x": args.x, "y": args.y, "z": 0,
+                                      "rotation": 0, "svg": svg})
     ok = st in (200, 201)
-    print(f"nota {'creada' if ok else body}")
-    return 0 if ok else 1
+    if not ok:
+        print(f"no se pudo crear la nota: [{st}] {_err(body)}", file=sys.stderr)
+        return 1
+    did = str(body.get("drawing_id") or "") if isinstance(body, dict) else ""
+    print(f"nota creada {did[:8]}")
+    return 0
 
 
 def cmd_link(args, conf):
-    """Enlaces: list, add <nodoA> <nodoB> [--pa N --pb N], rm <link_id>."""
+    """Enlaces: list, add <nodoA> <nodoB> [--pa N --pb N], rm <link_id>, edit."""
     s = Server(args.server, conf)
     c = _core_client(s)
     proj = c.resolve_project(args.project)
@@ -1465,13 +1905,103 @@ def cmd_link(args, conf):
         print(f"{a['name']}:{args.pa}/{args.ppa} <-> {b['name']}:{args.pb}/{args.ppb}  "
               f"({res.get('link_id', '')[:8]})")
         return 0
-    if args.action == "rm":
+    if args.action in ("rm", "edit"):
         if not args.nodes:
-            raise SystemExit("rm exige el link_id")
-        st, _ = c.delete(f"/v2/projects/{pid}/links/{args.nodes[0]}")
-        print(f"borrado={st in (200, 204)}")
-        return 0 if st in (200, 204) else 1
+            raise SystemExit(f"{args.action} exige el link_id")
+        enlace = _resolve_id(c.links(pid), args.nodes[0], "link_id", "enlace")
+        lid = enlace["link_id"]
+        if args.action == "rm":
+            st, res = c.link_delete(pid, lid)
+            print(f"borrado={st in (200, 204)}"
+                  + ("" if st in (200, 204) else f" [{st}] {_err(res)}"))
+            return 0 if st in (200, 204) else 1
+        body = _set_body(args.set)
+        if not body:
+            raise SystemExit("edit exige --set clave=valor (repetible)")
+        st, res = c.link_update(pid, lid, body)
+        if st not in (200, 201):
+            print(f"no se pudo editar el enlace {lid[:8]}: [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        # Se relee el enlace: el 200 del PUT no prueba que el campo haya cambiado.
+        st, check = c.get(f"/v2/projects/{pid}/links/{lid}")
+        if st != 200 or not isinstance(check, dict):
+            print(f"editado {lid[:8]}, pero no puedo releerlo: [{st}] {_err(check)}",
+                  file=sys.stderr)
+            return 1
+        print(f"enlace {lid[:8]}: " + ", ".join(f"{k}={check.get(k)!r}" for k in body))
+        malos = {k: {"pedido": v, "leído": check.get(k)}
+                 for k, v in body.items() if check.get(k) != v}
+        if malos:
+            print(f"  la API no aplicó: {malos}", file=sys.stderr)
+            return 1
+        return 0
     raise SystemExit(f"acción desconocida: {args.action}")
+
+
+def cmd_capture(args, conf):
+    """Captura de un enlace: start, stop y descarga del pcap.
+
+    Sólo arranca o para la captura que se le pide; no toca nada más del proyecto.
+    """
+    s = Server(args.server, conf)
+    c, proj = _core_project(s, args.project)
+    pid = proj["project_id"]
+    enlace = _resolve_id(c.links(pid), args.link, "link_id", "enlace")
+    lid = enlace["link_id"]
+    act = args.action
+
+    if act == "start":
+        st, res = c.link_capture(pid, lid, "start")
+        if st not in (200, 201):
+            print(f"no se pudo iniciar la captura de {lid[:8]}: [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        st2, check = c.get(f"/v2/projects/{pid}/links/{lid}")
+        estado = check.get("capturing") if isinstance(check, dict) else None
+        nombre = check.get("capture_file_name") if isinstance(check, dict) else None
+        print(f"captura iniciada en {lid[:8]} -> capturing={estado} "
+              f"({nombre or 'sin nombre'})")
+        print(f"  párala con `gns3lab capture {lid[:8]} stop`")
+        return 0
+
+    if act == "stop":
+        st, res = c.link_capture(pid, lid, "stop")
+        ok = st in (200, 201, 204)
+        if not ok:
+            print(f"no se pudo parar la captura de {lid[:8]}: [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        st2, check = c.get(f"/v2/projects/{pid}/links/{lid}")
+        estado = check.get("capturing") if isinstance(check, dict) else None
+        print(f"captura parada en {lid[:8]} -> capturing={estado}")
+        return 0
+
+    if act == "pcap":
+        st, data = c.link_capture(pid, lid, "pcap")
+        if st != 200 or not isinstance(data, bytes) or not data:
+            detalle = data.decode(errors="replace")[:200] if isinstance(data, bytes) else data
+            # Con la captura parada la API puede dar 409: el fichero queda en el proyecto.
+            proyecto = c.project_get(pid)
+            base = Path(proyecto.get("path") or "") if isinstance(proyecto, dict) else None
+            cands = sorted((base / "project-files" / "captures").glob("*.pcap"),
+                           key=lambda p: p.stat().st_mtime, reverse=True) \
+                if base and base.is_dir() else []
+            if not cands:
+                print(f"no pude descargar el pcap de {lid[:8]}: [{st}] {detalle}",
+                      file=sys.stderr)
+                return 1
+            data = cands[0].read_bytes()
+            print(f"  aviso: GET .../pcap -> [{st}] {detalle}; uso {cands[0].name}",
+                  file=sys.stderr)
+        destino_dir = Path.home() / "GNS3/captures"
+        destino_dir.mkdir(parents=True, exist_ok=True)
+        destino = destino_dir / f"cap-{time.strftime('%Y%m%d-%H%M%S')}-{lid[:8]}.pcap"
+        destino.write_bytes(data)
+        print(f"{destino}  ({len(data)/1024:.1f} KB)")
+        return 0
+
+    raise SystemExit(f"acción de captura desconocida: {act}")
 
 
 def _emit_doctor(report: dict, lineas: list[str], as_json: bool) -> None:
@@ -1610,6 +2140,21 @@ def main() -> int:
 
     sub.add_parser("servers", help="servidores configurados y estado")
 
+    p = sub.add_parser("compute", help="compute(s): conexión, CPU y memoria")
+    p.add_argument("cid", nargs="?", help="compute_id o nombre (sin él, todos)")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("stats", help="estadísticas del servidor")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("symbols", help="símbolos de dispositivo del servidor")
+    p.add_argument("--filter", help="texto en el id, el fichero o el tema")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("appliances", help="appliances del catálogo GNS3")
+    p.add_argument("--filter", help="texto en nombre, categoría o descripción")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
     for name, help_ in (("status", "proyectos y nodos"), ("up", "abre y arranca todo"),
                         ("down", "para todo"), ("test", "conectividad de las VPCS"),
                         ("fix", "repara un proyecto importado")):
@@ -1638,28 +2183,42 @@ def main() -> int:
                    help="subir el qcow2 tal cual (mucho más pesado)")
     p.set_defaults(compress=True)
 
-    sub.add_parser("images", help="imágenes QEMU del servidor")
+    p = sub.add_parser("images", help="imágenes del compute local")
+    p.add_argument("--emulator", default="qemu", help="qemu, docker, iou... (por defecto qemu)")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
     sub.add_parser("templates", help="plantillas del servidor")
 
-    p = sub.add_parser("template", help="plantillas: list, create, delete")
-    p.add_argument("action", choices=["list", "create", "delete"])
-    p.add_argument("target", nargs="?", help="delete: nombre o id de la plantilla")
+    p = sub.add_parser("template", help="plantillas: list, create, update, delete")
+    p.add_argument("action", choices=["list", "create", "update", "delete"])
+    p.add_argument("target", nargs="?", help="update/delete: nombre o id de la plantilla")
     p.add_argument("--json", action="store_true", help="list: objeto JSON")
     p.add_argument("--from-node", dest="from_node",
                    help="create: nodo del que copiar tipo y properties")
     p.add_argument("--type", help="create: tipo sin nodo de origen (qemu, vpcs, docker...)")
     p.add_argument("--name", help="create: nombre de la plantilla")
     p.add_argument("--console", type=int, help="create: puerto de consola de la plantilla")
-    p.add_argument("--set", action="append", default=[], help="create: clave=valor (repetible)")
+    p.add_argument("--set", action="append", default=[],
+                   help="create/update: clave=valor (repetible)")
     p.add_argument("-p", "--project", help="create --from-node: proyecto del nodo")
     p.add_argument("--yes", action="store_true", help="delete: no pedir confirmación")
 
-    p = sub.add_parser("snap", help="snapshots")
-    p.add_argument("action", choices=["list", "create", "restore"])
+    p = sub.add_parser("snap", help="snapshots: list, create, restore, delete")
+    p.add_argument("action", choices=["list", "create", "restore", "delete"])
     p.add_argument("name", nargs="?")
     p.add_argument("project", nargs="?")
 
     # -- consola sin VNC ---------------------------------------------------- #
+    p = sub.add_parser("console", help="consola única del nodo (interactiva o --send)")
+    p.add_argument("node")
+    p.add_argument("-p", "--project")
+    p.add_argument("--send", action="append",
+                   help="comando a enviar sin abrir stdin (repetible)")
+    p.add_argument("--expect", help="regex que cierra la lectura")
+    p.add_argument("--idle", type=float, default=0.9, help="segundos de quietud por comando")
+    p.add_argument("--timeout", type=float, default=20.0)
+    p.add_argument("--ready-timeout", dest="ready_timeout", type=float, default=30.0)
+
     p = sub.add_parser("exec", help="comandos por la consola telnet del nodo")
     p.add_argument("node")
     p.add_argument("commands", nargs="+")
@@ -1703,8 +2262,9 @@ def main() -> int:
     p = sub.add_parser("new", help="crea un proyecto vacío y lo abre")
     p.add_argument("name")
 
-    p = sub.add_parser("node", help="nodos: add, rm, dup, props, switch, disk")
-    p.add_argument("action", choices=["add", "rm", "dup", "props", "switch", "disk"])
+    p = sub.add_parser("node", help="nodos: add, rm, dup, props, switch, disk, start...")
+    p.add_argument("action", choices=["add", "rm", "dup", "props", "switch", "disk",
+                                      "start", "stop", "reload", "suspend", "line"])
     p.add_argument("node", nargs="?")
     p.add_argument("-p", "--project")
     p.add_argument("--template", help="add: nombre o id de plantilla")
@@ -1713,6 +2273,8 @@ def main() -> int:
     p.add_argument("--port", action="append", default=[],
                    help="switch: N=tipo[:vlan], p. ej. 1=access:20")
     p.add_argument("--from-disk", dest="from_disk", help="disk: qcow2 origen")
+    p.add_argument("--wait", type=float, default=45.0,
+                   help="start/stop/reload/suspend: segundos a esperar el estado")
     p.add_argument("-x", "--x", type=int, default=0)
     p.add_argument("-y", "--y", type=int, default=0)
 
@@ -1721,17 +2283,25 @@ def main() -> int:
     p.add_argument("--name", help="nombre en el servidor")
     p.add_argument("--no-compress", dest="compress", action="store_false")
 
-    p = sub.add_parser("draw", help="nota de texto en el canvas")
-    p.add_argument("text")
+    p = sub.add_parser("draw", help="notas: texto, list, edit <id>, rm <id>")
+    p.add_argument("text", nargs="+", help="texto de la nota, o list|edit|rm")
+    p.add_argument("--set", action="append", default=[],
+                   help="edit: clave=valor (x, y, z, rotation, locked, svg)")
     p.add_argument("-p", "--project")
     p.add_argument("-x", "--x", type=int, default=0)
     p.add_argument("-y", "--y", type=int, default=0)
     p.add_argument("--color", default="#ffffff")
 
-    p = sub.add_parser("link", help="enlaces: list, add, rm")
-    p.add_argument("action", choices=["list", "add", "rm"])
+    p = sub.add_parser("capture", help="captura de un enlace: start, stop, pcap")
+    p.add_argument("link", help="link_id o prefijo (míralos con `gns3lab link list`)")
+    p.add_argument("action", choices=["start", "stop", "pcap"])
+    p.add_argument("-p", "--project")
+
+    p = sub.add_parser("link", help="enlaces: list, add, rm, edit")
+    p.add_argument("action", choices=["list", "add", "rm", "edit"])
     p.add_argument("nodes", nargs="*")
     p.add_argument("-p", "--project")
+    p.add_argument("--set", action="append", default=[], help="edit: clave=valor (repetible)")
     p.add_argument("--pa", type=int, default=0, help="adapter del primer nodo")
     p.add_argument("--pb", type=int, default=0, help="adapter del segundo nodo")
     p.add_argument("--ppa", type=int, default=0, help="puerto del primer nodo")
@@ -1747,15 +2317,18 @@ def main() -> int:
     handlers = {
         "servers": cmd_servers, "status": cmd_status, "up": cmd_up, "down": cmd_down,
         "test": cmd_test, "export": cmd_export, "import": cmd_import, "fix": cmd_fix,
-        "port": cmd_port,
+        "port": cmd_port, "compute": cmd_compute, "stats": cmd_stats,
+        "symbols": cmd_symbols, "appliances": cmd_appliances,
         "images": cmd_images, "templates": cmd_templates, "snap": cmd_snap,
         "template": cmd_template,
-        "exec": cmd_exec, "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
+        "console": cmd_console, "capture": cmd_capture, "exec": cmd_exec,
+        "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
         "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
         "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
     }
     needs_core = {"exec", "shot", "key", "type", "mon", "new", "node", "upload", "draw",
-                  "link", "doctor"}
+                  "link", "doctor", "compute", "stats", "symbols", "appliances",
+                  "console", "capture", "snap", "template", "images"}
     if args.cmd in needs_core and core is None:
         print("falta el núcleo gns3core: revisa ~/Applications/gns3-mcp/gns3core.py",
               file=sys.stderr)
