@@ -1,0 +1,1171 @@
+#!/usr/bin/env python3
+"""MCP server para GNS3 2.2 (API REST v2) — local, sin secretos en el prompt.
+
+Credenciales y rutas salen de ~/.config/GNS3/2.2/gns3_server.conf
+(override por env: GNS3_URL, GNS3_USER, GNS3_PASSWORD).
+
+Transporte: stdio. Uso: gns3-mcp  (o python -m gns3_mcp_server)
+"""
+from __future__ import annotations
+
+import configparser
+import fnmatch
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import time
+import unicodedata
+import uuid
+from pathlib import Path
+from typing import Any, Optional
+
+import httpx
+from fastmcp import FastMCP
+
+import gns3core as core
+
+CONF = Path(os.path.expanduser("~/.config/GNS3/2.2/gns3_server.conf"))
+
+mcp = FastMCP("gns3")
+
+
+# ────────────────────────────── configuración ──────────────────────────────
+def _conf() -> dict[str, str]:
+    cfg = configparser.ConfigParser()
+    data = {"host": "127.0.0.1", "port": "3080", "user": "admin", "password": ""}
+    if CONF.exists():
+        cfg.read(CONF)
+        sec = cfg["Server"] if cfg.has_section("Server") else {}
+        for k in ("host", "port", "user", "password"):
+            if sec.get(k):
+                data[k] = sec[k]
+        data["images_path"] = sec.get("images_path", "")
+        data["projects_path"] = sec.get("projects_path", "")
+        data["appliances_path"] = sec.get("appliances_path", "")
+        data["configs_path"] = sec.get("configs_path", "")
+        data["ubridge_path"] = sec.get("ubridge_path", "")
+    host = data["host"]
+    if host in ("localhost", "0.0.0.0"):
+        host = "127.0.0.1"
+    data["url"] = os.environ.get("GNS3_URL", f"http://{host}:{data['port']}")
+    data["user"] = os.environ.get("GNS3_USER", data["user"])
+    data["password"] = os.environ.get("GNS3_PASSWORD", data["password"])
+    return data
+
+
+def _api(method: str, path: str, body: Any = None, timeout: float = 60.0, raw: bool = False):
+    c = _conf()
+    url = c["url"] + path
+    try:
+        r = httpx.request(
+            method,
+            url,
+            json=body,
+            auth=(c["user"], c["password"]),
+            timeout=timeout,
+            headers={"Content-Type": "application/json"},
+        )
+    except httpx.HTTPError as e:
+        return {"error": "no se pudo conectar con el servidor GNS3", "url": url, "detail": str(e)}
+    if r.status_code >= 400:
+        return {"error": f"HTTP {r.status_code}", "path": path, "detail": r.text[:1500]}
+    if raw:
+        return r.content
+    if not r.content:
+        return None
+    try:
+        return r.json()
+    except json.JSONDecodeError:
+        return {"body": r.text[:2000]}
+
+
+def _server_up() -> tuple[bool, Any]:
+    info = _api("GET", "/v2/version", timeout=5)
+    if isinstance(info, dict) and info.get("error"):
+        return False, info
+    return True, info
+
+
+# ────────────────────────────── helpers ──────────────────────────────
+def _projects() -> list[dict]:
+    return _api("GET", "/v2/projects") or []
+
+
+def _resolve_project(project_id: Optional[str], name: Optional[str] = None) -> tuple[Optional[str], Optional[dict]]:
+    projs = _projects()
+    if not isinstance(projs, list):
+        return None, None
+    if project_id:
+        return project_id, next((p for p in projs if p["project_id"] == project_id), None)
+    if name:
+        for p in projs:
+            if p["name"].lower() == name.lower():
+                return p["project_id"], p
+        return None, None
+    opened = [p for p in projs if p.get("status") == "opened"]
+    if len(opened) == 1:
+        return opened[0]["project_id"], opened[0]
+    if len(projs) == 1:
+        return projs[0]["project_id"], projs[0]
+    return None, None
+
+
+def _nodes(project_id: str) -> list[dict]:
+    res = _api("GET", f"/v2/projects/{project_id}/nodes")
+    return res if isinstance(res, list) else []
+
+
+def _ensure_open(project_id: str) -> Optional[dict]:
+    """Abre el proyecto si está cerrado (GNS3 responde 403 'project is not opened' si no)."""
+    info = _api("GET", f"/v2/projects/{project_id}")
+    if not isinstance(info, dict) or info.get("error"):
+        return info if isinstance(info, dict) else None
+    if info.get("status") in ("opened", "closed", None):
+        if info.get("status") == "opened":
+            return None
+        res = _api("POST", f"/v2/projects/{project_id}/open", timeout=300)
+        if isinstance(res, dict) and res.get("error"):
+            return res
+        return None
+    return None
+
+
+def _match_nodes(nodes: list[dict], pattern: Optional[str]) -> list[dict]:
+    if not pattern:
+        return []
+    if pattern in ("*", "all"):
+        return nodes
+    if "," in pattern or pattern.strip().startswith("["):
+        pats = [p.strip() for p in pattern.strip("[]").replace(",", " ").split()] or [pattern]
+    else:
+        pats = [pattern]
+    out = []
+    for n in nodes:
+        for pat in pats:
+            if n["name"].lower() == pat.lower() or fnmatch.fnmatch(n["name"].lower(), pat.lower()):
+                out.append(n)
+                break
+        else:
+            if n.get("node_id") == pattern:
+                out.append(n)
+    return out
+
+
+def _node_summary(n: dict) -> dict:
+    return {
+        "name": n.get("name"),
+        "node_id": n.get("node_id"),
+        "type": n.get("node_type"),
+        "status": n.get("status"),
+        "console": n.get("console"),
+        "ports": [p.get("name") for p in (n.get("ports") or [])],
+    }
+
+
+def _clean(text: str) -> str:
+    text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
+    text = text.replace("\x00", "")
+    return text
+
+
+def _console_port(project_id: str, node: dict) -> tuple[Optional[str], Optional[int]]:
+    port = node.get("console")
+    host = node.get("console_host") or "127.0.0.1"
+    if port in (None, 0):
+        full = _api("GET", f"/v2/projects/{project_id}/nodes/{node['node_id']}")
+        if isinstance(full, dict):
+            port = full.get("console")
+            host = full.get("console_host") or host
+    return host, port
+
+
+def _telnet(host: str, port: int, commands: list[str], settle: float, timeout: float,
+            ready_timeout: float = 25.0) -> str:
+    s = socket.create_connection((host, port), timeout=timeout)
+    s.settimeout(0.4)
+    buf = b""
+
+    def drain(until: float) -> None:
+        nonlocal buf
+        while time.time() < until:
+            try:
+                chunk = s.recv(65535)
+                if not chunk:
+                    return
+                buf += chunk
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+
+    try:
+        s.sendall(b"\n")
+        # esperar prompt real: algunos discos se quedan en el menú de GRUB y hay que pulsar Enter
+        deadline = time.time() + ready_timeout
+        grub_hits = 0
+        while time.time() < deadline:
+            drain(time.time() + 0.6)
+            tail = _clean(buf.decode(errors="replace"))[-600:]
+            if "GNU GRUB" in tail and grub_hits < 3:
+                s.sendall(b"\n")
+                grub_hits += 1
+                time.sleep(1.5)
+                continue
+            if re.search(r"[#>] ?$", tail):
+                break
+        for cmd in commands:
+            s.sendall(cmd.encode() + b"\n")
+            drain(time.time() + settle)
+        drain(time.time() + 0.5)
+    finally:
+        s.close()
+    return _clean(buf.decode(errors="replace"))
+
+
+# ────────────────────────────── tools ──────────────────────────────
+@mcp.tool
+def gns3_status() -> dict:
+    """Estado del servidor GNS3 local: versión, computes y proyecto abierto."""
+    up, info = _server_up()
+    if not up:
+        return {"running": False, "detail": info}
+    computes = _api("GET", "/v2/computes") or []
+    projs = _projects()
+    opened = [p["name"] for p in projs if p.get("status") == "opened"] if isinstance(projs, list) else []
+    c = _conf()
+    return {
+        "running": True,
+        "version": info.get("version") if isinstance(info, dict) else info,
+        "url": c["url"],
+        "local": info.get("local") if isinstance(info, dict) else None,
+        "computes": [{"id": x.get("compute_id"), "name": x.get("name"), "connected": x.get("connected")} for x in computes],
+        "projects": len(projs) if isinstance(projs, list) else 0,
+        "opened_projects": opened,
+        "paths": {k: c.get(k) for k in ("images_path", "projects_path", "appliances_path", "configs_path", "ubridge_path")},
+    }
+
+
+@mcp.tool
+def gns3_projects(action: str = "list", name: Optional[str] = None, project_id: Optional[str] = None,
+                  project_name: Optional[str] = None) -> Any:
+    """Proyectos: action=list|create|open|close|delete|info. Identifica por project_id, name o project_name."""
+    action = action.lower()
+    name = name or project_name
+    if action == "list":
+        projs = _projects()
+        return [
+            {"name": p["name"], "project_id": p["project_id"], "status": p["status"],
+             "path": p.get("path"), "filename": p.get("filename")}
+            for p in projs
+        ] if isinstance(projs, list) else projs
+    if action == "create":
+        if not name:
+            return {"error": "name es obligatorio para create"}
+        path = os.path.join(_conf().get("projects_path") or os.path.expanduser("~/GNS3/projects"), name)
+        return _api("POST", "/v2/projects", {"name": name, "path": path})
+    pid, proj = _resolve_project(project_id, name)
+    if not pid:
+        return {"error": "proyecto no encontrado", "project_id": project_id, "name": name}
+    if action == "open":
+        _api("POST", f"/v2/projects/{pid}/open", timeout=180)
+    elif action == "close":
+        _api("POST", f"/v2/projects/{pid}/close", timeout=180)
+    elif action == "delete":
+        _api("DELETE", f"/v2/projects/{pid}")
+        return {"deleted": True, "project_id": pid}
+    elif action != "info":
+        return {"error": f"acción desconocida: {action}"}
+    info = _api("GET", f"/v2/projects/{pid}")
+    return info if isinstance(info, dict) else {"project_id": pid, "detail": info}
+
+
+@mcp.tool
+def gns3_templates(kind: Optional[str] = None) -> Any:
+    """Plantillas del servidor (qemu, docker, vpcs, iou, dynamips...). kind filtra por template_type."""
+    tpls = _api("GET", "/v2/templates")
+    if not isinstance(tpls, list):
+        return tpls
+    out = []
+    for t in tpls:
+        if kind and t.get("template_type") != kind:
+            continue
+        out.append({
+            "name": t.get("name"),
+            "template_id": t.get("template_id"),
+            "type": t.get("template_type"),
+            "image": t.get("hda_disk_image") or t.get("image") or t.get("cdrom_image") or "",
+            "adapters": t.get("adapters"),
+            "ram": t.get("ram"),
+        })
+    return out
+
+
+@mcp.tool
+def gns3_nodes(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    action: str = "list",
+    node: Optional[str] = None,
+    template: Optional[str] = None,
+    x: int = 0,
+    y: int = 0,
+) -> Any:
+    """Nodos: action=list|add|start|stop|reload|suspend|delete.
+    `node` acepta nombre, patrón (*, Router*, R[12]) o node_id; `template` es nombre o template_id."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado", "project_id": project_id, "project_name": project_name}
+    err = _ensure_open(pid)
+    if err:
+        return {"error": "no se pudo abrir el proyecto", "detail": err}
+    action = action.lower()
+
+    if action == "add":
+        if not template:
+            return {"error": "template es obligatorio para add"}
+        tpls = _api("GET", "/v2/templates") or []
+        tpl = next((t for t in tpls if t.get("template_id") == template), None) or next(
+            (t for t in tpls if str(t.get("name", "")).lower() == template.lower()), None)
+        if not tpl:
+            return {"error": f"plantilla no encontrada: {template}",
+                    "available": [t.get("name") for t in tpls]}
+        res = _api("POST", f"/v2/projects/{pid}/templates/{tpl['template_id']}", {"x": x, "y": y})
+        return _node_summary(res) if isinstance(res, dict) else res
+
+    nodes = _nodes(pid)
+    if not nodes:
+        return {"error": "el proyecto no está abierto o no tiene nodos", "project_id": pid}
+
+    if action == "list":
+        return [_node_summary(n) for n in nodes]
+
+    targets = _match_nodes(nodes, node)
+    if not targets:
+        return {"error": f"sin coincidencias para {node!r}", "available": [n["name"] for n in nodes]}
+
+    results = []
+    for t in targets:
+        nid = t["node_id"]
+        if action in ("start", "stop", "reload", "suspend"):
+            res = _api("POST", f"/v2/projects/{pid}/nodes/{nid}/{action}", timeout=180)
+        elif action == "delete":
+            res = _api("DELETE", f"/v2/projects/{pid}/nodes/{nid}", timeout=180)
+        else:
+            return {"error": f"acción desconocida: {action}"}
+        time.sleep(0.8)
+        state = _api("GET", f"/v2/projects/{pid}/nodes/{nid}")
+        results.append({
+            "name": t["name"],
+            "request_ok": not (isinstance(res, dict) and res.get("error")),
+            "status": state.get("status") if isinstance(state, dict) else None,
+            "detail": res if isinstance(res, dict) and res.get("error") else None,
+        })
+    return results
+
+
+@mcp.tool
+def gns3_links(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    action: str = "list",
+    link_id: Optional[str] = None,
+    node_a: Optional[str] = None,
+    node_b: Optional[str] = None,
+    adapter_a: int = 0,
+    port_a: int = 0,
+    adapter_b: int = 0,
+    port_b: int = 0,
+) -> Any:
+    """Enlaces: action=list|add|delete. add exige node_a y node_b (adaptadores/ puertos por defecto 0)."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado"}
+    err = _ensure_open(pid)
+    if err:
+        return {"error": "no se pudo abrir el proyecto", "detail": err}
+    action = action.lower()
+
+    if action == "list":
+        links = _api("GET", f"/v2/projects/{pid}/links") or []
+        nodes = {n["node_id"]: n["name"] for n in _nodes(pid)}
+        out = []
+        for l in links if isinstance(links, list) else []:
+            ends = []
+            for e in l.get("nodes", []):
+                ends.append({
+                    "node": nodes.get(e.get("node_id"), e.get("node_id")),
+                    "adapter": e.get("adapter_number"),
+                    "port": e.get("port_number"),
+                })
+            out.append({"link_id": l.get("link_id"), "ends": ends, "capturing": l.get("capturing"),
+                        "filters": l.get("filters")})
+        return out
+
+    if action == "add":
+        if not (node_a and node_b):
+            return {"error": "node_a y node_b son obligatorios"}
+        nodes = _nodes(pid)
+        ma, mb = _match_nodes(nodes, node_a), _match_nodes(nodes, node_b)
+        if not ma or not mb:
+            return {"error": "nodo no encontrado", "available": [n["name"] for n in nodes]}
+        body = {"nodes": [
+            {"node_id": ma[0]["node_id"], "adapter_number": adapter_a, "port_number": port_a},
+            {"node_id": mb[0]["node_id"], "adapter_number": adapter_b, "port_number": port_b},
+        ]}
+        link = _api("POST", f"/v2/projects/{pid}/links", body)
+        return link if not isinstance(link, dict) or not link.get("error") else link
+
+    if action == "delete":
+        if not link_id:
+            return {"error": "link_id es obligatorio"}
+        _api("DELETE", f"/v2/projects/{pid}/links/{link_id}")
+        return {"deleted": True, "link_id": link_id}
+
+    return {"error": f"acción desconocida: {action}"}
+
+
+@mcp.tool
+def gns3_topology(project_id: Optional[str] = None, project_name: Optional[str] = None) -> dict:
+    """Resumen legible de la topología: nodos con estado y enlaces con sus extremos."""
+    pid, proj = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado"}
+    err = _ensure_open(pid)
+    if err:
+        return {"error": "no se pudo abrir el proyecto", "detail": err}
+    nodes = _nodes(pid)
+    links = _api("GET", f"/v2/projects/{pid}/links") or []
+    names = {n["node_id"]: n["name"] for n in nodes}
+    started = sum(1 for n in nodes if n.get("status") == "started")
+    edges = []
+    for l in links if isinstance(links, list) else []:
+        ends = l.get("nodes", [])
+        if len(ends) == 2:
+            a = f"{names.get(ends[0]['node_id'], '?')}:{ends[0].get('adapter_number')}/{ends[0].get('port_number')}"
+            b = f"{names.get(ends[1]['node_id'], '?')}:{ends[1].get('adapter_number')}/{ends[1].get('port_number')}"
+            edges.append(f"{a} <-> {b}")
+    return {
+        "project": proj.get("name") if proj else pid,
+        "status": proj.get("status") if proj else None,
+        "nodes_total": len(nodes),
+        "nodes_started": started,
+        "nodes": [f"{n['name']} [{n.get('node_type')}] {n.get('status')} console={n.get('console')}" for n in nodes],
+        "links_total": len(edges),
+        "links": edges,
+    }
+
+
+@mcp.tool
+def gns3_console(
+    node: str,
+    commands: list[str],
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    settle: float = 1.5,
+    timeout: float = 20.0,
+    ready_timeout: float = 30.0,
+) -> dict:
+    """Ejecuta comandos en la consola telnet de un nodo y devuelve la salida.
+    `commands` es una lista, en orden. `settle` = segundos de espera por comando.
+    `ready_timeout` = espera máxima a que el nodo dé prompt (pulsa Enter si se queda en GRUB)."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado"}
+    err = _ensure_open(pid)
+    if err:
+        return {"error": "no se pudo abrir el proyecto", "detail": err}
+    nodes = _nodes(pid)
+    targets = _match_nodes(nodes, node)
+    if not targets:
+        return {"error": f"nodo no encontrado: {node}", "available": [n["name"] for n in nodes]}
+    t = targets[0]
+    if t.get("status") != "started":
+        return {"error": f"el nodo {t['name']} no está arrancado (status={t.get('status')})"}
+    host, port = _console_port(pid, t)
+    if not port:
+        return {"error": f"el nodo {t['name']} no expone consola telnet", "console_type": t.get("console_type")}
+    out = _telnet(host, int(port), commands, settle, timeout, ready_timeout)
+    return {"node": t["name"], "host": host, "port": port, "commands": commands, "output": out}
+
+
+@mcp.tool
+def gns3_capture(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    action: str = "start",
+    link_id: Optional[str] = None,
+    node_a: Optional[str] = None,
+    node_b: Optional[str] = None,
+    summary_lines: int = 40,
+) -> Any:
+    """Captura de un enlace: action=start|stop|read.
+    start/stop/read exigen link_id o (node_a y node_b) para localizarlo; read resume el pcap con tshark."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado"}
+    err = _ensure_open(pid)
+    if err:
+        return {"error": "no se pudo abrir el proyecto", "detail": err}
+    if not link_id:
+        if not (node_a and node_b):
+            return {"error": "indica link_id o node_a+node_b"}
+        links = _api("GET", f"/v2/projects/{pid}/links") or []
+        names = {n["node_id"]: n["name"] for n in _nodes(pid)}
+        for l in links if isinstance(links, list) else []:
+            endnames = [names.get(e["node_id"]) for e in l.get("nodes", [])]
+            if {node_a.lower(), node_b.lower()} <= {str(x).lower() for x in endnames if x}:
+                link_id = l["link_id"]
+                break
+        if not link_id:
+            return {"error": "no se encontró el enlace entre esos nodos"}
+
+    action = action.lower()
+    if action == "start":
+        res = _api("POST", f"/v2/projects/{pid}/links/{link_id}/start_capture",
+                   {"data_link_type": "DLT_EN10MB", "capture_file_name": f"capture-{link_id[:8]}.pcap"})
+        return {"started": not (isinstance(res, dict) and res.get("error")), "link_id": link_id, "detail": res}
+    if action == "stop":
+        _api("POST", f"/v2/projects/{pid}/links/{link_id}/stop_capture")
+        return {"stopped": True, "link_id": link_id}
+
+    if action == "read":
+        pcap = _api("GET", f"/v2/projects/{pid}/links/{link_id}/pcap", raw=True, timeout=180)
+        if isinstance(pcap, dict):
+            # 409 cuando la captura ya se paró: el fichero sigue en disco dentro del proyecto
+            proj = _api("GET", f"/v2/projects/{pid}")
+            base = Path(proj.get("path", "")) if isinstance(proj, dict) else None
+            cands = sorted(
+                (base / "project-files" / "captures").glob("*.pcap"),
+                key=lambda p: p.stat().st_mtime, reverse=True,
+            ) if base and base.exists() else []
+            if not cands:
+                return {"error": "no se pudo descargar el pcap y no hay ficheros en project-files/captures",
+                        "detail": pcap}
+            pcap = cands[0].read_bytes()
+        out_dir = Path(os.path.expanduser("~/GNS3/captures"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"cap-{int(time.time())}-{link_id[:8]}.pcap"
+        path.write_bytes(pcap)
+        res = {"path": str(path), "bytes": len(pcap)}
+        if subprocess.run(["bash", "-lc", "command -v tshark"], capture_output=True).returncode == 0:
+            p = subprocess.run(
+                ["tshark", "-r", str(path), "-c", str(summary_lines)],
+                capture_output=True, text=True, timeout=60,
+            )
+            res["summary"] = p.stdout or p.stderr
+        return res
+
+    return {"error": f"acción desconocida: {action}"}
+
+
+@mcp.tool
+def gns3_snapshots(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    action: str = "list",
+    name: Optional[str] = None,
+    snapshot_id: Optional[str] = None,
+    stop_nodes: bool = False,
+) -> Any:
+    """Snapshots del proyecto: action=list|create|restore|delete.
+    GNS3 exige el proyecto parado para crear o restaurar: con stop_nodes=True se paran los nodos,
+    se hace la operación y se vuelven a arrancar los que estaban started."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado"}
+    err = _ensure_open(pid)
+    if err:
+        return {"error": "no se pudo abrir el proyecto", "detail": err}
+    action = action.lower()
+
+    restart: list[str] = []
+    if stop_nodes and action in ("create", "restore"):
+        for n in _nodes(pid):
+            if n.get("status") == "started":
+                restart.append(n["node_id"])
+                _api("POST", f"/v2/projects/{pid}/nodes/{n['node_id']}/stop", timeout=180)
+        time.sleep(1)
+
+    if action == "list":
+        snaps = _api("GET", f"/v2/projects/{pid}/snapshots") or []
+        return [{"name": s.get("name"), "snapshot_id": s.get("snapshot_id"), "created_at": s.get("created_at")}
+                for s in snaps] if isinstance(snaps, list) else snaps
+    if action == "create":
+        res = _api("POST", f"/v2/projects/{pid}/snapshots", {"name": name or f"snap-{int(time.time())}"}, timeout=300)
+        for nid in restart:
+            _api("POST", f"/v2/projects/{pid}/nodes/{nid}/start", timeout=180)
+        return res
+    if action in ("restore", "delete"):
+        if not snapshot_id:
+            snaps = _api("GET", f"/v2/projects/{pid}/snapshots") or []
+            match = next((s for s in snaps if str(s.get("name", "")).lower() == (name or "").lower()), None)
+            if not match:
+                return {"error": "snapshot no encontrado", "available": [s.get("name") for s in snaps]}
+            snapshot_id = match["snapshot_id"]
+        if action == "restore":
+            res = _api("POST", f"/v2/projects/{pid}/snapshots/{snapshot_id}/restore", timeout=300)
+        else:
+            _api("DELETE", f"/v2/projects/{pid}/snapshots/{snapshot_id}")
+            res = {"deleted": True, "snapshot_id": snapshot_id}
+        for nid in restart:
+            _api("POST", f"/v2/projects/{pid}/nodes/{nid}/start", timeout=180)
+        return res
+    return {"error": f"acción desconocida: {action}"}
+
+
+@mcp.tool
+def gns3_images(emulator: str = "qemu") -> Any:
+    """Imágenes disponibles en el compute local para un emulador (qemu por defecto)."""
+    imgs = _api("GET", f"/v2/computes/local/{emulator}/images", timeout=180)
+    if not isinstance(imgs, list):
+        return imgs
+    return [{"filename": i.get("filename"), "size_mb": round(i.get("filesize", 0) / 1048576, 1), "md5": i.get("md5sum")}
+            for i in imgs if not i.get("filename", "").endswith(".md5sum")]
+
+
+@mcp.tool
+def gns3_node_files(
+    node: str,
+    path: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    content: Optional[str] = None,
+) -> Any:
+    """Lee (sin content) o escribe (con content) un fichero dentro del directorio de un nodo."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado"}
+    err = _ensure_open(pid)
+    if err:
+        return {"error": "no se pudo abrir el proyecto", "detail": err}
+    targets = _match_nodes(_nodes(pid), node)
+    if not targets:
+        return {"error": f"nodo no encontrado: {node}"}
+    nid = targets[0]["node_id"]
+    if content is None:
+        got = core.node_file_read(core.Client(_conf()["url"],
+                                              (_conf()["user"], _conf()["password"])), pid, nid, path)
+        return {"node": targets[0]["name"], "path": path,
+                **({"error": got["error"]} if isinstance(got, dict) else {"content": got})}
+    res = core.node_file_write(core.Client(_conf()["url"],
+                                           (_conf()["user"], _conf()["password"])), pid, nid, path, content)
+    return {"node": targets[0]["name"], "path": path, **res}
+
+
+@mcp.tool
+def gns3_server_paths() -> dict:
+    """Rutas y binarios que usa el servidor local (imágenes, proyectos, ubridge)."""
+    c = _conf()
+    return {
+        "conf": str(CONF),
+        "url": c["url"],
+        "images_path": c.get("images_path"),
+        "projects_path": c.get("projects_path"),
+        "appliances_path": c.get("appliances_path"),
+        "configs_path": c.get("configs_path"),
+        "ubridge_path": c.get("ubridge_path"),
+        "ubridge_exists": os.path.exists(c.get("ubridge_path") or ""),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Tools nuevas (núcleo compartido gns3core): consola robusta, monitor QEMU,
+# edición de nodos, subida de imágenes, drawings y export/import.
+# ══════════════════════════════════════════════════════════════════════════════
+def _client():
+    """Cliente del núcleo, con la misma conf que el resto de tools."""
+    c = _conf()
+    auth = (c["user"], c["password"]) if c.get("user") else None
+    return core.Client(c["url"], auth)
+
+
+def _pid_or_error(client, project_id, project_name):
+    try:
+        proj = client.resolve_project(project_id or project_name)
+    except SystemExit as e:
+        return None, {"error": str(e)}
+    client.ensure_open(proj["project_id"])
+    return proj, None
+
+
+@mcp.tool
+def gns3_exec(
+    node: str,
+    commands: list[str],
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    expect: Optional[str] = None,
+    idle: float = 0.9,
+    timeout: float = 20.0,
+    answers: Optional[list[str]] = None,
+    password: Optional[str] = None,
+    wait_ready: bool = True,
+    ready_timeout: float = 30.0,
+) -> dict:
+    """Ejecuta comandos en la consola telnet de un nodo, por prompt o por quietud.
+
+    Es la vía preferente frente a `gns3_console` y frente al VNC: no espera un tiempo
+    fijo, responde solo a `--More--` y a `[y/n]`, y devuelve la salida de cada comando
+    por separado. Si el nodo tiene consola gráfica (VNC), lo dice y remite a
+    `gns3_monitor` en vez de fallar sin explicación.
+
+    `expect` es una regex que cierra la lectura (p. ej. `r"\\$ $"`); sin ella se corta
+    cuando la salida lleva `idle` segundos quieta. `password` se usa si aparece un
+    prompt de contraseña. `wait_ready` pulsa Enter y espera shell (útil tras arrancar).
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        node_obj = client.find_node(proj["project_id"], node)
+    except SystemExit as e:
+        return {"error": str(e)}
+    if node_obj.get("status") != "started":
+        return {"error": f"{node_obj['name']} no está arrancado (status={node_obj.get('status')}) "
+                         f"→ gns3_nodes(action='start', node=...)"}
+    try:
+        con = core.console_for(client, proj["project_id"], node_obj)
+    except core.ConsoleError as e:
+        return {"error": str(e), "console_type": node_obj.get("console_type"),
+                "hint": "gns3_monitor(node=..., action='text') para leer la pantalla"}
+    try:
+        ready = con.wait_ready(timeout=ready_timeout) if wait_ready else {"ready": None, "prompt": None}
+        results = con.run_many(list(commands), expect=expect, idle=idle, timeout=timeout,
+                               answers=answers, password=password)
+    except core.ConsoleError as e:
+        return {"error": str(e), "node": node_obj["name"]}
+    finally:
+        con.close()
+    return {
+        "project": proj["name"],
+        "node": node_obj["name"],
+        "console": {"type": node_obj.get("console_type"), "port": node_obj.get("console")},
+        "prompt": ready.get("prompt"),
+        "ready": ready.get("ready"),
+        "results": results,
+        "failed": [r["cmd"] for r in results if not r["ok"]],
+    }
+
+
+@mcp.tool
+def gns3_monitor(
+    node: str,
+    action: str = "text",
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    keys: Optional[list[str]] = None,
+    text: Optional[str] = None,
+    dest: Optional[str] = None,
+    scale: int = 2,
+    psm: int = 4,
+    delay: float = 0.08,
+) -> dict:
+    """Canal HMP del nodo QEMU: leer la pantalla real y pulsar teclas sin VNC.
+
+    action:
+      text   — screendump + OCR: devuelve el texto que hay en pantalla (lo más útil).
+      shot   — solo screendump: PNG en `dest` o ~/GNS3/captures.
+      type   — escribe `text` traduciendo cada carácter a `sendkey` (menús, login).
+      key    — pulsa `keys` por nombre HMP (`ret`, `down`, `shift-2`, `f2`).
+      status — `info status` (running/paused).
+      cmd    — comando HMP crudo en `text` (p. ej. `system_reset`, `info network`).
+      reset  — `system_reset`.
+
+    Este es el sustituto del VNC: `screendump` no pierde teclas y `sendkey` no depende
+    del foco de la ventana. El OCR lee a escala x2 con psm 4 (x1 confunde `w`/`u`).
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        node_obj = client.find_node(proj["project_id"], node)
+    except SystemExit as e:
+        return {"error": str(e)}
+    if node_obj.get("node_type") != "qemu":
+        return {"error": f"{node_obj['name']} no es un nodo QEMU (es {node_obj.get('node_type')}); "
+                         f"usa gns3_exec para consolas telnet"}
+    disk = (node_obj.get("properties") or {}).get("hda_disk_image")
+    try:
+        mon = core.QemuMonitor.for_node(node_id=node_obj["node_id"], disk=disk)
+    except RuntimeError as e:
+        return {"error": str(e), "node": node_obj["name"], "status": node_obj.get("status")}
+    try:
+        action = action.lower()
+        out: dict = {"node": node_obj["name"], "monitor_port": mon.port, "action": action}
+        if action == "text":
+            out.update(core.screen_text(mon, psm=psm, scale=scale))
+        elif action == "shot":
+            out.update(mon.screendump(dest=dest, scale=scale))
+        elif action == "type":
+            if text is None:
+                return {"error": "action=type exige text"}
+            out.update(mon.type_text(text, delay=delay))
+            out["after"] = core.screen_text(mon, psm=psm, scale=scale).get("ocr", "")[-800:]
+        elif action == "key":
+            if not keys:
+                return {"error": "action=key exige keys=['ret']"}
+            out.update(mon.sendkey(*keys, delay=delay))
+        elif action == "status":
+            out.update(mon.run("info status"))
+        elif action == "cmd":
+            if not text:
+                return {"error": "action=cmd exige text"}
+            out.update(mon.run(text))
+        elif action == "reset":
+            out.update(mon.run("system_reset"))
+        else:
+            return {"error": f"acción desconocida: {action}",
+                    "valid": ["text", "shot", "type", "key", "status", "cmd", "reset"]}
+        return out
+    finally:
+        mon.close()
+
+
+@mcp.tool
+def gns3_node_edit(
+    action: str = "update",
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    node: Optional[str] = None,
+    template: Optional[str] = None,
+    name: Optional[str] = None,
+    node_type: Optional[str] = None,
+    x: int = 0,
+    y: int = 0,
+    properties: Optional[dict] = None,
+    ports_mapping: Optional[list[dict]] = None,
+    symbol: Optional[str] = None,
+    disk_image: Optional[str] = None,
+    new_disk: Optional[str] = None,
+    build_from: Optional[str] = None,
+) -> Any:
+    """Crear, modificar, duplicar o borrar nodos; y clonar el disco de un nodo QEMU.
+
+    action:
+      create      — con `template` (nombre/id) o sin él: `node_type` + `properties`
+                    (p. ej. qemu con hda_disk_image apuntando a un qcow2 ya instalado).
+      update      — aplica `properties`, `ports_mapping`, `symbol` y/o `name` al nodo.
+      delete      — borra el nodo.
+      duplicate   — clona el nodo existente (nuevo node_id + disco enlazado).
+      clone_disk  — copia `disk_image` (o el del nodo) a `new_disk` en images/QEMU y
+                    repunta el nodo para no compartir disco entre nodos.
+      switch      — atajo: `ports_mapping` como lista de dicts {name,type,vlan}.
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    pid = proj["project_id"]
+    action = action.lower()
+
+    if action == "create":
+        if template:
+            tpl = next((t for t in client.templates()
+                        if t.get("template_id") == template
+                        or str(t.get("name", "")).lower() == template.lower()), None)
+            if not tpl:
+                return {"error": f"plantilla no encontrada: {template}",
+                        "available": [t.get("name") for t in client.templates()]}
+            st, res = client.post(f"/v2/projects/{pid}/templates/{tpl['template_id']}",
+                                  {"x": x, "y": y, "compute_id": "local"})
+        else:
+            if not (node_type and properties):
+                return {"error": "create sin plantilla exige node_type y properties"}
+            body = {"name": name or f"{node_type}-{int(time.time())%10000}",
+                    "node_type": node_type, "compute_id": "local", "x": x, "y": y,
+                    "properties": properties}
+            st, res = client.post(f"/v2/projects/{pid}/nodes", body, timeout=120)
+        if st not in (200, 201):
+            msg = res.get("message") if isinstance(res, dict) else res
+            return {"error": f"no se pudo crear: [{st}] {msg}"}
+        if name and isinstance(res, dict) and res.get("name") != name:
+            client.put(f"/v2/projects/{pid}/nodes/{res['node_id']}", {"name": name})
+            res["name"] = name
+        return core.node_summary(res)
+
+    if not node:
+        return {"error": f"action={action} exige node"}
+    try:
+        target = client.find_node(pid, node)
+    except SystemExit as e:
+        return {"error": str(e)}
+    nid = target["node_id"]
+
+    if action == "delete":
+        st, res = client.delete(f"/v2/projects/{pid}/nodes/{nid}", timeout=120)
+        return {"deleted": st in (200, 204), "node": target["name"], "status": st}
+
+    if action == "duplicate":
+        st, res = client.post(f"/v2/projects/{pid}/nodes/{nid}/duplicate",
+                              {"x": x, "y": y, "name": name}, timeout=180)
+        if st not in (200, 201):
+            msg = res.get("message") if isinstance(res, dict) else res
+            return {"error": f"duplicate falló: [{st}] {msg}"}
+        return core.node_summary(res)
+
+    if action in ("update", "switch"):
+        NODE_LEVEL = {"name", "console", "console_type", "x", "y", "z", "symbol", "locked"}
+        body: dict = {}
+        props = dict(properties or {})
+        # claves de nodo que no son propiedades: si viajan en `properties` la API
+        # responde 200 y no cambia nada (pasa con `console`)
+        for k in list(props):
+            if k in NODE_LEVEL:
+                body[k] = props.pop(k)
+        if props:
+            body["properties"] = props
+        if ports_mapping is not None:
+            body.setdefault("properties", {})["ports_mapping"] = ports_mapping
+        if symbol:
+            body["symbol"] = symbol
+        if name:
+            body["name"] = name
+        if not body:
+            return {"error": "update sin cambios: pasa properties, ports_mapping, symbol o name"}
+        st, res = client.put(f"/v2/projects/{pid}/nodes/{nid}", body, timeout=120)
+        if st not in (200, 201):
+            msg = res.get("message") if isinstance(res, dict) else res
+            return {"error": f"update falló: [{st}] {msg}"}
+        return {"updated": True, "node": target["name"],
+                "properties": (res or {}).get("properties", {})}
+
+    if action == "clone_disk":
+        src_name = disk_image or (target.get("properties") or {}).get("hda_disk_image")
+        if not src_name:
+            return {"error": "el nodo no tiene hda_disk_image; pasa disk_image"}
+        images_dir = Path(os.path.expanduser("~/GNS3/images/QEMU"))
+        src = images_dir / os.path.basename(src_name)
+        if not src.exists():
+            return {"error": f"no existe el disco origen {src}"}
+        dst_name = new_disk or f"{src.stem}-{time.strftime('%H%M%S')}.qcow2"
+        dst = images_dir / dst_name
+        if dst.exists():
+            return {"error": f"ya existe {dst}; elige otro new_disk"}
+        qemu_img = shutil.which("qemu-img")
+        if qemu_img:
+            r = subprocess.run([qemu_img, "convert", "-O", "qcow2", str(src), str(dst)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                return {"error": f"qemu-img convert falló: {r.stderr.strip()[:300]}"}
+            modo = "qemu-img convert"
+        else:
+            shutil.copy2(src, dst)          # copia completa, más lenta pero segura
+            modo = "cp"
+        st, res = client.put(f"/v2/projects/{pid}/nodes/{nid}",
+                             {"properties": {"hda_disk_image": dst_name,
+                                             "hda_disk_image_md5sum": "",
+                                             "linked_clone": False}}, timeout=120)
+        return {"copied": str(dst), "size_mb": round(dst.stat().st_size / 2**20, 1),
+                "method": modo, "node": target["name"],
+                "repointed": st in (200, 201), "disk": dst_name}
+
+    return {"error": f"acción desconocida: {action}",
+            "valid": ["create", "update", "switch", "delete", "duplicate", "clone_disk"]}
+
+
+@mcp.tool
+def gns3_upload(path: str, name: Optional[str] = None, compress: bool = True,
+                emulator: str = "qemu") -> dict:
+    """Sube un disco/imagen (qcow2, iso) al compute local del servidor GNS3.
+
+    Con `compress` un qcow2 pasa por `qemu-img convert -c` (2,3 GB → ~500 MB) antes de
+    subir; es lo que hace viable portar un pfSense ya instalado por red. Verifica al
+    final que el nombre aparece en la lista de imágenes del compute.
+    """
+    src = Path(path).expanduser()
+    if not src.is_file():
+        return {"error": f"no existe {src}"}
+    target_name = name or src.name
+    payload = src
+    tmp = None
+    if compress and src.suffix.lower() == ".qcow2":
+        qemu_img = shutil.which("qemu-img")
+        if qemu_img:
+            tmp = Path("/tmp") / f"upload-{src.stem}.qcow2"
+            r = subprocess.run([qemu_img, "convert", "-c", "-O", "qcow2", str(src), str(tmp)],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                payload = tmp
+            else:
+                tmp = None
+    client = _client()
+    data = payload.read_bytes()
+    st, res = client.req("POST", f"/v2/computes/local/{emulator}/images/{target_name}",
+                         data=data, ctype="application/octet-stream", timeout=1800)
+    if tmp:
+        tmp.unlink(missing_ok=True)
+    if st not in (200, 201, 204):
+        msg = res.get("message") if isinstance(res, dict) else res
+        return {"error": f"subida falló: [{st}] {msg}"}
+    listed = [i.get("filename") for i in client.qemu_images()] if emulator == "qemu" else []
+    return {"uploaded": target_name, "from": str(src), "bytes_sent": len(data),
+            "compressed": payload != src, "verified_in_server": target_name in listed,
+            "images": listed if not listed or target_name in listed else listed[:30]}
+
+
+@mcp.tool
+def gns3_drawings(
+    action: str = "list",
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    x: int = 0,
+    y: int = 0,
+    text: Optional[str] = None,
+    width: int = 220,
+    height: int = 60,
+    color: str = "#ffffff",
+    rotation: int = 0,
+    drawing_id: Optional[str] = None,
+) -> Any:
+    """Anotaciones del canvas: action=list|text|rect|clear|delete.
+
+    Sirve para dejar el direccionamiento del enunciado escrito en el proyecto (el
+    profesor lo ve al corregir) sin añadir nodos que ocupan consola.
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    pid = proj["project_id"]
+    action = action.lower()
+
+    if action == "list":
+        st, res = client.get(f"/v2/projects/{pid}/drawings")
+        return res if st == 200 else {"error": f"HTTP {st}", "detail": res}
+
+    if action == "clear":
+        st, res = client.get(f"/v2/projects/{pid}/drawings")
+        if st != 200 or not isinstance(res, list):
+            return {"error": f"no puedo listar drawings: [{st}]"}
+        borrados = 0
+        for d in res:
+            s2, _ = client.delete(f"/v2/projects/{pid}/drawings/{d['drawing_id']}")
+            borrados += 1 if s2 in (200, 204) else 0
+        return {"deleted": borrados, "of": len(res)}
+
+    if action == "delete":
+        if not drawing_id:
+            return {"error": "action=delete exige drawing_id"}
+        st, _ = client.delete(f"/v2/projects/{pid}/drawings/{drawing_id}")
+        return {"deleted": st in (200, 204), "drawing_id": drawing_id}
+
+    if action in ("text", "rect"):
+        if action == "text" and text is None:
+            return {"error": "action=text exige text"}
+        body = {
+            "x": x, "y": y, "z": 0,
+            "rotation": rotation,          # 2.2.61 rechaza width/height aquí
+            "svg": (
+                f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+                f'xmlns="http://www.w3.org/2000/svg">'
+                f'<rect width="{width}" height="{height}" fill="none" stroke="{color}" '
+                f'stroke-width="2" rx="6"/>'
+                f'<text x="8" y="{min(22, height-8)}" font-size="14" fill="{color}">'
+                f'{(text or "").replace("&", "&amp;").replace("<", "&lt;")}</text></svg>'
+            ),
+        }
+        st, res = client.post(f"/v2/projects/{pid}/drawings", body)
+        if st not in (200, 201):
+            msg = res.get("message") if isinstance(res, dict) else res
+            return {"error": f"no se pudo crear: [{st}] {msg}"}
+        return {"created": True, "drawing_id": (res or {}).get("drawing_id"), "text": text}
+
+    return {"error": f"acción desconocida: {action}", "valid": ["list", "text", "rect", "clear", "delete"]}
+
+
+@mcp.tool
+def gns3_project_io(
+    action: str = "export",
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    path: Optional[str] = None,
+    name: Optional[str] = None,
+    open_after: bool = True,
+) -> Any:
+    """Export/import/duplicate de un proyecto (.gns3p).
+
+    export    — descarga a `path` o ~/GNS3/exports/<nombre>-<fecha>.gns3p (para el examen:
+                un proyecto esqueleto que se restaura en el servidor del aula).
+    import    — sube un .gns3p; con `name` lo renombra y `open_after` lo abre.
+    duplicate — export + import en el mismo servidor con `name` nuevo ("from-<nombre>").
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    pid = proj["project_id"]
+    action = action.lower()
+
+    def _export_bytes(stop_nodes: bool = True):
+        """Exporta el proyecto, parando los nodos si hace falta.
+
+        GNS3 devuelve 409 «Project must be stopped in order to export it» con nodos
+        arrancados; se paran, se exporta y se vuelven a arrancar los que estaban.
+        """
+        estaban: list[str] = []
+        if stop_nodes:
+            for n in client.nodes(pid):
+                if n.get("status") == "started":
+                    estaban.append(n["node_id"])
+                    client.post(f"/v2/projects/{pid}/nodes/{n['node_id']}/stop", timeout=180)
+            if estaban:
+                time.sleep(1)
+        try:
+            st, body = client.get(f"/v2/projects/{pid}/export", raw=True, timeout=300)
+        finally:
+            for nid in estaban:
+                client.post(f"/v2/projects/{pid}/nodes/{nid}/start", timeout=180)
+        if st != 200 or not isinstance(body, bytes) or not body.startswith(b"PK"):
+            raise RuntimeError(f"export falló: [{st}] {body[:200]!r}")
+        return body
+
+    if action == "export":
+        if not path:
+            out_dir = Path(os.path.expanduser("~/GNS3/exports"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^\w.-]+", "-", proj["name"])
+            path = str(out_dir / f"{safe}-{time.strftime('%Y%m%d-%H%M')}.gns3p")
+        dest = Path(path).expanduser()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        body = _export_bytes()
+        dest.write_bytes(body)
+        return {"path": str(dest), "kb": round(len(body) / 1024), "project": proj["name"]}
+
+    if action in ("import", "duplicate"):
+        if action == "duplicate":
+            body = _export_bytes()
+            new_name = name or f"from-{proj['name']}"
+        else:
+            if not path:
+                return {"error": "action=import exige path"}
+            src = Path(path).expanduser()
+            if not src.is_file():
+                return {"error": f"no existe {src}"}
+            body = src.read_bytes()
+            new_name = name
+        nuevo = str(uuid.uuid4())
+        st, res = client.req("POST", f"/v2/projects/{nuevo}/import", data=body,
+                             ctype="application/gns3project", timeout=600)
+        if st not in (200, 201):
+            msg = res.get("message") if isinstance(res, dict) else res
+            return {"error": f"import falló: [{st}] {msg}"}
+        if new_name:
+            client.put(f"/v2/projects/{nuevo}", {"name": new_name})
+        opened = False
+        if open_after:
+            s2, _ = client.post(f"/v2/projects/{nuevo}/open", timeout=300)
+            opened = s2 in (200, 201)
+        return {"project_id": nuevo, "name": new_name or proj["name"],
+                "kb": round(len(body) / 1024), "opened": opened,
+                "nodes": len(client.nodes(nuevo)) if opened else None}
+
+    return {"error": f"acción desconocida: {action}", "valid": ["export", "import", "duplicate"]}
+
+
+if __name__ == "__main__":
+    mcp.run()

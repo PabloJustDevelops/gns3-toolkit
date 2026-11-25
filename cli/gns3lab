@@ -1,0 +1,1555 @@
+#!/usr/bin/env python3
+"""gns3lab — operar un servidor GNS3 (local o de aula) desde la terminal.
+
+Nace de los tropiezos reales al llevar un lab al servidor del profesor: el import
+multipart crea proyectos vacíos, los nodos cloud apuntan a bridges que no existen
+en el destino, las imágenes base no se comparten sin linked_clone y los VPCS
+muestran mal la gateway tras `ip dhcp`.
+
+Uso:
+    gns3lab servers                     # servidores configurados y si responden
+    gns3lab status [proyecto]           # proyectos y nodos con su estado
+    gns3lab up [proyecto]               # abre y arranca todo
+    gns3lab down [proyecto]             # para todo y cierra
+    gns3lab test [proyecto]             # conectividad real por las consolas VPCS
+    gns3lab export <destino> [proyecto] # guarda un .gns3p
+    gns3lab import <fichero.gns3p> <nombre>
+    gns3lab fix [proyecto]              # repara un proyecto importado (clouds, clones, imágenes)
+    gns3lab snap list|create <nombre>|restore <nombre> [proyecto]
+    gns3lab images                      # imágenes QEMU del servidor
+    gns3lab templates                   # plantillas del servidor
+
+Sin VNC (lo que se usa de verdad en un examen):
+
+    gns3lab exec <nodo> <cmd>... [-p proyecto]   # consola telnet leída por prompt
+    gns3lab shot <nodo> [-p proyecto]            # pantalla real + OCR
+    gns3lab key  <nodo> ret|down|shift-2 ...     # teclas por el monitor QEMU
+    gns3lab type <nodo> "texto" [--enter]        # escribir en un menú gráfico
+    gns3lab mon  <nodo> <cmd HMP>                # info status, system_reset...
+    gns3lab node add|rm|dup|props|switch|disk    # montar el escenario por API
+    gns3lab upload <disco.qcow2>                 # subir/comprimir imagen al servidor
+    gns3lab new <nombre>                         # proyecto esqueleto vacío
+    gns3lab draw "192.168.10.0/24 -> OPT1"       # nota en el canvas
+    gns3lab doctor [proyecto]                    # chequeo integral antes de entregar
+
+El servidor se elige con --server (por defecto `local`). Un proyecto se puede dar
+por nombre parcial o por id; si se omite, se usa el único proyecto abierto y, si
+no hay ninguno abierto, el único existente.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import socket
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+import zipfile
+from pathlib import Path
+
+CONF = Path.home() / ".config/gns3lab/config.json"
+GNS3_CONF = Path.home() / ".config/GNS3/2.2/gns3_server.conf"
+
+# núcleo compartido con el MCP: consola por prompt, monitor QEMU y OCR.
+# `resolve()` sigue el symlink de ~/.local/bin, así que siempre apunta a la raíz del repo.
+CORE_DIR = Path(__file__).resolve().parent.parent
+if str(CORE_DIR) not in sys.path:
+    sys.path.insert(0, str(CORE_DIR))
+try:
+    import gns3core as core  # noqa: E402
+except ImportError:  # la CLI sigue sirviendo para lo básico sin el núcleo
+    core = None
+
+DEFAULT_CONF = {
+    "servers": {
+        "local": {"url": "http://127.0.0.1:3080", "auth": "from-gns3-conf"},
+        "clase": {"url": "http://192.168.71.250:80", "auth": None,
+                  "matcher": "Pablo Rodriguez"},
+    },
+    "default_server": "local",
+}
+
+
+# --------------------------------------------------------------------------- #
+# configuración y HTTP
+# --------------------------------------------------------------------------- #
+def load_conf() -> dict:
+    if CONF.exists():
+        try:
+            return json.loads(CONF.read_text())
+        except json.JSONDecodeError:
+            print(f"aviso: {CONF} no es JSON válido, uso los valores por defecto", file=sys.stderr)
+    return json.loads(json.dumps(DEFAULT_CONF))
+
+
+def gns3_local_auth() -> tuple[str, str] | None:
+    """Credenciales del servidor local, leídas del conf de la GUI."""
+    if not GNS3_CONF.exists():
+        return None
+    txt = GNS3_CONF.read_text()
+    user = re.search(r"^user\s*=\s*(\S+)", txt, re.M)
+    pwd = re.search(r"^password\s*=\s*(\S+)", txt, re.M)
+    if user and pwd:
+        return user.group(1), pwd.group(1)
+    return None
+
+
+class Server:
+    def __init__(self, name: str, conf: dict):
+        servers = conf.get("servers", {})
+        if name not in servers:
+            raise SystemExit(
+                f"servidor '{name}' no configurado. Disponibles: {', '.join(servers)}"
+            )
+        self.name = name
+        self.url = servers[name]["url"].rstrip("/")
+        auth = servers[name].get("auth")
+        self.auth = gns3_local_auth() if auth == "from-gns3-conf" else None
+        # p. ej. "Pablo Rodriguez" para no tocar el proyecto de un compañero
+        self.matcher = servers[name].get("matcher")
+
+    # -- transporte ------------------------------------------------------- #
+    def _req(self, method: str, path: str, data: bytes | None = None,
+             ctype: str = "application/json", timeout: int = 60, raw: bool = False):
+        url = self.url + path
+        headers = {}
+        if data is not None:
+            headers["Content-Type"] = ctype
+        if self.auth:
+            tok = base64.b64encode(f"{self.auth[0]}:{self.auth[1]}".encode()).decode()
+            headers["Authorization"] = "Basic " + tok
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read()
+                return r.status, (body if raw else self._json(body))
+        except urllib.error.HTTPError as e:
+            body = e.read()
+            return e.code, (body if raw else self._json(body))
+        except urllib.error.URLError as e:
+            raise SystemExit(f"no puedo conectar con {self.url}: {e.reason}")
+
+    @staticmethod
+    def _json(body: bytes):
+        if not body:
+            return None
+        try:
+            return json.loads(body.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return body.decode(errors="replace")
+
+    def get(self, path: str, **kw):
+        return self._req("GET", path, **kw)
+
+    def post(self, path: str, payload=None, **kw):
+        data = json.dumps(payload).encode() if payload is not None else b""
+        return self._req("POST", path, data=data, **kw)
+
+    def put(self, path: str, payload: dict):
+        return self._req("PUT", path, data=json.dumps(payload).encode())
+
+    def delete(self, path: str):
+        return self._req("DELETE", path)
+
+    # -- consultas -------------------------------------------------------- #
+    def alive(self) -> bool:
+        try:
+            st, body = self.get("/v2/version", timeout=6)
+            return st == 200 and isinstance(body, dict)
+        except SystemExit:
+            return False
+
+    def projects(self) -> list[dict]:
+        st, body = self.get("/v2/projects")
+        if st != 200 or not isinstance(body, list):
+            raise SystemExit(f"GET /v2/projects -> {st}: {body}")
+        return body
+
+    def nodes(self, pid: str) -> list[dict]:
+        st, body = self.get(f"/v2/projects/{pid}/nodes")
+        if st != 200 or not isinstance(body, list):
+            raise SystemExit(f"nodos de {pid} -> {st}: {body}")
+        return body
+
+    def links(self, pid: str) -> list[dict]:
+        st, body = self.get(f"/v2/projects/{pid}/links")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def qemu_images(self) -> list[str]:
+        st, body = self.get("/v2/computes/local/qemu/images")
+        if st != 200 or not isinstance(body, list):
+            return []
+        return [i.get("filename", "") for i in body]
+
+    def resolve(self, needle: str | None) -> dict:
+        """Encuentra un proyecto por nombre parcial o id."""
+        projects = self.projects()
+        if not projects:
+            raise SystemExit("el servidor no tiene proyectos")
+        if needle:
+            low = needle.lower()
+            hits = [p for p in projects
+                    if low in p["name"].lower() or p["project_id"].startswith(needle)]
+            if not hits:
+                raise SystemExit(f"ningún proyecto coincide con '{needle}'")
+            if len(hits) > 1:
+                nombres = ", ".join(f"{p['name']} ({p['project_id'][:8]})" for p in hits)
+                raise SystemExit(f"'{needle}' es ambiguo: {nombres}")
+            return hits[0]
+        opened = [p for p in projects if p.get("status") == "opened"]
+        if len(opened) == 1:
+            return opened[0]
+        if len(opened) > 1:
+            # En un servidor de aula hay varios abiertos (los de los compañeros). Si
+            # el servidor tiene un `matcher` en la config y casa con uno solo, es el
+            # nuestro; si no, hay que decir cuál.
+            if self.matcher:
+                hits = [p for p in opened if re.search(self.matcher, p["name"], re.I)]
+                if len(hits) == 1:
+                    return hits[0]
+            nombres = ", ".join(f"{p['name']} ({p['project_id'][:8]})" for p in opened)
+            raise SystemExit(f"hay varios abiertos, di cuál: {nombres}")
+        if len(projects) == 1:
+            return projects[0]
+        nombres = ", ".join(f"{p['name']} ({p['project_id'][:8]})" for p in projects)
+        raise SystemExit(f"ninguno abierto; di cuál: {nombres}")
+
+
+# --------------------------------------------------------------------------- #
+# consolas VPCS
+# --------------------------------------------------------------------------- #
+class Vpcs:
+    """Consola telnet de un VPCS: manda un comando y devuelve la salida limpia."""
+
+    ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
+
+    def __init__(self, host: str, port: int, timeout: float = 10.0):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock.settimeout(0.4)
+        self.cerrada = False
+        self.host = host
+        self.port = port
+
+    def _drain(self, seconds: float) -> bytes:
+        buf = b""
+        end = time.time() + seconds
+        while time.time() < end:
+            try:
+                chunk = self.sock.recv(65535)
+                if not chunk:
+                    break
+                buf += chunk
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+        return buf
+
+    def run(self, *cmds: str, settle: float = 5.0) -> str:
+        """Manda comandos y devuelve la salida. Tolera que la consola se cierre.
+
+        Algunos comandos (`dhcp`) devuelven tal cantidad de datos que el servidor
+        cierra el socket; sin este manejo, el cliente revienta con BrokenPipe y se
+        pierde la salida ya recibida.
+        """
+        buf = self._drain(0.6)
+        try:
+            self.sock.sendall(b"\n")
+            buf += self._drain(1.2)
+            for c in cmds:
+                self.sock.sendall(c.encode() + b"\n")
+                buf += self._drain(settle)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.cerrada = True
+        return self.ANSI.sub("", buf.decode(errors="replace")).replace("\r", "")
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def vpcs_ip(text: str) -> str | None:
+    m = re.search(r"IP/MASK\s*:\s*(\d+\.\d+\.\d+\.\d+)", text)
+    return m.group(1) if m else None
+
+
+def vpcs_gateway(text: str) -> str | None:
+    m = re.search(r"GATEWAY\s*:\s*(\d+\.\d+\.\d+\.\d+)", text)
+    return m.group(1) if m else None
+
+
+def vpcs_dhcp_server(text: str) -> str | None:
+    """El propio VPCS dice quién le dio la IP: ese es el gateway de la VLAN."""
+    m = re.search(r"DHCP SERVER\s*:\s*(\d+\.\d+\.\d+\.\d+)", text)
+    return m.group(1) if m else None
+
+
+def vpcs_mask(text: str) -> str:
+    m = re.search(r"IP/MASK\s*:\s*[\d.]+/(\d+)", text)
+    if not m:
+        return "255.255.255.0"
+    bits = int(m.group(1))
+    partes = [(0xFFFFFFFF << (32 - bits) >> (8 * (3 - i))) & 0xFF for i in range(4)]
+    return ".".join(str(x) for x in partes)
+
+
+def ping_ok(text: str) -> bool:
+    return "bytes from" in text.lower() or bool(re.search(r"\b\d+ bytes\b.*time", text))
+
+
+# --------------------------------------------------------------------------- #
+# comandos
+# --------------------------------------------------------------------------- #
+def cmd_servers(args, conf):
+    for name in conf.get("servers", {}):
+        s = Server(name, conf)
+        ok = s.alive()
+        mark = "OK " if ok else "NO "
+        extra = ""
+        if ok:
+            st, body = s.get("/v2/version")
+            ver = body.get("version") if isinstance(body, dict) else "?"
+            n = len(s.projects())
+            extra = f"v{ver}, {n} proyecto(s), auth={'sí' if s.auth else 'no'}"
+        print(f"  [{mark}] {name:<8} {s.url:<32} {extra}")
+    return 0
+
+
+def cmd_status(args, conf):
+    s = Server(args.server, conf)
+    if not s.alive():
+        print(f"servidor {s.name} ({s.url}) no responde", file=sys.stderr)
+        return 2
+    projects = s.projects()
+    try:
+        target = s.resolve(args.project)
+    except SystemExit:
+        target = None
+    for p in projects:
+        opened = "abierto" if p.get("status") == "opened" else "cerrado"
+        star = " *" if target and p["project_id"] == target["project_id"] else "  "
+        print(f"{star} {p['name']:<32} {opened:<8} {p['project_id'][:8]}")
+        if target and p["project_id"] == target["project_id"]:
+            for n in s.nodes(p["project_id"]):
+                st = n.get("status") or "-"
+                cons = n.get("console_type") or "-"
+                print(f"      {n['name']:<16} {n['node_type']:<16} {st:<9} {cons}:{n.get('console')}")
+    return 0
+
+
+def _set_state(s: Server, pid: str, ids: list[str], action: str) -> int:
+    fails = 0
+    for nid in ids:
+        st, body = s.post(f"/v2/projects/{pid}/nodes/{nid}/{action}", timeout=180)
+        if st not in (200, 201, 204):
+            msg = body.get("message") if isinstance(body, dict) else body
+            print(f"    fallo en {nid[:8]}: [{st}] {msg}")
+            fails += 1
+    return fails
+
+
+def cmd_up(args, conf):
+    s = Server(args.server, conf)
+    proj = s.resolve(args.project)
+    pid = proj["project_id"]
+    if proj.get("status") != "opened":
+        st, body = s.post(f"/v2/projects/{pid}/open", timeout=180)
+        if st not in (200, 201):
+            msg = body.get("message") if isinstance(body, dict) else body
+            print(f"no abre: [{st}] {msg}", file=sys.stderr)
+            return 1
+    nodes = s.nodes(pid)
+    pend = [n["node_id"] for n in nodes if n.get("status") != "started"]
+    print(f"{proj['name']}: {len(nodes)} nodos, arranco {len(pend)}")
+    fails = _set_state(s, pid, pend, "start")
+    time.sleep(3)
+    for n in s.nodes(pid):
+        print(f"    {n['name']:<16} {n.get('status')}")
+    return 1 if fails else 0
+
+
+def cmd_down(args, conf):
+    s = Server(args.server, conf)
+    proj = s.resolve(args.project)
+    pid = proj["project_id"]
+    nodes = s.nodes(pid)
+    started = [n["node_id"] for n in nodes if n.get("status") == "started"]
+    fails = _set_state(s, pid, started, "stop")
+    if not args.keep_open:
+        s.post(f"/v2/projects/{pid}/close", timeout=180)
+        print(f"{proj['name']}: parado y cerrado")
+    else:
+        print(f"{proj['name']}: parado ({len(started)} nodos), proyecto sigue abierto")
+    return 1 if fails else 0
+
+
+def cmd_test(args, conf):
+    s = Server(args.server, conf)
+    proj = s.resolve(args.project)
+    pid = proj["project_id"]
+    nodes = s.nodes(pid)
+    vpcs = [n for n in nodes if n["node_type"] == "vpcs"]
+    if not vpcs:
+        print("no hay nodos VPCS en este proyecto")
+        return 1
+    host = urllib.parse.urlsplit(s.url).hostname or "127.0.0.1"
+    con: dict[str, Vpcs] = {}
+    info: dict[str, dict] = {}
+    try:
+        for n in vpcs:
+            try:
+                port = int(n.get("console") or 0)
+                if not port:
+                    print(f"  {n['name']}: sin puerto de consola")
+                    continue
+                c = Vpcs(host, port)
+                out = c.run("show ip", settle=2.5)
+                # Al arrancar, el VPCS puede no haber pedido lease todavía; se
+                # insiste un par de veces antes de darlo por perdido.
+                for _ in range(3):
+                    if vpcs_ip(out) and not vpcs_ip(out).startswith("0.0.0.0"):
+                        break
+                    out = c.run("ip dhcp", "show ip", settle=4)
+                    if vpcs_ip(out) and not vpcs_ip(out).startswith("0.0.0.0"):
+                        break
+                    time.sleep(2)
+                con[n["name"]] = c
+                info[n["name"]] = {"ip": vpcs_ip(out), "gw": vpcs_gateway(out)}
+                print(f"  {n['name']:<12} ip={info[n['name']]['ip'] or '-':<16} gw={info[n['name']]['gw'] or '-'}")
+            except OSError as e:
+                print(f"  {n['name']}: consola {port} inalcanzable ({e})")
+        if not con:
+            return 1
+
+        # El cliente VPCS a veces toma la máscara como gateway tras `ip dhcp` y todo
+        # destino externo da "host not reachable". Se detecta por la propia gateway
+        # (una .0 final en un /24 casi siempre es la máscara) y se corrige fijando la
+        # IP a mano con la gateway del servidor DHCP.
+        print("\n  gateway:")
+        for name, c in con.items():
+            gw, ip = info[name]["gw"], info[name]["ip"]
+            if not gw or not ip:
+                continue
+            sospechosa = gw.endswith(".0") or gw.endswith(".255")
+            if not sospechosa:
+                print(f"    {name}: {gw}")
+                continue
+            # VPCS pinta la MÁSCARA en el campo gateway tras `ip dhcp`. Se pide el
+            # lease y se usa el DHCP SERVER como gateway (ese dato sí lo da bien),
+            # fijando la IP a mano: el arreglo queda aplicado, no solo mostrado.
+            out2 = c.run("ip dhcp", "show ip", settle=5)
+            ip2 = vpcs_ip(out2) or ip
+            gw2 = vpcs_dhcp_server(out2)
+            if not gw2:
+                print(f"    {name}: gateway={gw} y sin concesión DHCP; revisa pfSense")
+                continue
+            mask = vpcs_mask(out2) if ip2 != ip else "255.255.255.0"
+            print(f"    {name}: gateway={gw} (es la máscara) -> {gw2}, ip {ip2}")
+            c.run(f"ip {ip2} {mask} {gw2}", settle=2)
+            info[name]["gw"] = gw2
+            info[name]["ip"] = ip2
+
+        print("\n  conectividad:")
+        names = list(con)
+        chequeos = []
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                if info[a]["ip"] and info[b]["ip"]:
+                    chequeos.append((a, info[b]["ip"], f"{a} -> {b} (misma red)"))
+        for a in names:
+            gw = info[a]["gw"]
+            if gw:
+                chequeos.append((a, gw, f"{a} -> gateway {gw}"))
+        chequeos.append((names[0], "8.8.8.8", f"{names[0]} -> 8.8.8.8 (salida)"))
+        fails = 0
+        for node, dst, label in chequeos:
+            out = con[node].run(f"ping {dst}", settle=6)
+            ok = ping_ok(out)
+            fails += 0 if ok else 1
+            print(f"    {'OK   ' if ok else 'FALLO'}  {label}")
+        return 1 if fails else 0
+    finally:
+        for c in con.values():
+            c.close()
+
+
+def cmd_export(args, conf):
+    s = Server(args.server, conf)
+    proj = s.resolve(args.project)
+    st, body = s.get(f"/v2/projects/{proj['project_id']}/export", raw=True, timeout=300)
+    if st != 200 or not isinstance(body, bytes) or not body.startswith(b"PK"):
+        print(f"export falló: [{st}] {body[:200]!r}", file=sys.stderr)
+        return 1
+    dest = Path(args.dest).expanduser()
+    dest.write_bytes(body)
+    print(f"guardado {dest} ({len(body)/1024:.0f} KB)")
+    return 0
+
+
+def _arreglar_startup_vpcs(zf, topo, cambios: list[str]) -> dict[str, bytes]:
+    """Devuelve los ficheros del zip con los startup.vpc pidiendo DHCP.
+
+    Un VPCS exportado de un lab local trae `ip 192.168.x.y` fijo en su startup: al
+    portarlo, el PC arranca con una IP de otra red y el DHCP del destino nunca se
+    usa. Cambiándolo a `ip dhcp`, cada arranque pide IP al firewall del destino.
+    """
+    nuevos: dict[str, bytes] = {}
+    for n in topo["topology"]["nodes"]:
+        if n["node_type"] != "vpcs":
+            continue
+        nombre = f"project-files/vpcs/{n['node_id']}/startup.vpc"
+        if nombre not in zf.namelist():
+            continue
+        actual = zf.read(nombre).decode(errors="replace")
+        if "ip dhcp" in actual:
+            continue
+        nuevos[nombre] = (
+            f"# config de {n['name']}: pide IP al DHCP en cada arranque\n"
+            f"ip dhcp\n\nset pcname {n['name']}\n"
+        ).encode()
+        cambios.append(f"{n['name']}: startup.vpc pasa a ip dhcp (venía con IP fija)")
+    return nuevos
+
+
+def _asegurar_wan(zf, topo, cambios: list[str]) -> None:
+    """Añade un nodo `nat` a la primera interfaz del firewall si no hay salida.
+
+    Un lab montado en local puede no tener nodo NAT: el firewall sale a internet por
+    un bridge del host o por un cloud que se quitó al portar. Sin NAT en el destino,
+    la WAN se queda sin IP y los PCs reciben «Destination host unreachable» del
+    propio firewall. Aquí se crea el nodo y su enlace dentro del .gns3.
+    """
+    nodes = topo["topology"]["nodes"]
+    if any(n["node_type"] == "nat" for n in nodes):
+        return
+    # ¿algún firewall/VM con al menos dos adaptadores? Es el candidato a router.
+    candidato = next((n for n in nodes
+                      if n["node_type"] == "qemu" and (n["properties"].get("adapters") or 0) >= 2),
+                     None)
+    if not candidato:
+        return
+    ya_enlazadas = {e.get("adapter_number") for l in topo["topology"]["links"]
+                    for e in l["nodes"] if e.get("node_id") == candidato["node_id"]}
+    if 0 in ya_enlazadas:
+        return  # su primera interfaz ya está conectada a algo
+
+    nat_id = str(uuid.uuid4())
+    nodes.append({
+        "compute_id": "local",
+        "node_id": nat_id,
+        "node_type": "nat",
+        "name": "NAT1",
+        "properties": {"ports_mapping": [
+            {"interface": "virbr0", "name": "nat0", "port_number": 0, "type": "ethernet"}
+        ]},
+        "first_port_name": None,
+        "port_name_format": "Ethernet{0}",
+        "port_segment_size": 0,
+        "x": -430, "y": -170, "z": 1,
+        "width": 65, "height": 59,
+        "symbol": ":/symbols/computer.svg",
+        "label": {"text": "NAT1", "x": None, "y": -40, "rotation": 0, "style": None},
+        "locked": False, "console_type": "none", "console_host": "0.0.0.0",
+    })
+    topo["topology"]["links"].append({
+        "link_id": str(uuid.uuid4()),
+        "link_type": "ethernet",
+        "nodes": [
+            {"adapter_number": 0, "node_id": candidato["node_id"], "port_number": 0},
+            {"adapter_number": 0, "node_id": nat_id, "port_number": 0},
+        ],
+    })
+    cambios.append(f"añadido NAT1 a la WAN de {candidato['name']} (no había salida)")
+
+
+
+def _patch_topology(topo: dict, images: list[str], templates: list[dict],
+                    imagenes_personales: list[str] | None = None) -> list[str]:
+    """Corrige en el .gns3 lo que impide abrir el proyecto en otro servidor."""
+    cambios = []
+    nodes = topo["topology"]["nodes"]
+
+    # 1) fuera los cloud: sus bridges son del host de origen
+    fuera = {n["node_id"] for n in nodes if n["node_type"] == "cloud"}
+    if fuera:
+        topo["topology"]["nodes"] = [n for n in nodes if n["node_id"] not in fuera]
+        antes = len(topo["topology"]["links"])
+        topo["topology"]["links"] = [l for l in topo["topology"]["links"]
+                                     if not any(e.get("node_id") in fuera for e in l["nodes"])]
+        despues = len(topo["topology"]["links"])
+        cambios.append(f"quitados {len(fuera)} nodo(s) cloud, enlaces {antes}->{despues}")
+
+    # 2) imágenes QEMU que no existen en el destino
+    disco = next((i for i in images if i.startswith("empty") and i.endswith(".qcow2")), None)
+    iso = next((i for i in images if i.lower().endswith(".iso")), None)
+    for n in topo["topology"]["nodes"]:
+        if n["node_type"] != "qemu":
+            continue
+        p = n["properties"]
+        p["linked_clone"] = True
+        hda = p.get("hda_disk_image") or ""
+        # El disco personal ya subido al destino: se usa tal cual, sin sustituirlo
+        # por el vacío (perderíamos la pfSense ya configurada).
+        for personal in (imagenes_personales or []):
+            if hda and os.path.basename(hda) == personal:
+                p["hda_disk_image"] = personal
+                p["hda_disk_image_md5sum"] = ""
+                p["cdrom_image"] = ""
+                p["cdrom_image_md5sum"] = ""
+                p["boot_priority"] = "c"
+                cambios.append(f"{n['name']}: usa tu disco {personal} (ya configurado)")
+                break
+        else:
+            if hda and hda not in images:
+                if disco:
+                    p["hda_disk_image"] = disco
+                    p["hda_disk_image_md5sum"] = ""
+                    cambios.append(f"{n['name']}: disco {hda} -> {disco}")
+                    if iso and not p.get("cdrom_image"):
+                        p["cdrom_image"] = iso
+                        p["cdrom_image_md5sum"] = ""
+                        p["boot_priority"] = "d"
+                        cambios.append(f"{n['name']}: CD {iso} para instalarlo")
+        cambios.append(f"{n['name']}: linked_clone activado")
+
+    # 3) imágenes docker que el destino no tiene (tags viejos tipo chromium:dhcp)
+    docker_ok = {t.get("image") for t in templates if t.get("template_type") == "docker"}
+    for n in topo["topology"]["nodes"]:
+        if n["node_type"] != "docker":
+            continue
+        img = n["properties"].get("image") or ""
+        if img and img not in docker_ok:
+            base = img.split(":")[0]
+            alt = next((i for i in docker_ok if i and i.split(":")[0] == base), None)
+            if alt:
+                n["properties"]["image"] = alt
+                cambios.append(f"{n['name']}: docker {img} -> {alt}")
+    return cambios
+
+
+def cmd_fix(args, conf):
+    """Reescribe el .gns3 del proyecto en disco y lo reimporta corregido.
+
+    No se puede editar por API porque el proyecto no abre, y PUT exige abierto.
+    """
+    s = Server(args.server, conf)
+    proj = s.resolve(args.project)
+    st, body = s.get(f"/v2/projects/{proj['project_id']}/export", raw=True, timeout=300)
+    if st != 200 or not body.startswith(b"PK"):
+        print(f"no puedo exportar para reparar: [{st}]", file=sys.stderr)
+        return 1
+    images = s.qemu_images()
+    st, templates = s.get("/v2/templates")
+    templates = templates if isinstance(templates, list) else []
+
+    src = zipfile.ZipFile(io.BytesIO(body))
+    topo = json.loads(src.read("project.gns3"))
+    cambios = _patch_topology(topo, images, templates)
+    if not cambios:
+        print("no había nada que corregir")
+        return 0
+    for c in cambios:
+        print("  " + c)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+        out.writestr("project.gns3", json.dumps(topo, indent=4))
+        for name in src.namelist():
+            if name == "project.gns3" or name.endswith("/"):
+                continue
+            out.writestr(name, src.read(name))
+    buf.seek(0)
+
+    nuevo = str(uuid.uuid4())
+    st, r = s._req("POST", f"/v2/projects/{nuevo}/import", data=buf.read(),
+                   ctype="application/gns3project", timeout=300)
+    if st not in (200, 201):
+        msg = r.get("message") if isinstance(r, dict) else r
+        print(f"import corregido falló: [{st}] {msg}", file=sys.stderr)
+        return 1
+    nombre = proj["name"]
+    if not args.keep_both:
+        s.delete(f"/v2/projects/{proj['project_id']}")
+        print(f"  borrado el roto ({proj['project_id'][:8]})")
+        # el import genera nombre libre; lo devolvemos al original
+        s.put(f"/v2/projects/{nuevo}", {"name": nombre})
+    st, r = s.post(f"/v2/projects/{nuevo}/open", timeout=180)
+    if st not in (200, 201):
+        msg = r.get("message") if isinstance(r, dict) else r
+        print(f"  aviso: importado pero no abre: [{st}] {msg}")
+    print(f"  reparado como {nombre} ({nuevo[:8]})")
+    return 0
+
+
+def cmd_import(args, conf):
+    s = Server(args.server, conf)
+    path = Path(args.file).expanduser()
+    if not path.is_file():
+        raise SystemExit(f"no existe {path}")
+    if not zipfile.is_zipfile(path):
+        raise SystemExit(f"{path} no es un zip de GNS3")
+    images = s.qemu_images()
+    st, templates = s.get("/v2/templates")
+    templates = templates if isinstance(templates, list) else []
+
+    src = zipfile.ZipFile(path)
+    topo = json.loads(src.read("project.gns3"))
+    cambios = _patch_topology(topo, images, templates)
+    _asegurar_wan(src, topo, cambios)
+    startups = _arreglar_startup_vpcs(src, topo, cambios)
+    if cambios:
+        print("correcciones antes de subir:")
+        for c in cambios:
+            print("  " + c)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+            out.writestr("project.gns3", json.dumps(topo, indent=4))
+            for name in src.namelist():
+                if name == "project.gns3" or name.endswith("/"):
+                    continue
+                out.writestr(name, startups.get(name, src.read(name)))
+        payload = buf.getvalue()
+    else:
+        payload = path.read_bytes()
+
+    nuevo = str(uuid.uuid4())
+    st, r = s._req("POST", f"/v2/projects/{nuevo}/import", data=payload,
+                   ctype="application/gns3project", timeout=600)
+    if st not in (200, 201):
+        msg = r.get("message") if isinstance(r, dict) else r
+        raise SystemExit(f"import falló: [{st}] {msg}")
+    print(f"importado ({len(payload)/1024:.0f} KB) como id {nuevo[:8]}")
+    if args.name:
+        st, r = s.put(f"/v2/projects/{nuevo}", {"name": args.name})
+        print(f"  renombrado a '{args.name}' [{st}]")
+    st, r = s.post(f"/v2/projects/{nuevo}/open", timeout=180)
+    if st in (200, 201):
+        n = s.nodes(nuevo)
+        print(f"  abierto: {len(n)} nodos, {len(s.links(nuevo))} enlaces")
+    else:
+        msg = r.get("message") if isinstance(r, dict) else r
+        print(f"  aviso: no abre todavía: [{st}] {msg}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# portar: local -> otro servidor, con los discos que hagan falta
+# --------------------------------------------------------------------------- #
+def _localizar_disco(nombre: str, compute_id: str) -> Path | None:
+    """Dónde vive una imagen del servidor de origen.
+
+    El compute local guarda las imágenes en ~/GNS3/images/QEMU; un compute remoto
+    (GNS3 VM) tendría otra ruta, pero para portar desde local solo importa la primera.
+    """
+    rutas = [
+        Path.home() / "GNS3/images/QEMU" / nombre,
+        Path.home() / "GNS3/images" / nombre,
+    ]
+    for r in rutas:
+        if r.is_file():
+            return r
+    return None
+
+
+def _comprimir(origen: Path, destino: Path) -> Path:
+    """Convierte a qcow2 comprimido: un disco de 2,3 GB baja a ~500 MB."""
+    exe = shutil.which("qemu-img")
+    if not exe:
+        raise SystemExit("falta qemu-img: pacman -S qemu-img")
+    print(f"  comprimiendo {origen.name} ({origen.stat().st_size/2**30:.1f} GB en disco)")
+    r = subprocess.run([exe, "convert", "-c", "-O", "qcow2", str(origen), str(destino)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"qemu-img convert falló: {r.stderr.strip()}")
+    print(f"  -> {destino.name} ({destino.stat().st_size/2**20:.0f} MB)")
+    return destino
+
+
+def cmd_port(args, conf):
+    """Exporta de un servidor, sube los discos que falten e importa corregido."""
+    origen = Server(args.from_server, conf)
+    destino = Server(args.server, conf)
+    if origen.url == destino.url:
+        raise SystemExit("origen y destino son el mismo servidor")
+
+    proj = origen.resolve(args.project)
+    print(f"origen : {origen.name} — {proj['name']} ({proj['project_id'][:8]})")
+    print(f"destino: {destino.name} — {destino.url}")
+
+    # El export exige el proyecto parado; se para y se deja como estaba.
+    nodos = origen.nodes(proj["project_id"])
+    estaban = [n["node_id"] for n in nodos if n.get("status") == "started"]
+    if estaban:
+        print(f"  parando {len(estaban)} nodo(s) en el origen para poder exportar")
+        _set_state(origen, proj["project_id"], estaban, "stop")
+        time.sleep(2)
+    st, body = origen.get(f"/v2/projects/{proj['project_id']}/export", raw=True, timeout=300)
+    if estaban:
+        _set_state(origen, proj["project_id"], estaban, "start")
+    if st != 200 or not isinstance(body, bytes) or not body.startswith(b"PK"):
+        msg = body[:200] if isinstance(body, bytes) else body
+        raise SystemExit(f"export del origen falló: [{st}] {msg}")
+    zf = zipfile.ZipFile(io.BytesIO(body))
+    topo = json.loads(zf.read("project.gns3"))
+    print(f"  export: {len(body)/1024:.0f} KB, "
+          f"{len(topo['topology']['nodes'])} nodos, {len(topo['topology']['links'])} enlaces")
+
+    # Qué discos pide el proyecto y cuáles no están en el destino.
+    imagenes_destino = destino.qemu_images()
+    st, templates = destino.get("/v2/templates")
+    templates = templates if isinstance(templates, list) else []
+    faltan: dict[str, str] = {}   # nombre destino -> ruta local
+    for n in topo["topology"]["nodes"]:
+        if n["node_type"] != "qemu":
+            continue
+        for campo in ("hda_disk_image", "hdb_disk_image"):
+            img = (n["properties"].get(campo) or "").strip()
+            if not img or os.path.basename(img) in imagenes_destino:
+                continue
+            local = _localizar_disco(os.path.basename(img), n.get("compute_id", "local"))
+            if local:
+                faltan[os.path.basename(img)] = str(local)
+
+    # Subida de los discos que falten (una sola vez por nombre).
+    subidos = []
+    if faltan:
+        print(f"  discos que faltan en el destino: {', '.join(faltan)}")
+        for nombre, ruta in faltan.items():
+            payload = Path(ruta)
+            if args.compress:
+                tmp = Path("/tmp") / f"port-{nombre}"
+                if tmp.suffix != ".qcow2":
+                    tmp = tmp.with_suffix(".qcow2")
+                payload = _comprimir(Path(ruta), tmp)
+            print(f"  subiendo {nombre} ({payload.stat().st_size/2**20:.0f} MB)...")
+            with open(payload, "rb") as f:
+                st, r = destino._req("POST", f"/v2/computes/local/qemu/images/{nombre}",
+                                     data=f.read(), ctype="application/octet-stream",
+                                     timeout=1800)
+            if st not in (200, 201, 204):
+                raise SystemExit(f"  subida de {nombre} falló: [{st}] {r}")
+            subidos.append(nombre)
+            print("    OK")
+            imagenes_destino = destino.qemu_images()
+
+    # Reescribir el .gns3 con las correcciones del destino.
+    cambios = _patch_topology(topo, imagenes_destino, templates,
+                              imagenes_personales=subidos or list(faltan))
+
+    _asegurar_wan(zf, topo, cambios)
+    startups = _arreglar_startup_vpcs(zf, topo, cambios)
+    if cambios:
+        print("  correcciones:")
+        for c in cambios:
+            print("    " + c)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+        out.writestr("project.gns3", json.dumps(topo, indent=4))
+        for name in zf.namelist():
+            if name == "project.gns3" or name.endswith("/"):
+                continue
+            out.writestr(name, startups.get(name, zf.read(name)))
+
+    nuevo = str(uuid.uuid4())
+    st, r = destino._req("POST", f"/v2/projects/{nuevo}/import", data=buf.getvalue(),
+                         ctype="application/gns3project", timeout=600)
+    if st not in (200, 201):
+        msg = r.get("message") if isinstance(r, dict) else r
+        raise SystemExit(f"import en el destino falló: [{st}] {msg}")
+    nombre = args.name or proj["name"]
+    destino.put(f"/v2/projects/{nuevo}", {"name": nombre})
+    print(f"  importado como '{nombre}' ({nuevo[:8]})")
+
+    st, r = destino.post(f"/v2/projects/{nuevo}/open", timeout=180)
+    if st in (200, 201):
+        print(f"  abierto: {len(destino.nodes(nuevo))} nodos, {len(destino.links(nuevo))} enlaces")
+    else:
+        msg = r.get("message") if isinstance(r, dict) else r
+        print(f"  aviso: no abre: [{st}] {msg}")
+
+    if args.start:
+        print("  arrancando nodos...")
+        ids = [n["node_id"] for n in destino.nodes(nuevo) if n.get("status") != "started"]
+        fallos = _set_state(destino, nuevo, ids, "start")
+        for n in destino.nodes(nuevo):
+            print(f"    {n['name']:<16} {n.get('status')}")
+        return 1 if fallos else 0
+    return 0
+
+
+def cmd_images(args, conf):
+    s = Server(args.server, conf)
+    for i in s.qemu_images():
+        print("  " + i)
+    return 0
+
+
+def cmd_templates(args, conf):
+    s = Server(args.server, conf)
+    st, body = s.get("/v2/templates")
+    if st != 200:
+        print(f"templates -> {st}", file=sys.stderr)
+        return 1
+    for t in body:
+        print(f"  {t.get('template_type',''):<16} {t.get('name','')}")
+    return 0
+
+
+def cmd_snap(args, conf):
+    s = Server(args.server, conf)
+    proj = s.resolve(args.project)
+    pid = proj["project_id"]
+    if args.action == "list":
+        st, body = s.get(f"/v2/projects/{pid}/snapshots")
+        if st != 200 or not body:
+            print("  sin snapshots")
+            return 0
+        for snap in body:
+            print(f"  {snap.get('name')}")
+        return 0
+    if args.action == "create":
+        if not args.name:
+            raise SystemExit("falta el nombre del snapshot")
+        # El snapshot exporta el proyecto entero: GNS3 lo exige parado. Paramos,
+        # creamos y volvemos a arrancar lo que estaba arrancado.
+        nodos = s.nodes(pid)
+        estaban = [n["node_id"] for n in nodos if n.get("status") == "started"]
+        if estaban:
+            print(f"  parando {len(estaban)} nodo(s) para poder congelar")
+            _set_state(s, pid, estaban, "stop")
+            time.sleep(2)
+        st, body = s.post(f"/v2/projects/{pid}/snapshots", {"name": args.name})
+        msg = body.get("message") if isinstance(body, dict) else body
+        print(f"  crear '{args.name}' -> [{st}]" + (f" {msg}" if st not in (200, 201) else ""))
+        if estaban:
+            print(f"  arrancando de nuevo {len(estaban)} nodo(s)")
+            _set_state(s, pid, estaban, "start")
+        return 0 if st in (200, 201) else 1
+    if args.action == "restore":
+        if not args.name:
+            raise SystemExit("falta el nombre del snapshot")
+        nodos = s.nodes(pid)
+        estaban = [n["node_id"] for n in nodos if n.get("status") == "started"]
+        if estaban:
+            print(f"  parando {len(estaban)} nodo(s) para restaurar")
+            _set_state(s, pid, estaban, "stop")
+            time.sleep(2)
+        st, body = s.post(f"/v2/projects/{pid}/snapshots/{args.name}/restore", {}, timeout=300)
+        msg = body.get("message") if isinstance(body, dict) else body
+        print(f"  restaurar '{args.name}' -> [{st}]" + (f" {msg}" if st not in (200, 201) else ""))
+        if estaban:
+            print(f"  arrancando {len(estaban)} nodo(s)")
+            _set_state(s, pid, estaban, "start")
+        return 0 if st in (200, 201) else 1
+    return 1
+
+
+# --------------------------------------------------------------------------- #
+# consola: ejecutar, teclear y leer la pantalla sin VNC (núcleo gns3core)
+# --------------------------------------------------------------------------- #
+def _core_client(s: Server) -> "core.Client":
+    return core.Client(s.url, s.auth, s.matcher, s.name)
+
+
+def _core_target(s: Server, project: str | None, node: str | None):
+    c = _core_client(s)
+    proj = c.resolve_project(project)
+    c.ensure_open(proj["project_id"])
+    if node is None:
+        raise SystemExit("falta el nombre del nodo")
+    obj = c.find_node(proj["project_id"], node)
+    return c, proj, obj
+
+
+def cmd_exec(args, conf):
+    """Ejecuta comandos en la consola telnet: lectura por prompt, no por sleep."""
+    s = Server(args.server, conf)
+    c, proj, node = _core_target(s, args.project, args.node)
+    if node.get("status") != "started":
+        print(f"{node['name']} no está arrancado (status={node.get('status')})", file=sys.stderr)
+        return 1
+    try:
+        con = core.console_for(c, proj["project_id"], node)
+    except core.ConsoleError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    try:
+        ready = con.wait_ready(timeout=args.ready_timeout)
+        print(f"{proj['name']} / {node['name']}  prompt={ready.get('prompt')!r} "
+              f"ready={ready.get('ready')}", file=sys.stderr)
+        fails = 0
+        for r in con.run_many(args.commands, expect=args.expect, idle=args.idle,
+                              timeout=args.timeout, answers=args.answers):
+            print(f"$ {r['cmd']}")
+            if r["output"]:
+                print(r["output"])
+            if r["timed_out"]:
+                print(f"  [timeout tras {r['ms']} ms — la salida no se estabilizó]", file=sys.stderr)
+                fails += 1
+            print()
+        return 1 if fails else 0
+    finally:
+        con.close()
+
+
+def _monitor(s: Server, project, node_name) -> "core.QemuMonitor":
+    c, proj, node = _core_target(s, project, node_name)
+    if node.get("node_type") != "qemu":
+        raise SystemExit(f"{node['name']} no es QEMU ({node.get('node_type')}); usa `gns3lab exec`")
+    disk = (node.get("properties") or {}).get("hda_disk_image")
+    try:
+        return core.QemuMonitor.for_node(node_id=node["node_id"], disk=disk)
+    except RuntimeError as e:
+        raise SystemExit(str(e))
+
+
+def cmd_shot(args, conf):
+    """Captura el framebuffer del nodo y lo pasa por OCR: leer sin VNC."""
+    s = Server(args.server, conf)
+    mon = _monitor(s, args.project, args.node)
+    try:
+        shot = core.screen_text(mon, psm=args.psm, scale=args.scale)
+    finally:
+        mon.close()
+    if shot.get("error"):
+        print(shot, file=sys.stderr)
+        return 1
+    print(f"{shot['path']}  ({shot.get('bytes', 0)//1024} KB)")
+    if not args.no_ocr and shot.get("ocr"):
+        print()
+        print(shot["ocr"])
+    return 0
+
+
+def cmd_key(args, conf):
+    """Pulsa teclas por el monitor HMP (`ret`, `down`, `shift-2`, `f2`)."""
+    s = Server(args.server, conf)
+    mon = _monitor(s, args.project, args.node)
+    try:
+        mon.sendkey(*args.keys, delay=args.delay)
+        if args.show:
+            print(core.screen_text(mon).get("ocr", ""))
+    finally:
+        mon.close()
+    return 0
+
+
+def cmd_type(args, conf):
+    """Escribe un texto en el nodo traduciéndolo a sendkey (menús, login)."""
+    s = Server(args.server, conf)
+    mon = _monitor(s, args.project, args.node)
+    try:
+        res = mon.type_text(args.text, delay=args.delay)
+        if res["unknown"]:
+            print(f"aviso: sin traducción a tecla: {res['unknown']}", file=sys.stderr)
+        if args.enter:
+            mon.sendkey("ret")
+        if not args.no_show:
+            print(core.screen_text(mon, psm=args.psm).get("ocr", ""))
+    finally:
+        mon.close()
+    return 0
+
+
+def cmd_mon(args, conf):
+    """Comando HMP crudo sobre el nodo QEMU (info status, system_reset...)."""
+    s = Server(args.server, conf)
+    mon = _monitor(s, args.project, args.node)
+    try:
+        print(json.dumps(mon.run(" ".join(args.cmd)), ensure_ascii=False, indent=2))
+    finally:
+        mon.close()
+    return 0
+
+
+def cmd_new(args, conf):
+    """Crea un proyecto vacío y lo abre (esqueleto para el examen)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    path = str(Path.home() / "GNS3/projects" / args.name)
+    st, body = c.post("/v2/projects", {"name": args.name, "path": path})
+    if st not in (200, 201):
+        print(f"no se pudo crear: [{st}] {body}", file=sys.stderr)
+        return 1
+    pid = body.get("project_id")
+    st2, _ = c.post(f"/v2/projects/{pid}/open", timeout=180)
+    print(f"{args.name} creado ({pid[:8]}), abierto={st2 in (200, 201)}")
+    return 0
+
+
+def _err(body) -> str:
+    """Mensaje corto de error de la API (evita el volcado de schema anidado)."""
+    msg = body.get("message") if isinstance(body, dict) else str(body)
+    if isinstance(msg, str) and "JSON schema error" in msg:
+        inner = msg[msg.find("{"):]
+        m = re.search(r'"message"\s*:\s*"([^"]+)"', inner)
+        if m:
+            return m.group(1)[:300]
+    return str(msg)[:400]
+
+
+def cmd_node(args, conf):
+    """Nodos: add (plantilla), rm, dup, props, switch (VLANs), disk (clonar qcow2)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    proj = c.resolve_project(args.project)
+    pid = proj["project_id"]
+    c.ensure_open(pid)
+    act = args.action
+
+    if act == "add":
+        if not args.template:
+            raise SystemExit("add exige --template")
+        tpl = next((t for t in c.templates()
+                    if t.get("template_id") == args.template
+                    or str(t.get("name", "")).lower() == args.template.lower()), None)
+        if not tpl:
+            raise SystemExit(f"plantilla no encontrada: {args.template}")
+        st, body = c.post(f"/v2/projects/{pid}/templates/{tpl['template_id']}",
+                          {"x": args.x, "y": args.y, "compute_id": "local"})
+        if st not in (200, 201):
+            msg = _err(body)
+            print(f"no se pudo añadir: [{st}] {msg}", file=sys.stderr)
+            if "NAT interface" in msg or "libvirt" in msg:
+                print("  → el nodo NAT usa una red libvirt (gns3-nat*): "
+                      "`sudo systemctl start libvirtd` y reintenta", file=sys.stderr)
+            return 1
+        nid = body["node_id"]
+        if args.name:
+            c.put(f"/v2/projects/{pid}/nodes/{nid}", {"name": args.name})
+        print(f"{args.name or body['name']} ({nid[:8]}) tipo={body.get('node_type')}")
+        return 0
+
+    if not args.node:
+        raise SystemExit(f"{act} exige el nombre del nodo")
+    node = c.find_node(pid, args.node)
+    nid = node["node_id"]
+
+    if act == "rm":
+        st, _ = c.delete(f"/v2/projects/{pid}/nodes/{nid}", timeout=120)
+        print(f"{node['name']} borrado={st in (200, 204)}")
+        return 0 if st in (200, 204) else 1
+
+    if act == "dup":
+        st, body = c.post(f"/v2/projects/{pid}/nodes/{nid}/duplicate",
+                          {"x": args.x, "y": args.y, "name": args.name}, timeout=180)
+        if st not in (200, 201):
+            print(f"duplicate falló: [{st}] {body}", file=sys.stderr)
+            return 1
+        print(f"duplicado como {body.get('name')} ({body['node_id'][:8]})")
+        return 0
+
+    if act == "props":
+        if not args.set:
+            raise SystemExit("props exige --set clave=valor (repetible)")
+        # `console`, `name`, `x`, `y`... son campos del nodo, no de properties:
+        # dentro de properties se aceptan y no cambian nada (200 mentiroso).
+        TOP = {"name", "console", "console_type", "x", "y", "z", "symbol", "locked"}
+        props: dict = {}
+        top: dict = {}
+        for kv in args.set:
+            if "=" not in kv:
+                raise SystemExit(f"--set espera clave=valor, no {kv}")
+            k, v = kv.split("=", 1)
+            try:
+                v = json.loads(v)
+            except json.JSONDecodeError:
+                pass                      # texto plano
+            (top if k in TOP else props)[k] = v
+        body: dict = {}
+        if props:
+            body["properties"] = props
+        body.update(top)
+        st, body_res = c.put(f"/v2/projects/{pid}/nodes/{nid}", body, timeout=120)
+        ok = st in (200, 201)
+        print(f"{node['name']}: {body} -> {'OK' if ok else _err(body_res)}")
+        return 0 if ok else 1
+
+    if act == "switch":
+        """VLANs del switch: `--port 1=access:20 --port 0=dot1q:43`."""
+        cur = (node.get("properties") or {}).get("ports_mapping") or []
+        mapping = [dict(p) for p in cur]
+        for spec in args.port:
+            if "=" not in spec:
+                raise SystemExit(f"--port espera N=tipo[:vlan], no {spec}")
+            idx, val = spec.split("=", 1)
+            kind, _, vlan = val.partition(":")
+            idx = int(idx)
+            while len(mapping) <= idx:
+                n = len(mapping)
+                mapping.append({"name": f"Ethernet{n}", "port_number": n,
+                                "type": "access", "vlan": 1, "ethertype": ""})
+            mapping[idx] = {"name": mapping[idx].get("name", f"Ethernet{idx}"),
+                            "port_number": idx,
+                            "type": kind, "vlan": int(vlan) if vlan else 1,
+                            "ethertype": ""}
+        st, body = c.put(f"/v2/projects/{pid}/nodes/{nid}",
+                         {"properties": {"ports_mapping": mapping}}, timeout=120)
+        ok = st in (200, 201)
+        print(f"{node['name']}: {len(mapping)} puertos -> {'OK' if ok else _err(body)}")
+        return 0 if ok else 1
+
+    if act == "disk":
+        src_name = args.from_disk or (node.get("properties") or {}).get("hda_disk_image")
+        if not src_name:
+            raise SystemExit("disk exige --from o un nodo con hda_disk_image")
+        images = Path.home() / "GNS3/images/QEMU"
+        src = images / os.path.basename(src_name)
+        if not src.exists():
+            raise SystemExit(f"no existe {src}")
+        dst_name = args.name or f"{src.stem}-{time.strftime('%H%M%S')}.qcow2"
+        dst = images / dst_name
+        if dst.exists():
+            raise SystemExit(f"ya existe {dst}")
+        qemu_img = shutil.which("qemu-img")
+        print(f"clonando {src.name} ({src.stat().st_size/2**20:.0f} MB) -> {dst_name}")
+        if qemu_img:
+            r = subprocess.run([qemu_img, "convert", "-O", "qcow2", str(src), str(dst)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                raise SystemExit(f"qemu-img falló: {r.stderr.strip()}")
+        else:
+            shutil.copy2(src, dst)
+        st, body = c.put(f"/v2/projects/{pid}/nodes/{nid}",
+                         {"properties": {"hda_disk_image": dst_name,
+                                         "hda_disk_image_md5sum": "",
+                                         "linked_clone": False}}, timeout=120)
+        print(f"{dst_name} ({dst.stat().st_size/2**20:.0f} MB) enlazado={st in (200, 201)}")
+        return 0 if st in (200, 201) else 1
+
+    raise SystemExit(f"acción desconocida: {act}")
+
+
+def cmd_upload(args, conf):
+    """Sube un qcow2/iso al servidor (comprimido si es qcow2)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    src = Path(args.file).expanduser()
+    if not src.is_file():
+        raise SystemExit(f"no existe {src}")
+    name = args.name or src.name
+    payload, tmp = src, None
+    if args.compress and src.suffix.lower() == ".qcow2" and shutil.which("qemu-img"):
+        tmp = Path("/tmp") / f"upload-{src.stem}.qcow2"
+        print(f"comprimiendo {src.name} ({src.stat().st_size/2**20:.0f} MB)")
+        r = subprocess.run(["qemu-img", "convert", "-c", "-O", "qcow2", str(src), str(tmp)],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            payload = tmp
+            print(f"  -> {tmp.stat().st_size/2**20:.0f} MB")
+        else:
+            tmp = None
+    data = payload.read_bytes()
+    print(f"subiendo {name} ({len(data)/2**20:.0f} MB)")
+    st, body = c.req("POST", f"/v2/computes/local/qemu/images/{name}", data=data,
+                     ctype="application/octet-stream", timeout=1800)
+    if tmp:
+        tmp.unlink(missing_ok=True)
+    if st not in (200, 201, 204):
+        print(f"subida falló: [{st}] {body}", file=sys.stderr)
+        return 1
+    listed = [i.get("filename") for i in c.qemu_images()]
+    print(f"OK: {name} {'verificado' if name in listed else 'NO aparece en la lista'}"
+          f" ({len(listed)} imágenes en el servidor)")
+    return 0 if name in listed else 1
+
+
+def cmd_draw(args, conf):
+    """Nota de texto en el canvas (direccionamiento, VLANs, contraseñas)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    proj = c.resolve_project(args.project)
+    pid = proj["project_id"]
+    c.ensure_open(pid)
+    w = max(220, 9 * len(args.text))
+    svg = (f'<svg width="{w}" height="60" viewBox="0 0 {w} 60" xmlns="http://www.w3.org/2000/svg">'
+           f'<rect width="{w}" height="60" fill="none" stroke="{args.color}" stroke-width="2" rx="6"/>'
+           f'<text x="8" y="24" font-size="14" fill="{args.color}">'
+           f'{args.text.replace("&", "&amp;").replace("<", "&lt;")}</text></svg>')
+    st, body = c.post(f"/v2/projects/{pid}/drawings",
+                     {"x": args.x, "y": args.y, "z": 0, "rotation": 0, "svg": svg})
+    ok = st in (200, 201)
+    print(f"nota {'creada' if ok else body}")
+    return 0 if ok else 1
+
+
+def cmd_link(args, conf):
+    """Enlaces: list, add <nodoA> <nodoB> [--pa N --pb N], rm <link_id>."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    proj = c.resolve_project(args.project)
+    pid = proj["project_id"]
+    c.ensure_open(pid)
+    if args.action == "list":
+        names = {n["node_id"]: n["name"] for n in c.nodes(pid)}
+        for l in c.links(pid):
+            ends = " <-> ".join(
+                f"{names.get(e['node_id'], '?')}:{e['adapter_number']}/{e['port_number']}"
+                for e in l.get("nodes", []))
+            print(f"  {l['link_id'][:8]}  {ends}")
+        return 0
+    if args.action == "add":
+        if len(args.nodes) != 2:
+            raise SystemExit("add exige dos nodos: gns3lab link add R1 R2")
+        a = c.find_node(pid, args.nodes[0])
+        b = c.find_node(pid, args.nodes[1])
+        body = {"nodes": [
+            {"node_id": a["node_id"], "adapter_number": args.pa, "port_number": args.ppa},
+            {"node_id": b["node_id"], "adapter_number": args.pb, "port_number": args.ppb},
+        ]}
+        st, res = c.post(f"/v2/projects/{pid}/links", body)
+        if st not in (200, 201):
+            print(f"enlace falló: [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        print(f"{a['name']}:{args.pa}/{args.ppa} <-> {b['name']}:{args.pb}/{args.ppb}  "
+              f"({res.get('link_id', '')[:8]})")
+        return 0
+    if args.action == "rm":
+        if not args.nodes:
+            raise SystemExit("rm exige el link_id")
+        st, _ = c.delete(f"/v2/projects/{pid}/links/{args.nodes[0]}")
+        print(f"borrado={st in (200, 204)}")
+        return 0 if st in (200, 204) else 1
+    raise SystemExit(f"acción desconocida: {args.action}")
+
+
+def cmd_doctor(args, conf):
+    """Chequeo integral antes de dar un lab por bueno."""
+    s = Server(args.server, conf)
+    problemas: list[str] = []
+    print(f"servidor {s.name} ({s.url})")
+    if not s.alive():
+        print("  NO responde: arráncalo (gns3server) antes de nada", file=sys.stderr)
+        return 2
+    st, ver = s.get("/v2/version")
+    print(f"  versión {ver.get('version') if isinstance(ver, dict) else '?'}")
+    st, computes = s.get("/v2/computes")
+    computes = computes if isinstance(computes, list) else []
+    for comp in computes:
+        ok = comp.get("connected")
+        print(f"  compute {comp.get('name')}: {'conectado' if ok else 'DESCONECTADO'}")
+        if not ok:
+            problemas.append(f"compute {comp.get('name')} desconectado")
+    for b in ("tesseract", "qemu-img", "tshark", "sshpass"):
+        print(f"  {b:<10} {'OK' if shutil.which(b) else 'falta'}")
+        if b == "tesseract" and not shutil.which(b):
+            problemas.append("sin tesseract: `gns3lab shot` no puede dar texto")
+    lv = subprocess.run(["systemctl", "is-active", "libvirtd"],
+                        capture_output=True, text=True).stdout.strip()
+    print(f"  libvirtd   {lv or 'desconocido'}")
+    if lv != "active":
+        problemas.append("libvirtd parado: los nodos NAT no arrancan "
+                         "(`sudo systemctl start libvirtd`)")
+    try:
+        import PIL  # noqa: F401
+        print("  Pillow     OK")
+    except ImportError:
+        problemas.append("sin Pillow: el screendump queda en PPM")
+
+    projs = s.projects()
+    try:
+        target = s.resolve(args.project)
+    except SystemExit:
+        target = None
+    if not target:
+        print(f"  {len(projs)} proyectos, ninguno seleccionable")
+        return 1
+    print(f"  proyecto {target['name']} ({target['project_id'][:8]}, {target.get('status')})")
+    if target.get("status") != "opened":
+        print("    aviso: cerrado; `gns3lab up` lo abre")
+    nodes = s.nodes(target["project_id"])
+    discos: dict[str, list[str]] = {}
+    for n in nodes:
+        props = n.get("properties") or {}
+        hda = props.get("hda_disk_image") or ""
+        cons = n.get("console")
+        print(f"    {n['name']:<18} {n['node_type']:<16} {(n.get('status') or '-'):<9} "
+              f"console={cons} ({n.get('console_type')})")
+        if hda:
+            discos.setdefault(hda, []).append(n["name"])
+        if n.get("status") != "started":
+            problemas.append(f"{n['name']} no está arrancado")
+        if n["node_type"] == "qemu" and n.get("status") == "started":
+            mon = core.find_monitor_port(n["node_id"], hda)
+            if not mon:
+                problemas.append(f"{n['name']}: sin monitor HMP visible (¿proceso de otro usuario?)")
+    imgs = s.qemu_images()          # Server.qemu_images() devuelve nombres
+    for img, quienes in discos.items():
+        if len(quienes) > 1:
+            problemas.append(f"disco compartido {img} entre {quienes}: un cambio de config afecta a los dos")
+        if img not in imgs:
+            problemas.append(f"imagen ausente en el servidor: {img}")
+    nat = any(n["node_type"] == "nat" for n in nodes)
+    if not nat:
+        problemas.append("sin nodo NAT: la WAN se quedará sin IP (usa `gns3lab node add --template NAT`)")
+    print("\n  resumen")
+    if problemas:
+        for p in problemas:
+            print(f"    - {p}")
+        return 1
+    print("    sin hallazgos")
+    return 0
+
+
+def main() -> int:
+    conf = load_conf()
+    if not CONF.exists():
+        CONF.parent.mkdir(parents=True, exist_ok=True)
+        CONF.write_text(json.dumps(DEFAULT_CONF, indent=2))
+    ap = argparse.ArgumentParser(prog="gns3lab", description=__doc__.split("\n")[0])
+    ap.add_argument("--server", "-s", default=conf.get("default_server", "local"))
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("servers", help="servidores configurados y estado")
+
+    for name, help_ in (("status", "proyectos y nodos"), ("up", "abre y arranca todo"),
+                        ("down", "para todo"), ("test", "conectividad de las VPCS"),
+                        ("fix", "repara un proyecto importado")):
+        p = sub.add_parser(name, help=help_)
+        p.add_argument("project", nargs="?", help="nombre o id del proyecto")
+        if name == "down":
+            p.add_argument("--keep-open", action="store_true", help="no cerrar el proyecto")
+        if name == "fix":
+            p.add_argument("--keep-both", action="store_true", help="no borrar el proyecto roto")
+
+    p = sub.add_parser("export", help="guarda un .gns3p")
+    p.add_argument("dest")
+    p.add_argument("project", nargs="?")
+
+    p = sub.add_parser("import", help="importa un .gns3p corrigiéndolo")
+    p.add_argument("file")
+    p.add_argument("name", nargs="?", help="nombre del proyecto destino")
+    p.add_argument("--no-rename", action="store_true", help=argparse.SUPPRESS)
+
+    p = sub.add_parser("port", help="porta un proyecto a otro servidor con sus discos")
+    p.add_argument("project", nargs="?", help="nombre o id en el servidor de origen")
+    p.add_argument("--from", dest="from_server", default="local", help="servidor de origen")
+    p.add_argument("--name", help="nombre en el destino")
+    p.add_argument("--start", action="store_true", help="arrancar los nodos al importar")
+    p.add_argument("--no-compress", dest="compress", action="store_false",
+                   help="subir el qcow2 tal cual (mucho más pesado)")
+    p.set_defaults(compress=True)
+
+    sub.add_parser("images", help="imágenes QEMU del servidor")
+    sub.add_parser("templates", help="plantillas del servidor")
+
+    p = sub.add_parser("snap", help="snapshots")
+    p.add_argument("action", choices=["list", "create", "restore"])
+    p.add_argument("name", nargs="?")
+    p.add_argument("project", nargs="?")
+
+    # -- consola sin VNC ---------------------------------------------------- #
+    p = sub.add_parser("exec", help="comandos por la consola telnet del nodo")
+    p.add_argument("node")
+    p.add_argument("commands", nargs="+")
+    p.add_argument("-p", "--project")
+    p.add_argument("--expect", help="regex que cierra la lectura (p. ej. '\\$ $')")
+    p.add_argument("--idle", type=float, default=0.9, help="segundos de quietud por comando")
+    p.add_argument("--timeout", type=float, default=20.0)
+    p.add_argument("--ready-timeout", dest="ready_timeout", type=float, default=30.0)
+    p.add_argument("--answer", dest="answers", action="append",
+                   help="respuesta a [y/n] (repetible)")
+
+    p = sub.add_parser("shot", help="pantalla del nodo QEMU + OCR")
+    p.add_argument("node")
+    p.add_argument("-p", "--project")
+    p.add_argument("--psm", type=int, default=4)
+    p.add_argument("--scale", type=int, default=2)
+    p.add_argument("--no-ocr", action="store_true")
+
+    p = sub.add_parser("key", help="pulsar teclas por el monitor QEMU")
+    p.add_argument("node")
+    p.add_argument("keys", nargs="+", help="ret, down, shift-2, f2...")
+    p.add_argument("-p", "--project")
+    p.add_argument("--delay", type=float, default=0.08)
+    p.add_argument("--show", action="store_true", help="OCR después de teclear")
+
+    p = sub.add_parser("type", help="escribir texto en un nodo QEMU (sendkey)")
+    p.add_argument("node")
+    p.add_argument("text")
+    p.add_argument("-p", "--project")
+    p.add_argument("--enter", action="store_true", help="pulsa Enter al terminar")
+    p.add_argument("--delay", type=float, default=0.08)
+    p.add_argument("--psm", type=int, default=4)
+    p.add_argument("--no-show", action="store_true")
+
+    p = sub.add_parser("mon", help="comando HMP crudo (info status, system_reset)")
+    p.add_argument("node")
+    p.add_argument("cmd", nargs="+")
+    p.add_argument("-p", "--project")
+
+    # -- montaje por API ---------------------------------------------------- #
+    p = sub.add_parser("new", help="crea un proyecto vacío y lo abre")
+    p.add_argument("name")
+
+    p = sub.add_parser("node", help="nodos: add, rm, dup, props, switch, disk")
+    p.add_argument("action", choices=["add", "rm", "dup", "props", "switch", "disk"])
+    p.add_argument("node", nargs="?")
+    p.add_argument("-p", "--project")
+    p.add_argument("--template", help="add: nombre o id de plantilla")
+    p.add_argument("--name", help="nombre nuevo (dup/add/disk)")
+    p.add_argument("--set", action="append", help="props: clave=valor (repetible)")
+    p.add_argument("--port", action="append", default=[],
+                   help="switch: N=tipo[:vlan], p. ej. 1=access:20")
+    p.add_argument("--from-disk", dest="from_disk", help="disk: qcow2 origen")
+    p.add_argument("-x", "--x", type=int, default=0)
+    p.add_argument("-y", "--y", type=int, default=0)
+
+    p = sub.add_parser("upload", help="sube un disco/imagen al servidor")
+    p.add_argument("file")
+    p.add_argument("--name", help="nombre en el servidor")
+    p.add_argument("--no-compress", dest="compress", action="store_false")
+
+    p = sub.add_parser("draw", help="nota de texto en el canvas")
+    p.add_argument("text")
+    p.add_argument("-p", "--project")
+    p.add_argument("-x", "--x", type=int, default=0)
+    p.add_argument("-y", "--y", type=int, default=0)
+    p.add_argument("--color", default="#ffffff")
+
+    p = sub.add_parser("link", help="enlaces: list, add, rm")
+    p.add_argument("action", choices=["list", "add", "rm"])
+    p.add_argument("nodes", nargs="*")
+    p.add_argument("-p", "--project")
+    p.add_argument("--pa", type=int, default=0, help="adapter del primer nodo")
+    p.add_argument("--pb", type=int, default=0, help="adapter del segundo nodo")
+    p.add_argument("--ppa", type=int, default=0, help="puerto del primer nodo")
+    p.add_argument("--ppb", type=int, default=0, help="puerto del segundo nodo")
+
+    p = sub.add_parser("doctor", help="chequeo integral del lab")
+    p.add_argument("project", nargs="?")
+
+    args = ap.parse_args()
+    if args.cmd == "import" and args.name and args.no_rename:
+        args.name = args.name
+    handlers = {
+        "servers": cmd_servers, "status": cmd_status, "up": cmd_up, "down": cmd_down,
+        "test": cmd_test, "export": cmd_export, "import": cmd_import, "fix": cmd_fix,
+        "port": cmd_port,
+        "images": cmd_images, "templates": cmd_templates, "snap": cmd_snap,
+        "exec": cmd_exec, "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
+        "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
+        "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
+    }
+    needs_core = {"exec", "shot", "key", "type", "mon", "new", "node", "upload", "draw",
+                  "link", "doctor"}
+    if args.cmd in needs_core and core is None:
+        print("falta el núcleo gns3core: revisa ~/Applications/gns3-mcp/gns3core.py",
+              file=sys.stderr)
+        return 1
+    return handlers[args.cmd](args, conf)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
