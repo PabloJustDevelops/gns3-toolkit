@@ -95,27 +95,19 @@ no hay ninguno abierto, el único existente.
 from __future__ import annotations
 
 import argparse
-import base64
-import contextlib
-import hashlib
-import io
 import json
 import os
 import re
 import shutil
-import socket
-import ssl
-import struct
 import subprocess
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import uuid
-import zipfile
 from pathlib import Path
+
+# Los módulos pesados (urllib, zipfile, ssl, hashlib...) se importan dentro de la
+# función que los usa: `--help` y el parser no pagan su coste de arranque.
+# `shutil` y `subprocess` siguen arriba porque los tests los sustituyen en el
+# módulo para simular qemu-img.
 
 CONF = Path.home() / ".config/gns3lab/config.json"
 GNS3_CONF = Path.home() / ".config/GNS3/2.2/gns3_server.conf"
@@ -125,9 +117,33 @@ GNS3_CONF = Path.home() / ".config/GNS3/2.2/gns3_server.conf"
 CORE_DIR = Path(__file__).resolve().parent.parent
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
+
+
+class _LazyCore:
+    """Carga gns3core al primer atributo: `--help` no paga su import."""
+
+    _module = None
+
+    def _load(self):
+        if self._module is None:
+            try:
+                import gns3core
+            except ImportError as e:
+                raise SystemExit(
+                    f"falta {CORE_DIR / 'gns3core.py'}: ejecuta ./scripts/install.sh ({e})"
+                ) from e
+            self._module = gns3core
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+
 try:
-    import gns3core as core  # noqa: E402
-except ImportError:  # la CLI sigue sirviendo para lo básico sin el núcleo
+    from importlib.util import find_spec
+
+    core = _LazyCore() if find_spec("gns3core") else None
+except (ImportError, ValueError):
     core = None
 
 DEFAULT_CONF = {
@@ -181,6 +197,10 @@ class Server:
     # -- transporte ------------------------------------------------------- #
     def _req(self, method: str, path: str, data: bytes | None = None,
              ctype: str = "application/json", timeout: int = 60, raw: bool = False):
+        import base64
+        import urllib.error
+        import urllib.request
+
         url = self.url + path
         headers = {}
         if data is not None:
@@ -294,6 +314,8 @@ class Vpcs:
     ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07")
 
     def __init__(self, host: str, port: int, timeout: float = 10.0):
+        import socket
+
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(0.4)
         self.cerrada = False
@@ -301,6 +323,8 @@ class Vpcs:
         self.port = port
 
     def _drain(self, seconds: float) -> bytes:
+        import socket
+
         buf = b""
         end = time.time() + seconds
         while time.time() < end:
@@ -811,6 +835,8 @@ def cmd_down(args, conf):
 
 
 def cmd_test(args, conf):
+    import urllib.parse
+
     s = Server(args.server, conf)
     proj = s.resolve(args.project)
     pid = proj["project_id"]
@@ -1059,6 +1085,10 @@ def cmd_fix(args, conf):
 
     No se puede editar por API porque el proyecto no abre, y PUT exige abierto.
     """
+    import io
+    import uuid
+    import zipfile
+
     s = Server(args.server, conf)
     proj = s.resolve(args.project)
     st, body = s.get(f"/v2/projects/{proj['project_id']}/export", raw=True, timeout=300)
@@ -1109,6 +1139,10 @@ def cmd_fix(args, conf):
 
 
 def cmd_import(args, conf):
+    import io
+    import uuid
+    import zipfile
+
     s = Server(args.server, conf)
     path = Path(args.file).expanduser()
     if not path.is_file():
@@ -1194,6 +1228,10 @@ def _comprimir(origen: Path, destino: Path) -> Path:
 
 def cmd_port(args, conf):
     """Exporta de un servidor, sube los discos que falten e importa corregido."""
+    import io
+    import uuid
+    import zipfile
+
     origen = Server(args.from_server, conf)
     destino = Server(args.server, conf)
     if origen.url == destino.url:
@@ -2082,6 +2120,8 @@ def cmd_node(args, conf):
 
 def cmd_upload(args, conf):
     """Sube un qcow2/iso al servidor (comprimido si es qcow2)."""
+    import tempfile
+
     s = Server(args.server, conf)
     c = _core_client(s)
     src = Path(args.file).expanduser()
@@ -2513,6 +2553,11 @@ def cmd_vm(args, conf):
 
 def _ws_open(url: str, auth, timeout: float):
     """Handshake WebSocket por stdlib; devuelve (socket, bytes leídos de más)."""
+    import base64
+    import socket
+    import ssl
+    import urllib.parse
+
     u = urllib.parse.urlsplit(url)
     if u.scheme not in ("ws", "wss"):
         raise ValueError(f"esquema WebSocket no soportado: {u.scheme!r}")
@@ -2553,6 +2598,8 @@ def _ws_open(url: str, auth, timeout: float):
 
 def _ws_frame(sock, pending: bytes):
     """Lee un frame WS: (texto, pendientes); None como texto = frame de cierre."""
+    import struct
+
     def take(n: int) -> bytes:
         nonlocal pending
         while len(pending) < n:
@@ -2587,6 +2634,8 @@ def _ws_frame(sock, pending: bytes):
 
 def cmd_watch(args, conf):
     """Eventos en vivo por WebSocket (stdlib), con salida por timeout."""
+    import socket
+
     s = Server(args.server, conf)
     c = _core_client(s)
     pid = None
@@ -2924,6 +2973,9 @@ def _notify_snapshot(c, pid: str | None, count: int) -> list:
     ruta con las credenciales del núcleo y se corta tras `count` líneas.
     """
     path = f"/v2/projects/{pid}/notifications" if pid else "/v2/notifications"
+    import base64
+    import urllib.request
+
     headers = {}
     if c.auth:
         tok = base64.b64encode(f"{c.auth[0]}:{c.auth[1]}".encode()).decode()
@@ -3737,6 +3789,8 @@ def _pf_detect_ifnames(node: dict) -> dict:
 
 def _pf_record_get(xml: str) -> None:
     """Marca el último `config get` para reconocer su fichero en un `put`."""
+    import hashlib
+
     try:
         PF_SESSION.parent.mkdir(parents=True, exist_ok=True)
         PF_SESSION.write_text(json.dumps({
@@ -3749,6 +3803,8 @@ def _pf_record_get(xml: str) -> None:
 
 def _pf_from_session(xml: str) -> bool:
     """¿Este XML salió de un `config get` reciente (misma sesión)?"""
+    import hashlib
+
     try:
         marca = json.loads(PF_SESSION.read_text())
         return (marca.get("sha256") == hashlib.sha256(xml.encode()).hexdigest()
@@ -3913,13 +3969,19 @@ def _run_handler(args, handler, conf) -> int:
     si el texto es JSON válido se imprime tal cual (así un comando con --json
     local no se convierte en doble JSON); si no, se envuelve como
     {"cmd", "ok", "output"}. stderr sigue yendo a stderr y el exit code se
-    devuelve sin cambios, también cuando el handler llama a SystemExit.
+    devuelve sin cambios, también cuando el handler llama a SystemExit o lanza
+    una excepción: en ese caso el JSON conserva las mismas claves y el
+    traceback va a stderr para no perder el detalle.
     """
     if not getattr(args, "global_json", False):
         return handler(args, conf)
+    import contextlib
+    import io
+
     buf = io.StringIO()
     rc = 0
     mensaje = None
+    fallo = False
     try:
         with contextlib.redirect_stdout(buf):
             rc = handler(args, conf)
@@ -3927,12 +3989,24 @@ def _run_handler(args, handler, conf) -> int:
         rc = e.code if isinstance(e.code, int) else 1
         if not isinstance(e.code, int) and e.code is not None:
             mensaje = str(e.code)
+    except Exception as e:  # el agente recibe JSON aunque el handler reviente
+        import traceback
+
+        rc = 1
+        fallo = True
+        mensaje = f"error inesperado: {type(e).__name__}: {e}"
+        traceback.print_exc(file=sys.stderr)
     texto = buf.getvalue().rstrip("\n")
     if mensaje:
         texto = (texto + "\n" if texto else "") + mensaje
-    try:
-        json.loads(texto)
-    except (json.JSONDecodeError, ValueError):
+    valido = False
+    if not fallo:
+        try:
+            json.loads(texto)
+            valido = True
+        except (json.JSONDecodeError, ValueError):
+            pass
+    if not valido:
         texto = json.dumps({"cmd": args.cmd, "ok": rc == 0, "output": texto},
                            ensure_ascii=False, indent=2)
     print(texto)
@@ -3959,10 +4033,6 @@ def main() -> int:
       PASSWORD/PORT; `pf config put` exige `--yes` si el XML no viene de un
       `pf config get` reciente y siempre conserva backup.
     """
-    conf = load_conf()
-    if not CONF.exists():
-        CONF.parent.mkdir(parents=True, exist_ok=True)
-        CONF.write_text(json.dumps(DEFAULT_CONF, indent=2))
     ap = argparse.ArgumentParser(
         prog="gns3lab",
         description=__doc__.split("\n")[0],
@@ -3974,12 +4044,13 @@ def main() -> int:
     )
     ap.add_argument("--json", action="store_true", dest="global_json",
                     help="salida JSON uniforme para cualquier comando (antes del subcomando)")
-    ap.add_argument("--server", "-s", default=conf.get("default_server", "local"))
+    ap.add_argument("--server", "-s", default=None,
+                    help="servidor configurado (por defecto, default_server)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("servers", help="servidores configurados y estado")
+    sub.add_parser("servers", help="lista los servidores configurados y si responden")
 
-    p = sub.add_parser("compute", help="computes: listar o add|update|rm|ports|idlepc|action")
+    p = sub.add_parser("compute", help="lista computes o ejecuta add|update|rm|ports|idlepc|action")
     p.add_argument("action", nargs="?",
                    help="acción (add|update|rm|ports|idlepc|action) o compute_id/nombre")
     p.add_argument("cid", nargs="?", help="compute_id o nombre para la acción")
@@ -3993,19 +4064,19 @@ def main() -> int:
                    help="action: nombre de la acción remota (img, binaries...)")
     p.add_argument("--yes", action="store_true", help="rm: no pedir confirmación")
 
-    p = sub.add_parser("stats", help="estadísticas del servidor")
+    p = sub.add_parser("stats", help="muestra CPU, memoria y versiones del servidor")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("symbols", help="símbolos de dispositivo del servidor")
+    p = sub.add_parser("symbols", help="lista los símbolos de dispositivo del servidor")
     p.add_argument("--filter", help="texto en el id, el fichero o el tema")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("appliances", help="appliances del catálogo GNS3")
+    p = sub.add_parser("appliances", help="lista las appliances del catálogo GNS3")
     p.add_argument("--filter", help="texto en nombre, categoría o descripción")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
     # -- GUI operativa portada a la CLI --------------------------------------- #
-    p = sub.add_parser("project", help="proyectos: duplicate, load, stats y file")
+    p = sub.add_parser("project", help="duplica, carga, mide o lee ficheros de un proyecto")
     p.add_argument("action", choices=["duplicate", "load", "stats", "file"])
     p.add_argument("target", nargs="?",
                    help="duplicate: nombre nuevo; load: ruta; file: get|put")
@@ -4015,42 +4086,42 @@ def main() -> int:
     p.add_argument("--json", action="store_true", help="salida JSON")
     p.add_argument("--yes", action="store_true", help="duplicate: no pedir confirmación")
 
-    p = sub.add_parser("gns3vm", help="GNS3 VM: show, set, engines, vms")
+    p = sub.add_parser("gns3vm", help="muestra o configura la GNS3 VM")
     p.add_argument("action", choices=["show", "set", "engines", "vms"])
     p.add_argument("engine", nargs="?", help="vms: motor (vmware, virtualbox...)")
     p.add_argument("--set", action="append", default=[], help="set: clave=valor (repetible)")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("notify", help="notificaciones del servidor o de un proyecto")
+    p = sub.add_parser("notify", help="lee las notificaciones del servidor o de un proyecto")
     p.add_argument("project", nargs="?", help="nombre o id del proyecto")
     p.add_argument("--count", type=int, default=10, help="eventos a leer (por defecto 10)")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("symbol", help="símbolos: dimensions, raw, default, upload")
+    p = sub.add_parser("symbol", help="gestiona símbolos: dimensions, raw, default, upload")
     p.add_argument("action", choices=["dimensions", "raw", "default", "upload"])
     p.add_argument("symbol", nargs="?", help="id del símbolo (p. ej. :/symbols/cloud.svg)")
     p.add_argument("--file", help="upload: fichero local a subir")
     p.add_argument("--output", help="raw: guardar los bytes en este fichero")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("iou-license", help="licencia IOU: get o set")
+    p = sub.add_parser("iou-license", help="consulta o fija la licencia de IOU")
     p.add_argument("action", choices=["get", "set"])
     p.add_argument("--license", help="set: clave de licencia IOU")
     p.add_argument("--json", action="store_true", help="salida JSON")
     p.add_argument("--yes", action="store_true", help="set: no pedir confirmación")
 
-    p = sub.add_parser("server", help="servidor: shutdown, reload o debug")
+    p = sub.add_parser("server", help="apaga, recarga o pone en debug el servidor")
     p.add_argument("action", choices=["shutdown", "reload", "debug"])
     p.add_argument("--yes", action="store_true", help="confirmar la acción")
 
-    p = sub.add_parser("emulator", help="emuladores del compute local (qemu, docker, red)")
+    p = sub.add_parser("emulator", help="consulta emuladores, binarios e interfaces del compute")
     p.add_argument("action", choices=["qemu-binaries", "qemu-capabilities",
                                       "docker-images", "interfaces", "ports", "udp"])
     p.add_argument("--port", type=int, help="udp: puerto a reservar")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
     # -- NIO, capturas por puerto, acciones masivas y eventos ------------------ #
-    p = sub.add_parser("nio", help="NIO de un puerto del compute local")
+    p = sub.add_parser("nio", help="lee, añade o quita el NIO de un puerto del nodo")
     p.add_argument("action", choices=["get", "add", "rm"])
     p.add_argument("node", help="nombre del nodo")
     p.add_argument("--adapter", type=int, required=True, help="número de adaptador")
@@ -4060,7 +4131,7 @@ def main() -> int:
     p.add_argument("-p", "--project")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("capture-port", help="captura de un puerto (no de un enlace)")
+    p = sub.add_parser("capture-port", help="captura el tráfico de un puerto del nodo")
     p.add_argument("node", help="nombre del nodo")
     p.add_argument("action", choices=["start", "stop", "pcap"])
     p.add_argument("--adapter", type=int, required=True, help="número de adaptador")
@@ -4070,20 +4141,20 @@ def main() -> int:
     p.add_argument("-p", "--project")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("all", help="acción masiva sobre todos los nodos del proyecto")
+    p = sub.add_parser("all", help="arranca, para, suspende o recarga todos los nodos")
     p.add_argument("action", choices=["start", "stop", "suspend", "reload"])
     p.add_argument("-p", "--project")
     p.add_argument("--yes", action="store_true", help="no pedir confirmación")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("disk", help="binarios qemu-img y config del compute local")
+    p = sub.add_parser("disk", help="consulta binarios qemu-img o cambia la config del compute")
     p.add_argument("action", choices=["binaries", "config"])
     p.add_argument("--set", action="append", default=[],
                    help="config: clave=valor (repetible)")
     p.add_argument("--yes", action="store_true", help="config: no pedir confirmación")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("vm", help="VMs invitadas e interfaces vmnet del compute local")
+    p = sub.add_parser("vm", help="lista VMs invitadas o interfaces vmnet del compute")
     p.add_argument("action", choices=["vms", "vmnet"])
     p.add_argument("--engine", choices=["virtualbox", "vmware"],
                    help="vms: un motor concreto (por defecto, ambos)")
@@ -4092,17 +4163,19 @@ def main() -> int:
     p.add_argument("--yes", action="store_true", help="vmnet: no pedir confirmación")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("watch", help="eventos WS en vivo (sale por timeout)")
+    p = sub.add_parser("watch", help="muestra eventos WebSocket hasta agotar el tiempo")
     p.add_argument("--project", help="nombre o id del proyecto")
     p.add_argument("--seconds", type=float, default=5.0, help="segundos a escuchar")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    p = sub.add_parser("version-v1", help="versión de la API v1")
+    p = sub.add_parser("version-v1", help="muestra la versión de la API v1")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    for name, help_ in (("status", "proyectos y nodos"), ("up", "abre y arranca todo"),
-                        ("down", "para todo"), ("test", "conectividad de las VPCS"),
-                        ("fix", "repara un proyecto importado")):
+    for name, help_ in (("status", "lista proyectos y el estado de sus nodos"),
+                        ("up", "abre el proyecto y arranca todos sus nodos"),
+                        ("down", "para los nodos y cierra el proyecto"),
+                        ("test", "comprueba conectividad por las consolas VPCS"),
+                        ("fix", "repara clouds, clones e imágenes de un importado")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("project", nargs="?", help="nombre o id del proyecto")
         if name == "down":
@@ -4110,16 +4183,16 @@ def main() -> int:
         if name == "fix":
             p.add_argument("--keep-both", action="store_true", help="no borrar el proyecto roto")
 
-    p = sub.add_parser("export", help="guarda un .gns3p")
+    p = sub.add_parser("export", help="exporta un proyecto a un fichero .gns3p")
     p.add_argument("dest")
     p.add_argument("project", nargs="?")
 
-    p = sub.add_parser("import", help="importa un .gns3p corrigiéndolo")
+    p = sub.add_parser("import", help="importa y corrige un fichero .gns3p")
     p.add_argument("file")
     p.add_argument("name", nargs="?", help="nombre del proyecto destino")
     p.add_argument("--no-rename", action="store_true", help=argparse.SUPPRESS)
 
-    p = sub.add_parser("port", help="porta un proyecto a otro servidor con sus discos")
+    p = sub.add_parser("port", help="copia un proyecto y sus discos a otro servidor")
     p.add_argument("project", nargs="?", help="nombre o id en el servidor de origen")
     p.add_argument("--from", dest="from_server", default="local", help="servidor de origen")
     p.add_argument("--name", help="nombre en el destino")
@@ -4128,13 +4201,13 @@ def main() -> int:
                    help="subir el qcow2 tal cual (mucho más pesado)")
     p.set_defaults(compress=True)
 
-    p = sub.add_parser("images", help="imágenes del compute local")
+    p = sub.add_parser("images", help="lista las imágenes QEMU del compute local")
     p.add_argument("--emulator", default="qemu", help="qemu, docker, iou... (por defecto qemu)")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
-    sub.add_parser("templates", help="plantillas del servidor")
+    sub.add_parser("templates", help="lista las plantillas del servidor")
 
-    p = sub.add_parser("template", help="plantillas: listar, crear, editar, duplicar")
+    p = sub.add_parser("template", help="lista, crea, edita o duplica plantillas")
     p.add_argument("action", choices=["list", "create", "update", "delete",
                                       "duplicate", "base-config"])
     p.add_argument("target", nargs="?", help="update/delete/duplicate/base-config: plantilla")
@@ -4151,13 +4224,13 @@ def main() -> int:
     p.add_argument("-p", "--project", help="create --from-node: proyecto del nodo")
     p.add_argument("--yes", action="store_true", help="delete: no pedir confirmación")
 
-    p = sub.add_parser("snap", help="snapshots: list, create, restore, delete")
+    p = sub.add_parser("snap", help="lista, crea, restaura o borra snapshots")
     p.add_argument("action", choices=["list", "create", "restore", "delete"])
     p.add_argument("name", nargs="?")
     p.add_argument("project", nargs="?")
 
     # -- consola sin VNC ---------------------------------------------------- #
-    p = sub.add_parser("console", help="consola del nodo (reset|url o interactiva)")
+    p = sub.add_parser("console", help="abre la consola del nodo o la reinicia")
     p.add_argument("node", help="nombre del nodo, o reset|url")
     p.add_argument("target", nargs="?", help="nodo cuando node es reset|url")
     p.add_argument("-p", "--project")
@@ -4169,7 +4242,7 @@ def main() -> int:
     p.add_argument("--ready-timeout", dest="ready_timeout", type=float, default=30.0)
     p.add_argument("--yes", action="store_true", help="reset-all: no pedir confirmación")
 
-    p = sub.add_parser("exec", help="comandos por la consola telnet del nodo")
+    p = sub.add_parser("exec", help="ejecuta comandos por la consola telnet del nodo")
     p.add_argument("node")
     p.add_argument("commands", nargs="+")
     p.add_argument("-p", "--project")
@@ -4180,21 +4253,21 @@ def main() -> int:
     p.add_argument("--answer", dest="answers", action="append",
                    help="respuesta a [y/n] (repetible)")
 
-    p = sub.add_parser("shot", help="pantalla del nodo QEMU + OCR")
+    p = sub.add_parser("shot", help="captura la pantalla del nodo QEMU y aplica OCR")
     p.add_argument("node")
     p.add_argument("-p", "--project")
     p.add_argument("--psm", type=int, default=4)
     p.add_argument("--scale", type=int, default=2)
     p.add_argument("--no-ocr", action="store_true")
 
-    p = sub.add_parser("key", help="pulsar teclas por el monitor QEMU")
+    p = sub.add_parser("key", help="pulsa teclas en el nodo por el monitor QEMU")
     p.add_argument("node")
     p.add_argument("keys", nargs="+", help="ret, down, shift-2, f2...")
     p.add_argument("-p", "--project")
     p.add_argument("--delay", type=float, default=0.08)
     p.add_argument("--show", action="store_true", help="OCR después de teclear")
 
-    p = sub.add_parser("type", help="escribir texto en un nodo QEMU (sendkey)")
+    p = sub.add_parser("type", help="escribe texto en un nodo QEMU con sendkey")
     p.add_argument("node")
     p.add_argument("text")
     p.add_argument("-p", "--project")
@@ -4203,7 +4276,7 @@ def main() -> int:
     p.add_argument("--psm", type=int, default=4)
     p.add_argument("--no-show", action="store_true")
 
-    p = sub.add_parser("mon", help="comando HMP crudo (info status, system_reset)")
+    p = sub.add_parser("mon", help="envía un comando HMP al monitor del nodo")
     p.add_argument("node")
     p.add_argument("cmd", nargs="+")
     p.add_argument("-p", "--project")
@@ -4212,7 +4285,7 @@ def main() -> int:
     p = sub.add_parser("new", help="crea un proyecto vacío y lo abre")
     p.add_argument("name")
 
-    p = sub.add_parser("node", help="nodos: añadir/quitar/editar/resize/links/idlepc")
+    p = sub.add_parser("node", help="añade, quita, edita o controla nodos")
     p.add_argument("action", choices=["add", "rm", "dup", "props", "switch", "disk",
                                       "disk-resize", "links", "idlepc",
                                       "start", "stop", "reload", "suspend",
@@ -4234,12 +4307,12 @@ def main() -> int:
     p.add_argument("-x", "--x", type=int, default=0)
     p.add_argument("-y", "--y", type=int, default=0)
 
-    p = sub.add_parser("upload", help="sube un disco/imagen al servidor")
+    p = sub.add_parser("upload", help="sube un disco o imagen al servidor")
     p.add_argument("file")
     p.add_argument("--name", help="nombre en el servidor")
     p.add_argument("--no-compress", dest="compress", action="store_false")
 
-    p = sub.add_parser("draw", help="notas: texto, list, edit <id>, rm <id>")
+    p = sub.add_parser("draw", help="crea, edita o borra notas del canvas")
     p.add_argument("text", nargs="+", help="texto de la nota, o list|edit|rm")
     p.add_argument("--set", action="append", default=[],
                    help="edit: clave=valor (x, y, z, rotation, locked, svg)")
@@ -4248,12 +4321,12 @@ def main() -> int:
     p.add_argument("-y", "--y", type=int, default=0)
     p.add_argument("--color", default="#ffffff")
 
-    p = sub.add_parser("capture", help="captura de un enlace: start, stop, pcap")
+    p = sub.add_parser("capture", help="captura el tráfico de un enlace")
     p.add_argument("link", help="link_id o prefijo (míralos con `gns3lab link list`)")
     p.add_argument("action", choices=["start", "stop", "pcap"])
     p.add_argument("-p", "--project")
 
-    p = sub.add_parser("link", help="enlaces: list, add, rm, edit, filters")
+    p = sub.add_parser("link", help="lista, crea, edita o borra enlaces")
     p.add_argument("action", choices=["list", "add", "rm", "edit", "filters"])
     p.add_argument("nodes", nargs="*")
     p.add_argument("-p", "--project")
@@ -4264,11 +4337,11 @@ def main() -> int:
     p.add_argument("--ppa", type=int, default=0, help="puerto del primer nodo")
     p.add_argument("--ppb", type=int, default=0, help="puerto del segundo nodo")
 
-    p = sub.add_parser("doctor", help="chequeo integral del lab")
+    p = sub.add_parser("doctor", help="comprueba servidor, proyecto, nodos y herramientas")
     p.add_argument("project", nargs="?")
     p.add_argument("--json", action="store_true", help="salida JSON (mismo contenido)")
 
-    p = sub.add_parser("examen", help="setup|verify|reset|informe del kit de examen")
+    p = sub.add_parser("examen", help="monta, verifica o reinicia el kit de examen")
     p.add_argument("action", choices=["setup", "verify", "reset", "informe"])
     p.add_argument("--name", help=f"nombre del proyecto (por defecto '{EXAMEN_NAME}')")
     p.add_argument("--from", dest="from_project",
@@ -4281,7 +4354,7 @@ def main() -> int:
     p.add_argument("--yes", action="store_true", help="reset: confirmar el reinicio")
 
     # -- pfSense: config.xml por SSH, detect sin SSH ------------------------- #
-    p = sub.add_parser("pf", help="pfSense: detect|status|config|assign|ip|dhcp|rule|nat|ssh")
+    p = sub.add_parser("pf", help="configura pfSense por config.xml (detect no usa SSH)")
     pfsub = p.add_subparsers(dest="pf_action", required=True)
 
     q = pfsub.add_parser("detect", help="interfaces del nodo pfSense, sin SSH")
@@ -4338,6 +4411,13 @@ def main() -> int:
     q.add_argument("--json", action="store_true", help="salida {ok, data}")
 
     args = ap.parse_args()
+    # La configuración se lee después de parsear: `--help` no toca disco.
+    conf = load_conf()
+    if not CONF.exists():
+        CONF.parent.mkdir(parents=True, exist_ok=True)
+        CONF.write_text(json.dumps(DEFAULT_CONF, indent=2))
+    if args.server is None:
+        args.server = conf.get("default_server", "local")
     if args.cmd == "import" and args.name and args.no_rename:
         args.name = args.name
     handlers = {
@@ -4366,7 +4446,7 @@ def main() -> int:
                   "server", "emulator", "nio", "capture-port", "all", "disk",
                   "vm", "watch", "version-v1"}
     if args.cmd in needs_core and core is None:
-        print("falta el núcleo gns3core: revisa ~/Applications/gns3-mcp/gns3core.py",
+        print(f"falta {CORE_DIR / 'gns3core.py'}: ejecuta ./scripts/install.sh",
               file=sys.stderr)
         return 1
     return _run_handler(args, handlers[args.cmd], conf)
