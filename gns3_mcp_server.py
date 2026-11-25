@@ -2580,5 +2580,138 @@ def gns3_emulator(
     return (res if res is not None else {"ok": True}) if ok else _api_error(st, res, action)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Resources y prompts: contexto del lab sin llamadas extra.
+# ══════════════════════════════════════════════════════════════════════════════
+def _resource_json(data: Any) -> str:
+    """JSON legible para MCP; las resources nunca imprimen."""
+    return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _resource_project(project: str) -> tuple[Optional[dict], Optional[dict]]:
+    """Resuelve por id exacto o nombre exacto, sin elegir entre duplicados."""
+    projs = _projects()
+    if not isinstance(projs, list):
+        detail = projs.get("error", "respuesta no válida") if isinstance(projs, dict) else "respuesta no válida"
+        return None, {"error": f"no se pudieron listar los proyectos: {detail}"}
+    available = sorted(str(p.get("name") or p.get("project_id") or "") for p in projs)
+    by_id = [p for p in projs if p.get("project_id") == project]
+    if len(by_id) == 1:
+        return by_id[0], None
+    hits = [p for p in projs if str(p.get("name", "")).casefold() == project.casefold()]
+    if len(hits) == 1:
+        return hits[0], None
+    names = ", ".join(available) or "(ninguno)"
+    if not hits:
+        error = f"proyecto no encontrado: {project}. Nombres disponibles: {names}"
+    else:
+        error = f"'{project}' es ambiguo: hay {len(hits)} proyectos con ese nombre. Nombres disponibles: {names}"
+    return None, {"error": error, "available_projects": available}
+
+
+@mcp.resource("gns3://status", mime_type="application/json")
+def gns3_resource_status() -> str:
+    """Versión, computes y estado actual del servidor GNS3."""
+    return _resource_json(gns3_status())
+
+
+@mcp.resource("gns3://projects", mime_type="application/json")
+def gns3_resource_projects() -> str:
+    """Proyectos del servidor con id, nombre y estado."""
+    projs = gns3_projects(action="list")
+    if isinstance(projs, list):
+        projs = [{"project_id": p.get("project_id"), "name": p.get("name"),
+                  "status": p.get("status")} for p in projs]
+    return _resource_json(projs)
+
+
+@mcp.resource("gns3://templates", mime_type="application/json")
+def gns3_resource_templates() -> str:
+    """Plantillas del servidor con id, tipo y nombre."""
+    tpls = gns3_templates()
+    if isinstance(tpls, list):
+        tpls = [{"template_id": t.get("template_id"), "type": t.get("type"),
+                 "name": t.get("name")} for t in tpls]
+    return _resource_json(tpls)
+
+
+@mcp.resource("gns3://project/{project}/topology", mime_type="application/json")
+def gns3_resource_project_topology(project: str) -> str:
+    """Nodos y enlaces de un proyecto, sin abrirlo ni modificar su estado."""
+    proj, err = _resource_project(project)
+    if err:
+        return _resource_json(err)
+    pid = proj["project_id"]
+    nodes = _api("GET", f"/v2/projects/{pid}/nodes")
+    if not isinstance(nodes, list):
+        return _resource_json({"error": f"no se pudieron leer los nodos de {proj.get('name')}",
+                               "detail": nodes})
+    links = _api("GET", f"/v2/projects/{pid}/links")
+    if not isinstance(links, list):
+        return _resource_json({"error": f"no se pudieron leer los enlaces de {proj.get('name')}",
+                               "detail": links})
+    names = {n.get("node_id"): n.get("name") for n in nodes}
+    return _resource_json({
+        "project": {"project_id": pid, "name": proj.get("name"), "status": proj.get("status")},
+        "nodes": [{"name": n.get("name"), "type": n.get("node_type"),
+                   "status": n.get("status"), "console": n.get("console")} for n in nodes],
+        "links": [{"link_id": link.get("link_id"),
+                   "ends": [{"node": names.get(end.get("node_id"), end.get("node_id")),
+                             "adapter": end.get("adapter_number"),
+                             "port": end.get("port_number")} for end in link.get("nodes", [])]}
+                  for link in links],
+    })
+
+
+@mcp.prompt(name="gns3-diagnostico", description="Guion para diagnosticar un lab GNS3 sin VNC.")
+def gns3_diagnostico(proyecto: str) -> str:
+    return f"""Diagnostica el proyecto GNS3 «{proyecto}» sin usar VNC y sin inventar resultados.
+
+1. Ejecuta `gns3lab doctor` y revisa versión, computes, proyecto y hallazgos reales.
+2. Lee `gns3://status` y `gns3://projects`. Confirma que «{proyecto}» existe y está abierto.
+   Si el nombre es ambiguo, pide el project_id; no elijas un proyecto a ciegas.
+3. Lee `gns3://project/<proyecto>/topology`, sustituyendo <proyecto> por el nombre o id
+   codificado como URI. Compara nodos, estados, consolas y enlaces con el diagnóstico.
+4. Para cada nodo relevante:
+   - Consola telnet: usa `gns3_exec` con `project_name` y comandos de solo lectura adecuados
+     al sistema (por ejemplo, estado de interfaces, rutas y vecinos). Fija `expect` cuando
+     conozcas el prompt; si no, deja que corte por quietud (`idle`), no por sleeps fijos.
+   - Pantalla gráfica/QEMU: usa `gns3_monitor(action="text", scale=2, psm=4)`. Para menús,
+     emplea `action="key"` (`ret`, no `enter`) o `action="type"`; pide `shot` sólo si hace
+     falta conservar una captura. El VNC es el último recurso.
+5. Verifica conectividad de extremo a extremo con ping desde los clientes hacia su gateway
+   y los destinos requeridos. Exige una salida real; un 200 de la API no basta. Comprueba
+   porcentaje de pérdida, rutas, VLAN y NAT cuando formen parte del escenario.
+6. Resume servidor, proyecto, nodos comprobados, evidencia observada, fallos literales y
+   siguiente acción concreta. No incluyas credenciales."""
+
+
+@mcp.prompt(name="gns3-examen", description="Guion para montar, verificar y portar el lab del examen.")
+def gns3_examen(servidor: str = "clase") -> str:
+    return f"""Monta y entrega el lab del examen en el servidor «{servidor}».
+
+1. Consulta `~/GNS3/CHULETA.md` como referencia local del escenario. No copies ni reproduzcas
+   sus credenciales en prompts, recursos, notas, logs ni respuestas.
+2. Comprueba el servidor con `gns3lab --server {servidor} servers` y `doctor`. Lee resources
+   de proyectos y plantillas si el MCP está conectado a ese servidor; no supongas que el
+   servidor por defecto del MCP coincide con «{servidor}».
+3. Abre y arranca el proyecto con `gns3lab --server {servidor} up <proyecto>`; confirma el
+   estado real de cada nodo. Informa de cualquier cambio de estado fuera de la sesión.
+4. Asigna interfaces según el enunciado y la topología. En pfSense con em0/em1 usa adaptadores
+   e1000; incluye `port_number` en todos los `ports_mapping`. En ethernet_switch todos los
+   puertos están en adapter 0. Valida cada enlace antes de crearlo.
+5. Configura VLANs y direccionamiento por consola telnet (`gns3_exec`), respetando puertos
+   access/trunk del switch y las interfaces del router. Lee primero la pantalla; en QEMU usa
+   `gns3_monitor(action="text", scale=2, psm=4)` y teclas HMP (`ret`, `shift-<tecla>`), no VNC.
+6. Verifica el laboratorio: `gns3lab --server {servidor} doctor <proyecto>`, estados, rutas,
+   VLAN, NAT y ping entre clientes, gateway y destinos con 0% de pérdida. Pega la evidencia.
+7. Porta el proyecto con `gns3lab --server {servidor} port --from local <proyecto>
+   --name <nombre-destino> --start` cuando el origen sea local y el destino sea «{servidor}».
+   Confirma antes el destino para no sobrescribir; el port puede parar y rearrancar nodos del
+   origen. Repite doctor, topología y ping en el destino antes de darlo por terminado.
+8. Entrega un resumen con proyecto origen/destino, interfaces, VLANs, pruebas y incidencias.
+   No incluyas secretos ni rutas de otros usuarios."""
+
+
 if __name__ == "__main__":
     mcp.run()
