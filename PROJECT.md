@@ -9,10 +9,10 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 
 ## Estado (2026-11-25, GUI portada + REA)
 
-- `gns3core.py`: **11 áreas** de la API v2 (`API_V2_MAP`), con la GUI operativa portada:
-  computes, GNS3 VM, notificaciones, símbolos, base-configs, resize_disk, consola WS/reset,
-  idle-pc, qemu binaries/capabilities, docker images y redes. Inventario real de 78 rutas
-  extraído de `gns3server/handlers` en `orchestration/inventario-rutas-gns3.txt`.
+- `gns3core.py`: **12 áreas** de la API v2 (`API_V2_MAP`): las 11 de la GUI operativa más
+  `nio_ports` (NIO y captura por puerto, acciones masivas, `resume`/`pause`, qemu img, VMs
+  invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
+  `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) en curso.
 - CLI: **36 comandos**; MCP: **34 tools** (`hermes mcp test gns3` → Connected, 34 discovered).
 - **Tests: 416 passed, cobertura 100 % de `gns3core.py`** (677 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**.
@@ -32,8 +32,9 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 | 6 | Documentación completa | hecho (`opencode/docs`, `opencode/covdocs`) |
 | 7 | Cobertura total de la API v2 operativa (8/8 áreas) | hecho (`bc75bc0` + carriles `gk2-*`) |
 | 8 | GUI operativa portada (11 áreas, 78 rutas inventariadas) | hecho (`a5993aa` + carriles `gk3-*`) |
-| 9 | REA de `ubridge` y vías de enganche documentadas | hecho (`opencode/rea`) |
-| 10 | Publicar el repo (privado) | propuesto |
+| 9 | NIO/captura por puerto, acciones masivas y eventos WS (12 áreas) | en curso (`7622e25` + carriles `gk4-*`) |
+| 10 | REA de `ubridge` y vías de enganche documentadas | hecho (`opencode/rea`) |
+| 11 | Publicar el repo (privado) | propuesto |
 
 ## Bitácora de los carriles paralelos (2026-11-25)
 
