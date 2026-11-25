@@ -108,6 +108,16 @@ def test_resolve_usa_matcher_para_desempatar_abiertos(fake_api):
     assert c.resolve_project(None)["project_id"] == P2
 
 
+@pytest.mark.parametrize("matcher", ["nadie", "proyecto"])
+def test_resolve_con_matcher_no_ambigua_si_hay_cero_o_varios_hits(fake_api, matcher):
+    fake_api.set_projects([
+        _project("proyecto de Ana", P1, "opened"),
+        _project("proyecto de Pablo Rodriguez", P2, "opened"),
+    ])
+    with pytest.raises(SystemExit, match="hay varios abiertos"):
+        Client(fake_api.url, matcher=matcher).resolve_project(None)
+
+
 def test_resolve_sin_abiertos_y_un_solo_proyecto(fake_api):
     fake_api.set_projects([_project("solo", P1)])
     assert Client(fake_api.url).resolve_project(None)["project_id"] == P1
@@ -117,6 +127,18 @@ def test_resolve_sin_abiertos_y_varios_proyectos_falla(fake_api):
     fake_api.set_projects([_project("uno", P1), _project("dos", P2)])
     with pytest.raises(SystemExit, match="ninguno abierto"):
         Client(fake_api.url).resolve_project(None)
+
+
+def test_resolve_falla_si_el_servidor_no_tiene_proyectos(fake_api):
+    fake_api.set_projects([])
+    with pytest.raises(SystemExit, match="el servidor no tiene proyectos"):
+        Client(fake_api.url, name="clase").resolve_project(None)
+
+
+def test_resolve_falla_si_no_coincide_ninguno(fake_api):
+    fake_api.set_projects([_project("uno", P1), _project("dos", P2)])
+    with pytest.raises(SystemExit, match="ningún proyecto coincide con 'examen'"):
+        Client(fake_api.url).resolve_project("examen")
 
 
 # ──────────────────────────────── match_nodes ────────────────────────────────
