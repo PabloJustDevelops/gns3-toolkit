@@ -34,6 +34,14 @@ Sin VNC (lo que se usa de verdad en un examen):
     gns3lab type <nodo> "texto" [--enter]        # escribir en un menú gráfico
     gns3lab mon  <nodo> <cmd HMP>                # info status, system_reset...
     gns3lab node add|rm|dup|props|switch|disk|start|stop|reload|suspend|line
+    gns3lab nio get|add|rm <nodo> --adapter N --port N [--nio JSON] [-p proyecto]
+    gns3lab capture-port <nodo> start|stop|pcap --adapter N --port N [-p proyecto]
+    gns3lab all start|stop|suspend|reload [-p proyecto] --yes
+    gns3lab console reset-all [-p proyecto] --yes
+    gns3lab disk binaries|config [--set clave=valor] [--yes]
+    gns3lab vm vms|vmnet [--set clave=valor] [--yes]
+    gns3lab watch [--project] [--seconds N]       # eventos WS con timeout
+    gns3lab version-v1                            # versión de la API v1
     gns3lab upload <disco.qcow2>                 # subir/comprimir imagen al servidor
     gns3lab new <nombre>                         # proyecto esqueleto vacío
     gns3lab draw "192.168.10.0/24 -> OPT1"       # nota en el canvas
@@ -68,8 +76,10 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import socket
+import ssl
+import struct
+import subprocess
 import sys
 import time
 import urllib.error
@@ -1657,9 +1667,20 @@ def cmd_console(args, conf):
     WebSocket. Ambas acciones delegan en `gns3core`.
     """
     s = Server(args.server, conf)
-    modo = args.node if args.node in ("reset", "url") else None
-    if modo and not args.target:
+    modo = args.node if args.node in ("reset", "url", "reset-all") else None
+    if modo and not args.target and modo != "reset-all":
         raise SystemExit(f"console {modo} exige el nombre del nodo")
+    if modo == "reset-all":
+        if not _confirm(args, "reiniciar las consolas de todos los nodos del proyecto"):
+            return 1
+        c, proj = _core_project(s, args.project)
+        st, res = _core_call(c.nodes_console_reset, proj["project_id"])
+        if not _ok(st) and st != 200:
+            print(f"reset de consolas de {proj['name']} -> "
+                  f"[{st}] {_err_literal(res)}", file=sys.stderr)
+            return 1
+        print(f"{proj['name']}: consolas reiniciadas [{st}]")
+        return 0
     node_name = args.target if modo else args.node
     c, proj, node = _core_target(s, args.project, node_name)
     pid = proj["project_id"]
@@ -1827,6 +1848,13 @@ def _err(body) -> str:
     return str(msg)[:400]
 
 
+def _err_literal(body) -> str:
+    """Errores del compute: un 500 con traceback se muestra completo, sin recortar."""
+    if isinstance(body, str) and ("Traceback" in body or "\n" in body):
+        return body
+    return _err(body)
+
+
 def cmd_node(args, conf):
     """Nodos: add (plantilla), rm, dup, props, switch (VLANs), disk (clonar qcow2)."""
     s = Server(args.server, conf)
@@ -1905,9 +1933,12 @@ def cmd_node(args, conf):
     node = c.find_node(pid, args.node)
     nid = node["node_id"]
 
-    if act in ("start", "stop", "reload", "suspend"):
+    if act in ("start", "stop", "reload", "suspend", "resume", "pause", "unpause"):
+        # `pause` de Docker deja el nodo en `suspended` (qemu no ofrece pause);
+        # `resume`/`unpause` vuelven a `started`.
         want = {"start": "started", "stop": "stopped", "reload": "started",
-                "suspend": "suspended"}[act]
+                "suspend": "suspended", "resume": "started",
+                "pause": "suspended", "unpause": "started"}[act]
         st, body = c.node_action(pid, nid, act)
         if st not in (200, 201, 204):
             print(f"{node['name']} {act} falló: [{st}] {_err(body)}", file=sys.stderr)
@@ -2295,6 +2326,295 @@ def cmd_capture(args, conf):
         return 0
 
     raise SystemExit(f"acción de captura desconocida: {act}")
+
+
+# --------------------------------------------------------------------------- #
+# NIO, captura por puerto, acciones masivas y eventos en vivo (12 áreas del core)
+# --------------------------------------------------------------------------- #
+def cmd_nio(args, conf):
+    """NIO de un puerto del compute local: get (GET), add (PUT) o rm (DELETE)."""
+    s = Server(args.server, conf)
+    c, proj = _core_project(s, args.project)
+    node = c.find_node(proj["project_id"], args.node)
+    pid, nid = proj["project_id"], node["node_id"]
+    body = None
+    if args.action == "add":
+        if not args.nio:
+            raise SystemExit("nio add exige --nio JSON")
+        try:
+            body = json.loads(args.nio)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--nio no es JSON válido: {e}")
+        if not isinstance(body, dict):
+            raise SystemExit("--nio debe ser un objeto JSON")
+    st, res = _core_call(c.port_nio, pid, nid, args.adapter, args.port,
+                         body=body, emulator=args.emulator,
+                         delete=args.action == "rm")
+    if st not in ((200,) if args.action == "get" else (200, 201, 204)):
+        print(f"nio {args.action} en {node['name']} {args.adapter}/{args.port} -> "
+              f"[{st}] {_err_literal(res)}", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out(res)
+    elif args.action == "get":
+        _print_data(f"nio de {node['name']} {args.adapter}/{args.port}", res)
+    else:
+        print(f"{node['name']} {args.adapter}/{args.port}: nio {args.action} [{st}]")
+    return 0
+
+
+def cmd_capture_port(args, conf):
+    """Captura por puerto del compute local: start, stop y descarga del pcap."""
+    s = Server(args.server, conf)
+    c, proj = _core_project(s, args.project)
+    node = c.find_node(proj["project_id"], args.node)
+    pid, nid = proj["project_id"], node["node_id"]
+    accion = {"start": "start_capture", "stop": "stop_capture", "pcap": "pcap"}[args.action]
+    st, res = _core_call(c.port_capture, pid, nid, args.adapter, args.port, accion,
+                         file_name=args.file, emulator=args.emulator)
+    if args.action == "pcap":
+        if st != 200 or not isinstance(res, bytes) or not res:
+            detalle = res.decode(errors="replace")[:300] \
+                if isinstance(res, bytes) else str(res)
+            print(f"pcap de {node['name']} {args.adapter}/{args.port} -> "
+                  f"[{st}] {detalle}", file=sys.stderr)
+            return 1
+        destino_dir = Path.home() / "GNS3/captures"
+        destino_dir.mkdir(parents=True, exist_ok=True)
+        destino = destino_dir / (f"port-{time.strftime('%Y%m%d-%H%M%S')}-"
+                                 f"{nid[:8]}-{args.adapter}-{args.port}.pcap")
+        destino.write_bytes(res)
+        print(f"{destino}  ({len(res)/1024:.1f} KB)")
+        return 0
+    if not _ok(st) and st != 200:
+        print(f"{node['name']} {args.adapter}/{args.port}: captura {args.action} -> "
+              f"[{st}] {_err_literal(res)}", file=sys.stderr)
+        return 1
+    nombre = res.get("capture_file_name") if isinstance(res, dict) else None
+    print(f"{node['name']} {args.adapter}/{args.port}: captura {args.action} [{st}]"
+          + (f" -> {nombre}" if nombre else ""))
+    return 0
+
+
+def cmd_all(args, conf):
+    """Acción masiva sobre todos los nodos del proyecto; exige --yes o confirmación."""
+    if not _confirm(args, f"aplicar {args.action} a todos los nodos del proyecto"):
+        return 1
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    proj = c.resolve_project(args.project)
+    pid = proj["project_id"]
+    c.ensure_open(pid)
+    st, res = _core_call(c.nodes_action, pid, args.action)
+    if not _ok(st) and st != 200:
+        print(f"{proj['name']}: {args.action} masivo -> [{st}] {_err_literal(res)}",
+              file=sys.stderr)
+        return 1
+    estados: dict[str, int] = {}
+    for node in _core_call(c.nodes, pid):
+        estado = str(node.get("status") or "-")
+        estados[estado] = estados.get(estado, 0) + 1
+    resumen = ", ".join(f"{k}={v}" for k, v in sorted(estados.items()))
+    print(f"{proj['name']}: {args.action} [{st}] — {resumen}")
+    return 0
+
+
+def cmd_disk(args, conf):
+    """Binarios de qemu-img y config del compute local (config exige --set y --yes)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    if args.action == "binaries":
+        st, res = _core_call(c.qemu_img_binaries)
+        return _report(st, res, "binarios qemu-img", args)
+    body = _set_body(args.set)
+    if not body:
+        raise SystemExit("disk config exige --set clave=valor (repetible)")
+    if not _confirm(args, "cambiar la configuración de qemu-img del compute local"):
+        return 1
+    st, res = _core_call(c.qemu_img_config, body)
+    if not _ok(st) and st != 200:
+        print(f"config qemu-img -> [{st}] {_err_literal(res)}", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out(res)
+    else:
+        _print_data("config qemu-img", res)
+    return 0
+
+
+def cmd_vm(args, conf):
+    """VMs invitadas del compute local: vms (VirtualBox/VMware) y vmnet."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    if args.action == "vms":
+        motores = {"virtualbox": c.virtualbox_vms, "vmware": c.vmware_vms}
+        elegidos = [args.engine] if args.engine else list(motores)
+        for engine in elegidos:
+            if engine not in motores:
+                raise SystemExit(f"motor desconocido: {engine!r} (virtualbox, vmware)")
+        fallos = 0
+        for engine in elegidos:
+            st, res = _core_call(motores[engine])
+            if st != 200:
+                print(f"VMs de {engine} -> [{st}] {_err_literal(res)}", file=sys.stderr)
+                fallos += 1
+            elif args.json:
+                _json_out({engine: res})
+            else:
+                _print_data(f"VMs de {engine}", res)
+        return 1 if fallos else 0
+    body = _set_body(args.set)
+    if not _confirm(args, "crear una interfaz vmnet en VMware"):
+        return 1
+    st, res = _core_call(c.vmware_vmnet, body)
+    if not _ok(st) and st != 200:
+        print(f"vmnet -> [{st}] {_err_literal(res)}", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out(res)
+    else:
+        _print_data("vmnet", res)
+    return 0
+
+
+def _ws_open(url: str, auth, timeout: float):
+    """Handshake WebSocket por stdlib; devuelve (socket, bytes leídos de más)."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("ws", "wss"):
+        raise ValueError(f"esquema WebSocket no soportado: {u.scheme!r}")
+    host = u.hostname or "127.0.0.1"
+    port = u.port or (443 if u.scheme == "wss" else 80)
+    sock = socket.create_connection((host, port), timeout=timeout)
+    try:
+        if u.scheme == "wss":
+            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+        key = base64.b64encode(os.urandom(16)).decode()
+        path = u.path or "/"
+        if u.query:
+            path += "?" + u.query
+        lineas = [f"GET {path} HTTP/1.1", f"Host: {host}:{port}",
+                  "Upgrade: websocket", "Connection: Upgrade",
+                  f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13"]
+        if auth:
+            tok = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+            lineas.append(f"Authorization: Basic {tok}")
+        sock.sendall(("\r\n".join(lineas) + "\r\n\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("el servidor cerró durante el handshake WebSocket")
+            buf += chunk
+            if len(buf) > 65536:
+                raise ValueError("cabecera WebSocket demasiado larga")
+        head, rest = buf.split(b"\r\n\r\n", 1)
+        status = head.split(b"\r\n", 1)[0].decode(errors="replace")
+        if " 101" not in status:
+            raise ConnectionError(f"handshake WebSocket rechazado: {status}")
+        return sock, rest
+    except BaseException:
+        sock.close()
+        raise
+
+
+def _ws_frame(sock, pending: bytes):
+    """Lee un frame WS: (texto, pendientes); None como texto = frame de cierre."""
+    def take(n: int) -> bytes:
+        nonlocal pending
+        while len(pending) < n:
+            chunk = sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("el servidor cerró el canal WebSocket")
+            pending += chunk
+        out, pending = pending[:n], pending[n:]
+        return out
+
+    b0, b1 = take(2)
+    opcode = b0 & 0x0F
+    masked = bool(b1 & 0x80)
+    length = b1 & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", take(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", take(8))[0]
+    mask = take(4) if masked else None
+    payload = take(length)
+    if mask:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    if opcode == 0x8:
+        return None, pending
+    if opcode == 0x9:            # ping: se responde con pong enmascarado
+        sock.sendall(b"\x8a\x80" + os.urandom(4))
+        return "", pending
+    if opcode != 0x1:            # binario/continuación: no son eventos JSON
+        return "", pending
+    return payload.decode(errors="replace"), pending
+
+
+def cmd_watch(args, conf):
+    """Eventos en vivo por WebSocket (stdlib), con salida por timeout."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    pid = None
+    if args.project:
+        # watch es pasivo: resolver el proyecto no debe abrirlo.
+        pid = c.resolve_project(args.project)["project_id"]
+    url = c.notifications_ws_url(pid)
+    print(f"WebSocket: {url}", file=sys.stderr)
+    deadline = time.monotonic() + args.seconds
+    try:
+        sock, pending = _ws_open(url, s.auth, timeout=max(0.1, min(args.seconds, 5.0)))
+    except (OSError, ValueError) as e:
+        print(f"no conecta: {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"URL: {url}", file=sys.stderr)
+        return 1
+    eventos = 0
+    try:
+        while time.monotonic() < deadline:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
+            try:
+                texto, pending = _ws_frame(sock, pending)
+            except socket.timeout:
+                break
+            except (OSError, ValueError) as e:
+                print(f"error WS: {type(e).__name__}: {e}", file=sys.stderr)
+                return 1
+            if texto is None:
+                print("servidor cerró el canal WebSocket", file=sys.stderr)
+                break
+            if not texto:
+                continue
+            try:
+                evento = json.loads(texto)
+            except json.JSONDecodeError:
+                evento = texto
+            if args.json:
+                _json_out(evento)
+            elif isinstance(evento, dict):
+                print(f"  {str(evento.get('action', '?')):<28} "
+                      f"{json.dumps(evento.get('event', {}), ensure_ascii=False)[:200]}")
+            else:
+                print(f"  {evento}")
+            eventos += 1
+        print(f"{eventos} evento(s) en {args.seconds:g} s")
+    finally:
+        sock.close()
+    return 0
+
+
+def cmd_version_v1(args, conf):
+    """Versión de la API v1 del servidor (ruta /v1/version)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    st, res = _core_call(c.v1_version)
+    if st != 200:
+        print(f"/v1/version -> [{st}] {_err_literal(res)}", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out(res)
+    else:
+        _print_data("versión v1", res)
+    return 0
 
 
 def _emit_doctor(report: dict, lineas: list[str], as_json: bool) -> None:
@@ -2803,6 +3123,57 @@ def main() -> int:
     p.add_argument("--port", type=int, help="udp: puerto a reservar")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
+    # -- NIO, capturas por puerto, acciones masivas y eventos ------------------ #
+    p = sub.add_parser("nio", help="NIO de un puerto del compute local")
+    p.add_argument("action", choices=["get", "add", "rm"])
+    p.add_argument("node", help="nombre del nodo")
+    p.add_argument("--adapter", type=int, required=True, help="número de adaptador")
+    p.add_argument("--port", type=int, required=True, help="número de puerto")
+    p.add_argument("--nio", help="add: NIO como JSON (p. ej. '{\"type\": \"nio_udp\", ...}')")
+    p.add_argument("--emulator", help="forzar emulador del compute (qemu, vpcs...)")
+    p.add_argument("-p", "--project")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("capture-port", help="captura de un puerto (no de un enlace)")
+    p.add_argument("node", help="nombre del nodo")
+    p.add_argument("action", choices=["start", "stop", "pcap"])
+    p.add_argument("--adapter", type=int, required=True, help="número de adaptador")
+    p.add_argument("--port", type=int, required=True, help="número de puerto")
+    p.add_argument("--file", help="start: nombre del fichero de captura")
+    p.add_argument("--emulator", help="forzar emulador del compute (qemu, vpcs...)")
+    p.add_argument("-p", "--project")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("all", help="acción masiva sobre todos los nodos del proyecto")
+    p.add_argument("action", choices=["start", "stop", "suspend", "reload"])
+    p.add_argument("-p", "--project")
+    p.add_argument("--yes", action="store_true", help="no pedir confirmación")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("disk", help="binarios qemu-img y config del compute local")
+    p.add_argument("action", choices=["binaries", "config"])
+    p.add_argument("--set", action="append", default=[],
+                   help="config: clave=valor (repetible)")
+    p.add_argument("--yes", action="store_true", help="config: no pedir confirmación")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("vm", help="VMs invitadas e interfaces vmnet del compute local")
+    p.add_argument("action", choices=["vms", "vmnet"])
+    p.add_argument("--engine", choices=["virtualbox", "vmware"],
+                   help="vms: un motor concreto (por defecto, ambos)")
+    p.add_argument("--set", action="append", default=[],
+                   help="vmnet: clave=valor (repetible)")
+    p.add_argument("--yes", action="store_true", help="vmnet: no pedir confirmación")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("watch", help="eventos WS en vivo (sale por timeout)")
+    p.add_argument("--project", help="nombre o id del proyecto")
+    p.add_argument("--seconds", type=float, default=5.0, help="segundos a escuchar")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("version-v1", help="versión de la API v1")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
     for name, help_ in (("status", "proyectos y nodos"), ("up", "abre y arranca todo"),
                         ("down", "para todo"), ("test", "conectividad de las VPCS"),
                         ("fix", "repara un proyecto importado")):
@@ -2870,6 +3241,7 @@ def main() -> int:
     p.add_argument("--idle", type=float, default=0.9, help="segundos de quietud por comando")
     p.add_argument("--timeout", type=float, default=20.0)
     p.add_argument("--ready-timeout", dest="ready_timeout", type=float, default=30.0)
+    p.add_argument("--yes", action="store_true", help="reset-all: no pedir confirmación")
 
     p = sub.add_parser("exec", help="comandos por la consola telnet del nodo")
     p.add_argument("node")
@@ -2917,7 +3289,8 @@ def main() -> int:
     p = sub.add_parser("node", help="nodos: añadir/quitar/editar/resize/links/idlepc")
     p.add_argument("action", choices=["add", "rm", "dup", "props", "switch", "disk",
                                       "disk-resize", "links", "idlepc",
-                                      "start", "stop", "reload", "suspend", "line"])
+                                      "start", "stop", "reload", "suspend",
+                                       "resume", "pause", "unpause", "line"])
     p.add_argument("node", nargs="?")
     p.add_argument("-p", "--project")
     p.add_argument("--size", type=float, help="disk-resize: tamaño en GB")
@@ -2986,12 +3359,16 @@ def main() -> int:
         "project": cmd_project, "gns3vm": cmd_gns3vm, "notify": cmd_notify,
         "symbol": cmd_symbol, "iou-license": cmd_iou_license,
         "server": cmd_server, "emulator": cmd_emulator,
+        "nio": cmd_nio, "capture-port": cmd_capture_port, "all": cmd_all,
+        "disk": cmd_disk, "vm": cmd_vm, "watch": cmd_watch,
+        "version-v1": cmd_version_v1,
     }
     needs_core = {"exec", "shot", "key", "type", "mon", "new", "node", "upload", "draw",
                   "link", "doctor", "compute", "stats", "symbols", "appliances",
                   "console", "capture", "snap", "template", "images",
                   "project", "gns3vm", "notify", "symbol", "iou-license",
-                  "server", "emulator"}
+                  "server", "emulator", "nio", "capture-port", "all", "disk",
+                  "vm", "watch", "version-v1"}
     if args.cmd in needs_core and core is None:
         print("falta el núcleo gns3core: revisa ~/Applications/gns3-mcp/gns3core.py",
               file=sys.stderr)
