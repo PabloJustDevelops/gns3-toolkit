@@ -13,8 +13,7 @@ if [ ! -d .venv ]; then
 fi
 
 echo "→ instalando dependencias"
-env -u PYTHONPATH -u VIRTUAL_ENV uv pip install --python .venv/bin/python \
-  fastmcp httpx pillow pytest >/dev/null
+env -u PYTHONPATH -u VIRTUAL_ENV uv pip install --python .venv/bin/python -r requirements.txt >/dev/null
 
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$REPO/cli/gns3lab" "$HOME/.local/bin/gns3lab"
