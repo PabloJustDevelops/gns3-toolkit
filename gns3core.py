@@ -414,7 +414,14 @@ class Console:
         last = time.time()
         timed_out = False
         more_hits = 0
+        # Posición de `buf` hasta la que ya se contestó a una pregunta. Sin esto, un
+        # `[y/n]` que sigue en pantalla se responde en bucle (18 respuestas medidas) y
+        # el `continue` se comía el chequeo de timeout.
+        answered_upto = 0
         while True:
+            if time.time() - start > timeout:
+                timed_out = True
+                break
             if self.closed:
                 break
             chunk = self._pump(0.25)
@@ -422,29 +429,27 @@ class Console:
             if chunk:
                 buf += chunk
                 last = now
-                tail = buf[-400:]
-                if more and MORE_RE.search(tail):
-                    self.send(" ")
-                    more_hits += 1
-                    if more_hits > 200:
-                        more = False
-                    continue
-                if PASS_RE.search(tail) and password is not None:
-                    self.send(password + "\n")
-                    password = None       # solo una vez
-                    continue
-                if ASK_RE.search(tail):
-                    self.send((answers.pop(0) if answers else "y") + "\n")
-                    continue
-                if expect and re.search(expect, tail):
-                    break
-            else:
-                if expect and re.search(expect, buf[-400:]):
-                    break
-                if now - last >= idle:
-                    break
-            if now - start > timeout:
-                timed_out = True
+            tail = buf[-400:]
+            fresh = buf[answered_upto:]
+            if more and MORE_RE.search(fresh):
+                self.send(" ")
+                more_hits += 1
+                answered_upto = len(buf)
+                if more_hits > 200:
+                    more = False
+                continue
+            if PASS_RE.search(fresh) and password is not None:
+                self.send(password + "\n")
+                password = None       # solo una vez
+                answered_upto = len(buf)
+                continue
+            if ASK_RE.search(fresh):
+                self.send((answers.pop(0) if answers else "y") + "\n")
+                answered_upto = len(buf)
+                continue
+            if expect and re.search(expect, tail):
+                break
+            if not chunk and now - last >= idle:
                 break
         ms = int((time.time() - start) * 1000)
         out = buf

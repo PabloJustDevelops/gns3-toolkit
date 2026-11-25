@@ -58,12 +58,6 @@ def test_paginacion_responde_more_y_sigue(telnet_factory):
     assert res["timed_out"] is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: Console.run repite 'y' mientras '[y/n]' siga en la ventana de 400 "
-           "caracteres (18 respuestas medidas) y el `continue` de ASK_RE salta el "
-           "chequeo de timeout, así que acaba en timed_out=True",
-)
 def test_confirmacion_responde_y_no_se_cuelga(telnet_factory):
     def on_line(line):
         if line == "erase startup":
