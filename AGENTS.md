@@ -9,9 +9,10 @@ mano por VNC cuesta 40 minutos y pierde teclas.
 | Fichero | Qué hace |
 |---|---|
 | `gns3core.py` | Núcleo sin dependencias de terceros: `Client` (API REST v2), `Console` (consola telnet leída por prompt), `QemuMonitor` (canal HMP), `ocr`. |
-| `gns3_mcp_server.py` | Servidor MCP (fastmcp) con 18 tools. Importa `gns3core`. |
-| `cli/gns3lab` | CLI de 22 comandos. Añade la raíz del repo a `sys.path` e importa `gns3core`. |
-| `tests/` | pytest: consola contra un servidor telnet falso, HMP falso, utilidades, y un smoke del MCP. |
+| `gns3_mcp_server.py` | Servidor MCP (fastmcp) con **42 tools**, 3 resources + 1 template y 2 prompts. Importa `gns3core`. |
+| `cli/gns3lab` | CLI de **46 comandos**, `--json` global y subcomando `pf`. Añade la raíz del repo a `sys.path`. |
+| `pfsense.py` | Integración nativa de pfSense: parsea/renderiza `/conf/config.xml` sin perder secciones; credenciales solo por entorno. |
+| `tests/` | pytest: **551 tests**, dobles de HTTP/telnet/HMP, 100 % de `gns3core.py` y 94 % de `pfsense.py`. |
 
 ## Reglas duras
 
@@ -24,7 +25,15 @@ mano por VNC cuesta 40 minutos y pierde teclas.
   libvirtd`, borrar un proyecto o subir un disco se reportan en el informe final.
 - **Verifica con salida real.** Un `200 OK` de la API no prueba nada: `gns3lab doctor`, un `ping`
   con `0% packet loss` o un `shot` con OCR son la prueba. Si algo falla, pega el error literal.
-- **Compatibilidad**: sólo GNS3 **2.2.x**. La 3.x usa `/v3` con login por token y este cliente no sirve.
+- **pfSense sin VNC**: `gns3lab pf detect -p <proyecto>` decide si el disco usa `em0/em1` o
+  `vtnet0/1`; si usa `em0/em1` con `virtio-net-pci`, entra en bucle de «interface mismatch» y hay
+  que fijar `adapter_type=e1000`. La vía nativa es `pf assign → ip → dhcp → rule → nat → ssh`;
+  el menú solo hace falta en el primer arranque sin SSH y se maneja con `exec`/`type`/`key`.
+  Nunca guardes `PFSENSE_PASSWORD` en el repo: se lee del entorno y `run()` la enmascara.
+  Guía completa: `docs/PFSENSE-NATIVO.md`.
+- **MCP rápido**: prefiere `gns3_batch` para varias lecturas; paraleliza de solo lectura, devuelve
+  resultados indexados y admite cache. No lo uses para escrituras destructivas sin `confirm`.
+- Compatibilidad: sólo GNS3 **2.2.x**. La 3.x usa `/v3` con login por token y este cliente no sirve.
 - **Python 3.12**, venv en `.venv/` (creado con `uv venv`). El venv **no** se commitea.
 
 ## Cómo se ejecuta

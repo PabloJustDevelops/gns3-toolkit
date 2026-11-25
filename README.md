@@ -45,6 +45,7 @@ gns3lab doctor examen-kit                # servidor, computes, libvirt, discos, 
 gns3lab shot PF1 -p examen-kit           # la pantalla del nodo, como texto
 gns3lab exec PC1 "ip dhcp" "show ip" -p examen-kit
 gns3lab -s clase port examen-kit --name "Pablo Rodriguez" --start
+gns3lab pf detect -p examen-kit --json       # wan=em0, lan=em1 sin SSH
 ```
 
 ## Superficie
@@ -87,6 +88,10 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 - [docs/COMANDOS.md](docs/COMANDOS.md) — los subcomandos con sus flags y un ejemplo.
 - [docs/EXAMEN.md](docs/EXAMEN.md) — guion del examen, paso a paso, con la salida que confirma.
 - [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) — cómo encajan CLI, MCP y núcleo.
+- [docs/PFSENSE-NATIVO.md](docs/PFSENSE-NATIVO.md) — integración nativa sin VNC: detección de
+  interfaces, `config.xml`, reglas/NAT/SSH, errores literales y verificación.
+- [docs/MCP-VELOCIDAD.md](docs/MCP-VELOCIDAD.md) — `gns3_batch`, paralelismo de lecturas y
+  medición real del coste del MCP.
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — síntoma, causa y arreglo.
 
 ## Límites
@@ -98,7 +103,8 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 - El puerto de consola no se puede fijar por `PUT` en un nodo: se fija en la plantilla.
 Declaración de alcance: 12 áreas, 42 tools y 46 comandos, recalculados por `scripts/verify.py`.
 - El OCR lee bien 720x400 con fuente VGA; no espera texto pequeño.
-- Tests: 483 passed, cobertura 100 % de `gns3core.py` (718 sentencias, 0 miss), con dobles
+- Tests: 551 passed, cobertura 100 % de `gns3core.py` (718 sentencias, 0 miss) y 94 % de
+  `pfsense.py` (98 % conjunta), con dobles
   de HTTP, telnet y HMP y sin servidor GNS3. La matriz de lo que cubre cada
   endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).
 

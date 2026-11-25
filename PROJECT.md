@@ -7,7 +7,7 @@
 es el examen del 1 de diciembre de 2026: montar un escenario (pfSense + VLANs + NAT +
 clientes) desde la terminal, con el VNC sólo como último recurso.
 
-## Estado (2026-11-25, GUI portada + REA)
+## Estado (2026-11-25, pfSense nativo + MCP rápido)
 
 - `gns3core.py`: **12 áreas** de la API v2 (`API_V2_MAP`): las 11 de la GUI operativa más
   `nio_ports` (NIO y captura por puerto, acciones masivas, `resume`/`pause`, qemu img, VMs
@@ -15,7 +15,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
 - CLI: **46 comandos**; MCP: **42 tools** (`hermes mcp test gns3` → Connected, 41 discovered).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 466 passed, cobertura 100 % de `gns3core.py`** (718 sentencias, 0 miss).
+- **Tests: 551 passed, 100 % de `gns3core.py`** (718 sentencias, 0 miss) y 94 % de `pfsense.py` (98 % conjunta).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
 - MCP: 42 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
