@@ -2,13 +2,16 @@
 
 Esta carpeta contiene la versión delgada de la skill: apunta al repo público
 **https://github.com/PabloJustDevelops/gns3-toolkit** y no duplica lógica. No edites la skill
-instalada directamente desde un worktree; copia estos dos ficheros cuando el cambio esté listo.
+instalada directamente desde un worktree; copia estos ficheros cuando el cambio esté listo.
 
 ## Ficheros
 
 - [SKILL.md](SKILL.md) — definición y reglas de la skill.
 - [scripts/gns3.sh](scripts/gns3.sh) — envoltorio que invoca `gns3lab` con
   `$HOME/Proyectos/gns3-toolkit/cli` primero en el PATH. Es un `exec`, sin lógica ni secretos.
+- [references/pfsense-nativo.md](references/pfsense-nativo.md) — referencia corta del flujo
+  nativo de pfSense (`pf detect` → `assign` → `ip` → `dhcp` → `rule` → `nat` → `ssh`). Aviso:
+  nunca guardes la contraseña en el repo.
 
 ## Instalación
 
@@ -19,12 +22,15 @@ instalada directamente desde un worktree; copia estos dos ficheros cuando el cam
    cd ~/Proyectos/gns3-toolkit && ./scripts/install.sh
    ```
 
-2. Copia los dos ficheros a la skill de Hermes:
+2. Copia los tres ficheros a la skill de Hermes:
 
    ```bash
-   mkdir -p ~/.hermes/skills/devops/gns3-lab-automation/scripts
+   mkdir -p ~/.hermes/skills/devops/gns3-lab-automation/scripts \
+            ~/.hermes/skills/devops/gns3-lab-automation/references
    cp skill-sync/SKILL.md ~/.hermes/skills/devops/gns3-lab-automation/SKILL.md
    cp skill-sync/scripts/gns3.sh ~/.hermes/skills/devops/gns3-lab-automation/scripts/gns3.sh
+   cp skill-sync/references/pfsense-nativo.md \
+      ~/.hermes/skills/devops/gns3-lab-automation/references/pfsense-nativo.md
    chmod +x ~/.hermes/skills/devops/gns3-lab-automation/scripts/gns3.sh
    ```
 
