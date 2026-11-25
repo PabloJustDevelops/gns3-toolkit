@@ -8,6 +8,7 @@ Transporte: stdio. Uso: gns3-mcp  (o python -m gns3_mcp_server)
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import configparser
 import fnmatch
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+import websockets
 from fastmcp import FastMCP
 
 import gns3core as core
@@ -108,6 +110,15 @@ def _err_msg(status: int, body: Any, what: str) -> dict:
     if msg is None:
         msg = "sin detalle"
     return {"error": f"{what} falló: [{status}] {str(msg)[:400]}"}
+
+
+def _api_error(status: int, body: Any, what: str) -> dict:
+    """Error de compute con status explícito y sin sustituir su mensaje por contenido inventado."""
+    msg = body.get("message") if isinstance(body, dict) else body
+    if isinstance(msg, bytes):
+        msg = msg.decode(errors="replace")
+    return {"error": f"{what} falló: [{status}] {str(msg)[:4000] if msg is not None else 'sin detalle'}",
+            "status": status}
 
 
 def _unexpected_keys(body: Any) -> list[str]:
@@ -235,17 +246,18 @@ def _resolve_template(client, template_id: Optional[str] = None,
     return None, {"error": f"'{name}' es ambiguo", "candidates": [t.get("name") for t in hits]}
 
 
-def _endpoint_error(node: dict, adapter: int, port: int, side: str) -> Optional[dict]:
+def _endpoint_error(node: dict, adapter: int, port: int, side: str = "") -> Optional[dict]:
     """Explica un extremo imposible antes de que GNS3 devuelva un 404 opaco."""
     name, ntype = node.get("name"), node.get("node_type")
     ports = node.get("ports") or []
+    prefix = f"{side}_" if side else ""
     if ntype == "ethernet_switch":
         max_port = max((p.get("port_number", 0) for p in ports), default=7)
         if adapter != 0:
             return {"error": f"{name} es un ethernet_switch: sus {max_port + 1} puertos viven todos "
-                             f"en el adapter 0. Con adapter_{side}={adapter}, port_{side}={port} GNS3 "
+                             f"en el adapter 0. Con {prefix}adapter={adapter}, {prefix}port={port} GNS3 "
                              f"respondería 'Port {adapter}/{port} for {name} not found'. Usa "
-                             f"adapter_{side}=0 y port_{side}=N (0-{max_port})."}
+                             f"{prefix}adapter=0 y {prefix}port=N (0-{max_port})."}
         if not 0 <= port <= max_port:
             return {"error": f"{name} no tiene el puerto {port} en el adapter 0 (rango 0-{max_port})",
                     "ports": [f"0/{p.get('port_number')}" for p in ports]
@@ -275,9 +287,17 @@ def gns3_status() -> dict:
     projs = _projects()
     opened = [p["name"] for p in projs if p.get("status") == "opened"] if isinstance(projs, list) else []
     c = _conf()
+    try:
+        st_v1, version_v1 = _client().v1_version()
+    except ConnectionError as e:
+        version_v1 = {"error": str(e)}
+    else:
+        if st_v1 != 200:
+            version_v1 = _api_error(st_v1, version_v1, "obtener versión v1")
     return {
         "running": True,
         "version": info.get("version") if isinstance(info, dict) else info,
+        "version_v1": version_v1,
         "url": c["url"],
         "local": info.get("local") if isinstance(info, dict) else None,
         "computes": [{"id": x.get("compute_id"), "name": x.get("name"), "connected": x.get("connected")} for x in computes],
@@ -637,6 +657,36 @@ def gns3_nodes(
 
 
 @mcp.tool
+def gns3_nodes_bulk(
+    action: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    confirm: bool = False,
+) -> Any:
+    """Acción masiva sobre todos los nodos: action=start|stop|suspend|reload.
+
+    Cambia el estado de toda la topología y exige `confirm=True`.
+    """
+    action = action.lower()
+    if action not in ("start", "stop", "suspend", "reload"):
+        return {"error": f"acción masiva desconocida: {action}",
+                "valid": ["start", "stop", "suspend", "reload"]}
+    if not confirm:
+        return {"error": f"acción masiva {action} exige confirm=True"}
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        st, res = client.nodes_action(proj["project_id"], action)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    if st not in (200, 201, 204):
+        return _api_error(st, res, f"acción masiva {action}")
+    return res if res is not None else {"ok": True}
+
+
+@mcp.tool
 def gns3_links(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
@@ -929,26 +979,37 @@ def gns3_console(
 
 @mcp.tool
 def gns3_console_control(
-    node: str,
-    action: str,
+    node: Optional[str] = None,
+    action: str = "reset",
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
     confirm: bool = False,
 ) -> Any:
-    """Consola de un nodo: action=reset|url.
+    """Consola de un nodo: action=reset|reset-all|url.
 
-    reset reinicia la consola y exige `confirm=True`; url devuelve la URL WebSocket
-    expuesta por el nodo sin abrir VNC.
+    reset y reset-all reinician el proxy de consola (no el invitado) y exigen
+    `confirm=True`; reset-all no exige `node`. url devuelve la URL WebSocket expuesta
+    por el nodo sin abrir VNC.
     """
     action = action.lower()
-    if action not in ("reset", "url"):
-        return {"error": f"acción desconocida: {action}", "valid": ["reset", "url"]}
-    if action == "reset" and not confirm:
-        return {"error": "reset de la consola exige confirm=True"}
+    if action not in ("reset", "reset-all", "url"):
+        return {"error": f"acción desconocida: {action}", "valid": ["reset", "reset-all", "url"]}
+    if action in ("reset", "reset-all") and not confirm:
+        return {"error": f"{action} de la consola exige confirm=True"}
+    if action != "reset-all" and not node:
+        return {"error": f"action={action} exige node"}
     client = _client()
     proj, err = _pid_or_error(client, project_id, project_name)
     if err:
         return err
+    if action == "reset-all":
+        try:
+            st, res = client.nodes_console_reset(proj["project_id"])
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st not in (200, 201, 204):
+            return _api_error(st, res, "resetear todas las consolas")
+        return {"reset": True, "scope": "all", "project": proj["name"], "detail": res}
     try:
         target = client.find_node(proj["project_id"], node)
     except (SystemExit, ConnectionError, RuntimeError) as e:
@@ -1065,6 +1126,110 @@ def gns3_capture(
         return res
 
     return {"error": f"acción desconocida: {action}"}
+
+
+@mcp.tool
+def gns3_nio(
+    node: str,
+    adapter: int,
+    port: int,
+    action: str = "get",
+    nio: Optional[dict] = None,
+    emulator: Optional[str] = None,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """NIO de un puerto del compute: action=get|set|delete.
+
+    `set` recibe el schema del NIO en `nio` (p. ej. nio_udp). Para cambiar los extremos
+    UDP de un NIO existente, GNS3 exige borrarlo y crearlo de nuevo.
+    """
+    action = action.lower()
+    if action not in ("get", "set", "delete"):
+        return {"error": f"acción de NIO desconocida: {action}", "valid": ["get", "set", "delete"]}
+    if action == "set" and not isinstance(nio, dict):
+        return {"error": "action=set exige nio (dict)"}
+    if not isinstance(adapter, int) or not isinstance(port, int) or adapter < 0 or port < 0:
+        return {"error": "adapter y port deben ser enteros no negativos"}
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        target = client.find_node(proj["project_id"], node)
+    except (SystemExit, ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    bad = _endpoint_error(target, adapter, port)
+    if bad:
+        return bad
+    try:
+        st, res = client.port_nio(
+            proj["project_id"], target["node_id"], adapter, port,
+            body=nio if action == "set" else None,
+            emulator=emulator,
+            delete=action == "delete",
+        )
+    except (ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    if st not in (200, 201, 204):
+        return _api_error(st, res, f"{action} NIO")
+    if action == "delete":
+        return {"deleted": True, "node": target["name"], "adapter": adapter, "port": port}
+    if action == "set":
+        return res if res is not None else {"updated": True}
+    return res
+
+
+@mcp.tool
+def gns3_port_capture(
+    node: str,
+    adapter: int,
+    port: int,
+    action: str = "start",
+    file_name: Optional[str] = None,
+    emulator: Optional[str] = None,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Captura de un puerto del compute: action=start|stop|pcap.
+
+    `pcap` devuelve los bytes reales codificados en base64; no abre VNC ni modifica el nodo.
+    """
+    action = action.lower()
+    actions = {"start": "start_capture", "stop": "stop_capture", "pcap": "pcap"}
+    if action not in actions:
+        return {"error": f"acción de captura desconocida: {action}",
+                "valid": ["start", "stop", "pcap"]}
+    if not isinstance(adapter, int) or not isinstance(port, int) or adapter < 0 or port < 0:
+        return {"error": "adapter y port deben ser enteros no negativos"}
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        target = client.find_node(proj["project_id"], node)
+    except (SystemExit, ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    bad = _endpoint_error(target, adapter, port)
+    if bad:
+        return bad
+    try:
+        st, res = client.port_capture(
+            proj["project_id"], target["node_id"], adapter, port, actions[action],
+            file_name=file_name, emulator=emulator,
+        )
+    except (ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    if st not in (200, 201, 204):
+        return _api_error(st, res, f"{action} captura de puerto")
+    if action == "pcap":
+        if not isinstance(res, bytes):
+            return _api_error(st, res, "leer pcap de puerto")
+        return {"node": target["name"], "adapter": adapter, "port": port,
+                "bytes": len(res), "content_base64": base64.b64encode(res).decode("ascii")}
+    if res is not None:
+        return res
+    return {"started": True} if action == "start" else {"stopped": True}
 
 
 @mcp.tool
@@ -2121,15 +2286,16 @@ def gns3_node_action(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """Arranca, para, reinicia o suspende **un** nodo: action=start|stop|reload|suspend.
+    """Arranca, para, reinicia, suspende o reanuda **un** nodo.
 
-    `node` acepta nombre, patrón o node_id. Devuelve el estado real releído del nodo, no
-    sólo el 200 del POST. Para varios nodos a la vez, `gns3_nodes(action=...)`.
+    action=start|stop|reload|suspend|resume|pause|unpause. `node` acepta nombre, patrón
+    o node_id. Devuelve el estado real releído del nodo, no sólo el 200 del POST.
+    Para una acción masiva usa `gns3_nodes_bulk`.
     """
     action = action.lower()
-    if action not in ("start", "stop", "reload", "suspend"):
+    if action not in ("start", "stop", "reload", "suspend", "resume", "pause", "unpause"):
         return {"error": f"acción de nodo desconocida: {action}",
-                "valid": ["start", "stop", "reload", "suspend"]}
+                "valid": ["start", "stop", "reload", "suspend", "resume", "pause", "unpause"]}
     client = _client()
     proj, err = _pid_or_error(client, project_id, project_name)
     if err:
@@ -2222,6 +2388,83 @@ def gns3_gns3vm(
 
 
 @mcp.tool
+def gns3_events_url(project_id: Optional[str] = None, project_name: Optional[str] = None) -> Any:
+    """URL del stream WebSocket de notificaciones, global o de un proyecto.
+
+    La URL no lleva credenciales. Para suscribirse manualmente, usa
+    `websockets.connect(url, additional_headers={"Authorization": "Basic <base64 usuario:contraseña>"})`
+    y decodifica cada mensaje como JSON. `gns3_events(action="listen")` hace ambas cosas
+    con la configuración local y un timeout estricto.
+    """
+    pid = None
+    if project_id or project_name:
+        pid, _ = _resolve_project(project_id, project_name)
+        if not pid:
+            return {"error": "proyecto no encontrado", "project_id": project_id,
+                    "project_name": project_name}
+    return {"url": _client().notifications_ws_url(pid), "note": "Suscríbete con websockets.connect; "
+            "cada mensaje es JSON. Para autenticación HTTP Basic usa additional_headers con "
+            "Authorization: Basic <base64 usuario:contraseña>, sin poner secretos en la URL."}
+
+
+async def _listen_notifications(url: str, seconds: float, auth: tuple[str, str]) -> dict:
+    """Escucha eventos reales hasta que vence exactamente el plazo solicitado."""
+    token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode("ascii")
+    headers = {"Authorization": f"Basic {token}"}
+    events: list[Any] = []
+    timed_out = False
+    error = None
+    try:
+        async with asyncio.timeout(seconds):
+            async with websockets.connect(
+                url, additional_headers=headers,
+                open_timeout=seconds, close_timeout=seconds,
+            ) as ws:
+                while True:
+                    message = await ws.recv()
+                    if isinstance(message, bytes):
+                        message = message.decode(errors="replace")
+                    try:
+                        events.append(json.loads(message))
+                    except json.JSONDecodeError:
+                        events.append(message)
+    except TimeoutError:
+        timed_out = True
+    except (OSError, websockets.exceptions.WebSocketException) as e:
+        error = str(e)
+    out = {"url": url, "seconds": seconds, "events": events, "timed_out": timed_out}
+    if error:
+        out["error"] = error
+    return out
+
+
+@mcp.tool
+def gns3_events(action: str = "url", seconds: float = 5) -> Any:
+    """Notificaciones WebSocket: action=url|listen.
+
+    listen devuelve los eventos JSON recibidos y termina como máximo en `seconds`.
+    Usa la autenticación de la configuración local sin exponerla en la URL ni en la salida.
+    """
+    action = action.lower()
+    if action not in ("url", "listen"):
+        return {"error": f"acción desconocida: {action}", "valid": ["url", "listen"]}
+    if action == "url":
+        return gns3_events_url()
+    try:
+        seconds = float(seconds)
+    except (TypeError, ValueError):
+        return {"error": "seconds debe ser un número positivo"}
+    if not 0 < seconds < float("inf"):
+        return {"error": "seconds debe ser un número positivo"}
+    info = gns3_events_url()
+    if not isinstance(info, dict) or info.get("error"):
+        return info
+    c = _conf()
+    auth = (c.get("user", ""), c.get("password", ""))
+    return asyncio.run(_listen_notifications(info["url"], seconds, auth))
+
+
+@mcp.tool
 def gns3_notifications(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
@@ -2291,28 +2534,50 @@ def gns3_server(action: str = "version", confirm: bool = False) -> Any:
 
 
 @mcp.tool
-def gns3_emulator(action: str = "qemu-capabilities", port: Optional[int] = None) -> Any:
-    """Emuladores y red local: action=qemu-binaries|qemu-capabilities|docker-images|interfaces|ports|udp.
+def gns3_emulator(
+    action: str = "qemu-capabilities",
+    port: Optional[int] = None,
+    body: Optional[dict] = None,
+    confirm: bool = False,
+) -> Any:
+    """Emuladores y red local: action=qemu-binaries|qemu-capabilities|docker-images|interfaces|ports|udp|img-binaries|img-config|virtualbox-vms|vmware-vms|vmware-vmnet.
 
-    udp reserva un puerto UDP y exige `port`.
+    udp reserva un puerto UDP y exige `port`. img-config crea una imagen qemu-img
+    con `body` o la actualiza sin `body`; vmware-vmnet crea una interfaz. img-config
+    y vmware-vmnet exigen `confirm=True`.
     """
     methods = {
         "qemu-binaries": "qemu_binaries", "qemu-capabilities": "qemu_capabilities",
         "docker-images": "docker_images", "interfaces": "network_interfaces",
-        "ports": "network_ports", "udp": "udp_port",
+        "ports": "network_ports", "img-binaries": "qemu_img_binaries",
+        "virtualbox-vms": "virtualbox_vms", "vmware-vms": "vmware_vms",
     }
     action = action.lower()
-    if action not in methods:
-        return {"error": f"acción desconocida: {action}", "valid": list(methods)}
+    valid = list(methods) + ["udp", "img-config", "vmware-vmnet"]
+    if action not in valid:
+        return {"error": f"acción desconocida: {action}", "valid": valid}
     if action == "udp" and (port is None or not 1 <= port <= 65535):
         return {"error": "udp exige port entre 1 y 65535"}
+    if body is not None and not isinstance(body, dict):
+        return {"error": "body debe ser un dict"}
+    if action == "img-config" and not confirm:
+        return {"error": "img-config exige confirm=True"}
+    if action == "vmware-vmnet" and not confirm:
+        return {"error": "vmware-vmnet exige confirm=True"}
     client = _client()
     try:
-        st, res = client.udp_port(port) if action == "udp" else getattr(client, methods[action])()
+        if action == "udp":
+            st, res = client.udp_port(port)
+        elif action == "img-config":
+            st, res = client.qemu_img_config(body)
+        elif action == "vmware-vmnet":
+            st, res = client.vmware_vmnet(body)
+        else:
+            st, res = getattr(client, methods[action])()
     except ConnectionError as e:
         return {"error": str(e)}
     ok = st in (200, 201, 204)
-    return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, action)
+    return (res if res is not None else {"ok": True}) if ok else _api_error(st, res, action)
 
 
 if __name__ == "__main__":
