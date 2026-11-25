@@ -38,8 +38,22 @@ Sin VNC (lo que se usa de verdad en un examen):
     gns3lab new <nombre>                         # proyecto esqueleto vacío
     gns3lab draw "192.168.10.0/24 -> OPT1"       # nota en el canvas
     gns3lab draw list|edit <id> --set k=v|rm <id>
-    gns3lab link list|add|rm|edit <link_id> --set k=v
+    gns3lab link list|add|rm|edit|filters <link_id> --set k=v
     gns3lab doctor [proyecto]                    # chequeo integral antes de entregar
+
+GUI operativa portada a la CLI (llama a los métodos de gns3core, no los reimplementa):
+
+    gns3lab node disk-resize|links|idlepc <nodo> --size GB [-p proyecto]
+    gns3lab console reset|url <nodo>             # reiniciar consola / URL WebSocket
+    gns3lab project duplicate|load|stats|file ... # clonar, cargar, estadísticas y ficheros
+    gns3lab compute add|update|rm|ports|idlepc|action ...
+    gns3lab gns3vm show|set|engines|vms ...
+    gns3lab notify [proyecto] [--json]
+    gns3lab template duplicate|base-config ...
+    gns3lab symbol dimensions|raw|default|upload <id> ...
+    gns3lab iou-license get|set ...
+    gns3lab server shutdown|reload|debug --yes
+    gns3lab emulator qemu-binaries|qemu-capabilities|docker-images|interfaces|ports|udp
 
 El servidor se elige con --server (por defecto `local`). Un proyecto se puede dar
 por nombre parcial o por id; si se omite, se usa el único proyecto abierto y, si
@@ -387,6 +401,46 @@ def _json_out(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
 
 
+def _ok(st) -> bool:
+    return st in (200, 201, 204)
+
+
+def _confirm(args, what: str) -> bool:
+    """Acciones destructivas: exigen --yes o confirmación por TTY."""
+    if getattr(args, "yes", False):
+        return True
+    if not sys.stdin.isatty():
+        print(f"{what} es irreversible y stdin no es un TTY: repite con --yes",
+              file=sys.stderr)
+        return False
+    if input(f"¿{what}? [y/N] ").strip().lower() not in ("y", "s", "si", "sí", "yes"):
+        print("cancelado")
+        return False
+    return True
+
+
+def _print_data(titulo: str, data, indent: str = "  ") -> None:
+    """Muestra un dict/lista de la API sin volcar JSON anidado."""
+    def valor(v):
+        if isinstance(v, (dict, list)):
+            return json.dumps(v, ensure_ascii=False, default=str)
+        return v
+
+    print(titulo)
+    if isinstance(data, dict):
+        if not data:
+            print(f"{indent}(vacío)")
+        for k in sorted(data):
+            print(f"{indent}{str(k):<22} {valor(data[k])}")
+    elif isinstance(data, list):
+        if not data:
+            print(f"{indent}(vacío)")
+        for i, v in enumerate(data):
+            print(f"{indent}[{i}] {valor(v)}")
+    else:
+        print(f"{indent}{data}")
+
+
 def _core_call(fn, *a, **kw):
     """Llama al núcleo y convierte un corte de red en un error legible.
 
@@ -409,15 +463,115 @@ def _compute_row(comp: dict) -> dict:
     return {k: comp.get(k) for k in COMPUTE_FIELDS}
 
 
+COMPUTE_ACTIONS = ("add", "update", "rm", "ports", "idlepc", "action")
+
+
+def _cmd_compute_action(s: Server, c, args, act: str) -> int:
+    """Administración de computes: add, update, rm, ports, idlepc y action."""
+    if act == "add":
+        body = _set_body(args.set)
+        if not body:
+            raise SystemExit("compute add exige --set clave=valor (repetible)")
+        st, res = _core_call(c.compute_create, body)
+        if not _ok(st):
+            print(f"no se pudo crear el compute: [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        cid = res.get("compute_id") if isinstance(res, dict) else None
+        # Releer: el 200 no prueba que el compute se haya registrado.
+        checked = _core_call(c.compute, cid) if cid else None
+        print(f"compute creado: {cid or '?'} "
+              f"{'verificado' if isinstance(checked, dict) else 'sin verificación'}")
+        return 0 if isinstance(checked, dict) else 1
+
+    if act in ("update", "rm", "ports", "idlepc", "action") and not args.cid:
+        raise SystemExit(f"compute {act} exige el compute_id o nombre")
+
+    if act == "update":
+        body = _set_body(args.set)
+        if not body:
+            raise SystemExit("compute update exige --set clave=valor (repetible)")
+        st, res = _core_call(c.compute_update, args.cid, body)
+        if not _ok(st):
+            print(f"no se pudo editar el compute: [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        check = _core_call(c.compute, args.cid)
+        malos = {k: {"pedido": v, "leído": check.get(k) if isinstance(check, dict) else None}
+                 for k, v in body.items()
+                 if not isinstance(check, dict) or check.get(k) != v}
+        print(f"compute {args.cid}: " + ", ".join(f"{k}={v!r}" for k, v in body.items()))
+        if malos:
+            print(f"  la API no aplicó: {malos}", file=sys.stderr)
+            return 1
+        return 0
+
+    if act == "rm":
+        if not _confirm(args, f"borrar el compute {args.cid!r}"):
+            return 1
+        st, res = _core_call(c.compute_delete, args.cid)
+        if not _ok(st):
+            print(f"no se pudo borrar el compute: [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        quedan = [str(x.get("compute_id")) for x in _core_call(c.computes)]
+        print(f"compute {args.cid} borrado"
+              f"{' (sigue en la lista)' if args.cid in quedan else ''}")
+        return 0
+
+    if act == "ports":
+        st, res = _core_call(c.compute_ports, args.cid)
+        if st != 200:
+            print(f"puertos de {args.cid} -> [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        if args.json:
+            _json_out(res)
+        else:
+            _print_data(f"puertos de {args.cid}", res)
+        return 0
+
+    if act == "idlepc":
+        st, res = _core_call(c.compute_auto_idlepc, args.cid)
+        if not _ok(st) and st != 200:
+            print(f"auto_idlepc de {args.cid} -> [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        if args.json:
+            _json_out(res)
+        else:
+            print(f"auto_idlepc de {args.cid}: {res}")
+        return 0
+
+    # act == "action": ruta genérica /computes/{id}/{emulator}/{action}
+    emulator = getattr(args, "emulator_arg", None) or args.emulator
+    remote = getattr(args, "remote_arg", None) or args.remote_action
+    if not emulator or not remote:
+        raise SystemExit("compute action exige <emulador> <acción> "
+                         "(o --emulator y --remote-action)")
+    body = _set_body(args.set) or None
+    st, res = _core_call(c.compute_action, args.cid, emulator, remote, body)
+    if not _ok(st) and st != 200:
+        print(f"compute {args.cid} {emulator}/{remote} -> "
+              f"[{st}] {_err(res)}", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out(res)
+    else:
+        _print_data(f"compute {args.cid} {emulator}/{remote}", res)
+    return 0
+
+
 def cmd_compute(args, conf):
-    """Compute(s): `compute` lista, `compute <id|nombre>` da el detalle."""
+    """Compute(s): lista, detalle y add|update|rm|ports|idlepc|action."""
     s = Server(args.server, conf)
     c = _core_client(s)
+    act = getattr(args, "action", None)
+    if act in COMPUTE_ACTIONS:
+        return _cmd_compute_action(s, c, args, act)
+
+    # Modo clásico: el primer posicional es el compute_id/nombre.
+    needle_arg = act or getattr(args, "cid", None)
     comps = _core_call(c.computes)
     if not comps:
         print(f"GET /v2/computes no devolvió computes en {s.url}", file=sys.stderr)
         return 1
-    if not args.cid:
+    if not needle_arg:
         filas = [_compute_row(x) for x in comps]
         if args.json:
             _json_out({"count": len(filas), "computes": filas})
@@ -428,15 +582,15 @@ def cmd_compute(args, conf):
                   f"{r['protocol']}://{r['host']}:{r['port']}")
         return 0
 
-    needle = args.cid.lower()
+    needle = needle_arg.lower()
     hits = [x for x in comps
             if str(x.get("compute_id", "")).lower() == needle
             or str(x.get("name", "")).lower() == needle]
     if not hits:
-        raise SystemExit(f"compute no encontrado: {args.cid!r}. Hay: "
+        raise SystemExit(f"compute no encontrado: {needle_arg!r}. Hay: "
                          + ", ".join(str(x.get("compute_id")) for x in comps))
     if len(hits) > 1:
-        raise SystemExit(f"'{args.cid}' es ambiguo: "
+        raise SystemExit(f"'{needle_arg}' es ambiguo: "
                          + ", ".join(str(x.get("compute_id")) for x in hits))
     cid = hits[0]["compute_id"]
     comp = _core_call(c.compute, cid)
@@ -1320,6 +1474,55 @@ def cmd_template(args, conf):
               f"{str(t['template_id'])[:8]})")
         return 0
 
+    if act == "duplicate":
+        if not args.target:
+            raise SystemExit("duplicate exige el nombre o id de la plantilla")
+        tpl = _resolve_id(c.templates(), args.target, "template_id", "plantilla")
+        st, res = _core_call(c.template_duplicate, tpl["template_id"], args.name)
+        if not _ok(st):
+            print(f"no se pudo duplicar {tpl.get('name')}: [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        print(f"duplicada {tpl.get('name')} como "
+              f"{res.get('name', args.name or '-')} "
+              f"({str(res.get('template_id'))[:8]})")
+        return 0
+
+    if act == "base-config":
+        if not args.target:
+            st, res = _core_call(c.template_base_configs)
+            if st != 200:
+                print(f"base-configs -> [{st}] {_err(res)}", file=sys.stderr)
+                return 1
+            if args.json:
+                _json_out(res)
+            else:
+                _print_data("base-configs", res)
+            return 0
+        if not args.filename:
+            raise SystemExit("base-config exige el fichero (p. ej. startup-config)")
+        tpl = _resolve_id(c.templates(), args.target, "template_id", "plantilla")
+        if args.content is None:
+            data = _core_call(c.template_base_config, tpl["template_id"], args.filename)
+            if isinstance(data, dict) and data.get("error"):
+                print(f"no puedo leer '{args.filename}': {data['error']}", file=sys.stderr)
+                return 1
+            if args.json:
+                _json_out({"content": data})
+            else:
+                print(data)
+            return 0
+        st, res = _core_call(c.template_base_config, tpl["template_id"],
+                             args.filename, args.content)
+        if not _ok(st) and st != 200:
+            print(f"no puedo escribir '{args.filename}': [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        leido = _core_call(c.template_base_config, tpl["template_id"], args.filename)
+        print(f"escrito '{args.filename}' en {tpl.get('name')} "
+              f"{'verificado' if leido == args.content else 'NO verificado'}")
+        return 0 if leido == args.content else 1
+
     raise SystemExit(f"acción desconocida: {act}")
 
 
@@ -1449,9 +1652,28 @@ def cmd_console(args, conf):
     Es el atajo contra el VNC: una sola sesión telnet con prompt real, en vez de
     abrir y cerrar el socket en cada comando. `exit` (o Ctrl-D) sale sin mandar nada
     al nodo. En un nodo gráfico se remite a `shot`/`type`/`key`, igual que `exec`.
+
+    Con `reset <nodo>` reinicia la consola del nodo; con `url <nodo>` muestra su
+    WebSocket. Ambas acciones delegan en `gns3core`.
     """
     s = Server(args.server, conf)
-    c, proj, node = _core_target(s, args.project, args.node)
+    modo = args.node if args.node in ("reset", "url") else None
+    if modo and not args.target:
+        raise SystemExit(f"console {modo} exige el nombre del nodo")
+    node_name = args.target if modo else args.node
+    c, proj, node = _core_target(s, args.project, node_name)
+    pid = proj["project_id"]
+    if modo == "reset":
+        st, res = _core_call(c.console_reset, pid, node["node_id"])
+        if not _ok(st):
+            print(f"no se pudo reiniciar la consola de {node['name']}: "
+                  f"[{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        print(f"{node['name']}: consola reiniciada")
+        return 0
+    if modo == "url":
+        print(_core_call(c.console_ws_url, pid, node["node_id"]))
+        return 0
     if node.get("status") != "started":
         print(f"{node['name']} no está arrancado (status={node.get('status')})", file=sys.stderr)
         return 1
@@ -1613,6 +1835,47 @@ def cmd_node(args, conf):
     pid = proj["project_id"]
     c.ensure_open(pid)
     act = args.action
+
+    if act == "disk-resize":
+        if not args.node:
+            raise SystemExit("disk-resize exige el nombre del nodo")
+        if args.size is None:
+            raise SystemExit("disk-resize exige --size (GB)")
+        node = c.find_node(pid, args.node)
+        st, body = _core_call(c.node_resize_disk, pid, node["node_id"], args.size)
+        ok = _ok(st)
+        print(f"{node['name']}: resize a {args.size:g} GB "
+              f"-> {'OK' if ok else _err(body)}")
+        return 0 if ok else 1
+
+    if act in ("links", "idlepc"):
+        if not args.node:
+            raise SystemExit(f"{act} exige el nombre del nodo")
+        node = c.find_node(pid, args.node)
+        if act == "links":
+            enlaces = _core_call(c.node_links, pid, node["node_id"])
+            if args.json:
+                _json_out({"node": node["name"], "count": len(enlaces), "links": enlaces})
+                return 0
+            nombres = {n["node_id"]: n["name"] for n in c.nodes(pid)}
+            print(f"enlaces de {node['name']}: {len(enlaces)}")
+            for l in enlaces:
+                extremos = " <-> ".join(
+                    f"{nombres.get(e['node_id'], '?')}:{e['adapter_number']}/{e['port_number']}"
+                    for e in l.get("nodes", []))
+                print(f"  {str(l.get('link_id'))[:8]}  {l.get('link_type') or '-':<10} "
+                      f"{extremos}")
+            return 0
+        st, res = _core_call(c.node_idlepc, pid, node["node_id"], args.proposals)
+        if st != 200 and not _ok(st):
+            print(f"idlepc de {node['name']} -> [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        if args.json:
+            _json_out(res)
+        else:
+            _print_data(f"idlepc de {node['name']}"
+                        + (" (propuestas)" if args.proposals else ""), res)
+        return 0
 
     if act == "add":
         if not args.template:
@@ -1936,6 +2199,20 @@ def cmd_link(args, conf):
             print(f"  la API no aplicó: {malos}", file=sys.stderr)
             return 1
         return 0
+    if args.action == "filters":
+        if not args.nodes:
+            raise SystemExit("filters exige el link_id")
+        enlace = _resolve_id(c.links(pid), args.nodes[0], "link_id", "enlace")
+        st, res = _core_call(c.link_available_filters, pid, enlace["link_id"])
+        if st != 200:
+            print(f"filtros de {enlace['link_id'][:8]} -> [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        if args.json:
+            _json_out(res)
+        else:
+            _print_data(f"filtros disponibles en {enlace['link_id'][:8]}", res)
+        return 0
     raise SystemExit(f"acción desconocida: {args.action}")
 
 
@@ -2145,6 +2422,306 @@ def cmd_doctor(args, conf):
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# GUI operativa portada a la CLI: delegan en los métodos de gns3core
+# --------------------------------------------------------------------------- #
+def cmd_project(args, conf):
+    """Proyectos: duplicate, load, stats y ficheros (get|put)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    act = args.action
+
+    if act == "duplicate":
+        if not args.target:
+            raise SystemExit("duplicate exige el nombre del proyecto nuevo")
+        if not _confirm(args, f"duplicar el proyecto como '{args.target}'"):
+            return 1
+        # El proyecto de origen se elige con -p (o el único abierto).
+        proj = c.resolve_project(args.project)
+        st, res = _core_call(c.project_duplicate, proj["project_id"], args.target)
+        if not _ok(st):
+            print(f"no se pudo duplicar '{proj['name']}': [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        print(f"duplicado: {res.get('name', args.target)} "
+              f"({str(res.get('project_id'))[:8]})"
+              if isinstance(res, dict) else f"duplicado [{st}]")
+        return 0
+
+    if act == "load":
+        if not args.target:
+            raise SystemExit("load exige la ruta del fichero .gns3")
+        ruta = str(Path(args.target).expanduser())
+        st, res = _core_call(c.project_load, ruta)
+        if not _ok(st) and st != 200:
+            print(f"load de '{ruta}' falló: [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        print(f"cargado: {res.get('name', '?')} ({str(res.get('project_id'))[:8]})"
+              if isinstance(res, dict) else f"cargado '{ruta}' [{st}]")
+        return 0
+
+    if act == "stats":
+        proj = c.resolve_project(args.project)
+        st, res = _core_call(c.project_stats, proj["project_id"])
+        if st != 200:
+            print(f"stats de '{proj['name']}' falló: [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        if args.json:
+            _json_out({"project": proj["name"], "project_id": proj["project_id"],
+                       "stats": res})
+            return 0
+        print(f"estadísticas de {proj['name']} ({proj['project_id'][:8]}):")
+        if isinstance(res, dict):
+            for k in sorted(res):
+                print(f"  {k:<16} {res[k]}")
+        else:
+            print(f"  {res}")
+        return 0
+
+    if act == "file":
+        if not args.target:
+            raise SystemExit("file exige la acción (get|put)")
+        if not args.path:
+            raise SystemExit("file exige la ruta dentro del proyecto")
+        proj = c.resolve_project(args.project)
+        pid = proj["project_id"]
+        if args.target == "get":
+            data = _core_call(c.project_file_read, pid, args.path)
+            if isinstance(data, dict) and data.get("error"):
+                print(f"no puedo leer '{args.path}': {data['error']}", file=sys.stderr)
+                return 1
+            if args.json:
+                _json_out({"project": proj["name"], "path": args.path, "content": data})
+            else:
+                print(data)
+            return 0
+        if args.target == "put":
+            if args.content is None:
+                raise SystemExit("file put exige --content TEXTO")
+            st, res = _core_call(c.project_file_write, pid, args.path, args.content)
+            if not _ok(st) and st != 200:
+                print(f"no puedo escribir '{args.path}': [{st}] {_err(res)}",
+                      file=sys.stderr)
+                return 1
+            leido = _core_call(c.project_file_read, pid, args.path)
+            print(f"escrito '{args.path}' ({len(args.content)} bytes) "
+                  f"{'verificado' if leido == args.content else 'NO verificado'}")
+            return 0 if leido == args.content else 1
+        raise SystemExit(f"acción de fichero desconocida: {args.target}")
+
+    raise SystemExit(f"acción desconocida: {act}")
+
+
+def _report(st, res, titulo: str, args, ok_codes=(200, 201, 204)) -> int:
+    """Imprime el resultado de una consulta de la GUI y devuelve el código."""
+    if st not in ok_codes:
+        print(f"{titulo} -> [{st}] {_err(res)}", file=sys.stderr)
+        return 1
+    if args.json:
+        _json_out(res)
+    else:
+        _print_data(titulo, res)
+    return 0
+
+
+def cmd_gns3vm(args, conf):
+    """GNS3 VM: show, set (--set), engines y vms <engine>."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    act = args.action
+    if act == "show":
+        st, res = _core_call(c.gns3vm)
+        return _report(st, res, "GNS3 VM", args)
+    if act == "set":
+        body = _set_body(args.set)
+        if not body:
+            raise SystemExit("gns3vm set exige --set clave=valor (repetible)")
+        st, res = _core_call(c.gns3vm_update, body)
+        if not _ok(st) and st != 200:
+            print(f"no se pudo configurar la GNS3 VM: [{st}] {_err(res)}",
+                  file=sys.stderr)
+            return 1
+        st2, check = _core_call(c.gns3vm)
+        malos = {k: {"pedido": v, "leído": check.get(k) if isinstance(check, dict) else None}
+                 for k, v in body.items()
+                 if not isinstance(check, dict) or check.get(k) != v}
+        print("GNS3 VM: " + ", ".join(f"{k}={v!r}" for k, v in body.items()))
+        if malos:
+            print(f"  la API no aplicó: {malos}", file=sys.stderr)
+            return 1
+        return 0
+    if act == "engines":
+        st, res = _core_call(c.gns3vm_engines)
+        return _report(st, res, "motores de GNS3 VM", args)
+    if act == "vms":
+        if not args.engine:
+            raise SystemExit("gns3vm vms exige el motor (vmware, virtualbox...)")
+        st, res = _core_call(c.gns3vm_vms, args.engine)
+        return _report(st, res, f"VMs de {args.engine}", args)
+    raise SystemExit(f"acción desconocida: {act}")
+
+
+def _notify_snapshot(c, pid: str | None, count: int) -> list:
+    """Ventana de `count` eventos del stream de notificaciones.
+
+    `Client.notifications()` hace `GET /v2/notifications`, que es un stream
+    chunked que nunca termina: leerlo entero cuelga la CLI. Se abre la misma
+    ruta con las credenciales del núcleo y se corta tras `count` líneas.
+    """
+    path = f"/v2/projects/{pid}/notifications" if pid else "/v2/notifications"
+    headers = {}
+    if c.auth:
+        tok = base64.b64encode(f"{c.auth[0]}:{c.auth[1]}".encode()).decode()
+        headers["Authorization"] = "Basic " + tok
+    req = urllib.request.Request(c.url + path, headers=headers, method="GET")
+    eventos: list = []
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            for _ in range(count):
+                linea = r.readline()
+                if not linea:
+                    break
+                try:
+                    eventos.append(json.loads(linea.decode()))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    eventos.append(linea.decode(errors="replace"))
+    except (ConnectionError, TimeoutError, OSError) as e:
+        raise SystemExit(f"fallo de conexión con el servidor: {e}")
+    return eventos
+
+
+def cmd_notify(args, conf):
+    """Notificaciones del servidor o de un proyecto (ventana acotada)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    pid = None
+    if args.project:
+        pid = c.resolve_project(args.project)["project_id"]
+    eventos = _notify_snapshot(c, pid, args.count)
+    if args.json:
+        _json_out(eventos)
+        return 0
+    print(f"notificaciones{' de ' + args.project if args.project else ''}: "
+          f"{len(eventos)} evento(s)")
+    for e in eventos:
+        if isinstance(e, dict):
+            print(f"  {str(e.get('action', '?')):<28} "
+                  f"{json.dumps(e.get('event', {}), ensure_ascii=False)[:200]}")
+        else:
+            print(f"  {e}")
+    return 0
+
+
+def cmd_symbol(args, conf):
+    """Símbolos: dimensions, raw, default y upload <id> --file <ruta>."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    act = args.action
+    if act == "default":
+        st, res = _core_call(c.default_symbols)
+        return _report(st, res, "símbolos por defecto", args)
+    if not args.symbol:
+        raise SystemExit(f"symbol {act} exige el id del símbolo (p. ej. :/symbols/cloud.svg)")
+    if act == "dimensions":
+        st, res = _core_call(c.symbol_dimensions, args.symbol)
+        return _report(st, res, f"dimensiones de {args.symbol}", args)
+    if act == "raw":
+        st, data = _core_call(c.symbol_raw, args.symbol)
+        if st != 200 or not isinstance(data, bytes):
+            print(f"raw de {args.symbol} -> [{st}] {_err(data)}", file=sys.stderr)
+            return 1
+        if args.output:
+            dest = Path(args.output).expanduser()
+            dest.write_bytes(data)
+            print(f"{args.symbol}: {len(data)} bytes guardados en {dest}")
+        elif args.json:
+            _json_out({"symbol_id": args.symbol, "bytes": len(data),
+                       "content": data.decode(errors="replace")})
+        else:
+            print(f"{args.symbol}: {len(data)} bytes")
+            print(data.decode(errors="replace")[:4000])
+        return 0
+    if act == "upload":
+        if not args.file:
+            raise SystemExit("symbol upload exige --file <ruta>")
+        src = Path(args.file).expanduser()
+        if not src.is_file():
+            raise SystemExit(f"no existe {src}")
+        st, res = _core_call(c.symbol_raw_upload, args.symbol, src.read_bytes())
+        if not _ok(st) and st != 200:
+            print(f"upload de {args.symbol} -> [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        print(f"subido {args.symbol} ({src.stat().st_size} bytes) [{st}]")
+        return 0
+    raise SystemExit(f"acción desconocida: {act}")
+
+
+def cmd_iou_license(args, conf):
+    """Licencia IOU: get (lectura) y set (--license ... --yes)."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    if args.action == "get":
+        st, res = _core_call(c.iou_license)
+        return _report(st, res, "licencia IOU", args)
+    if args.action == "set":
+        if not args.license:
+            raise SystemExit("iou-license set exige --license LLAVE")
+        if not _confirm(args, "cambiar la licencia IOU del servidor"):
+            return 1
+        st, res = _core_call(c.iou_license_update, {"license": args.license})
+        if not _ok(st) and st != 200:
+            print(f"iou-license set -> [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        st2, check = _core_call(c.iou_license)
+        print(f"licencia IOU actualizada [{st}]"
+              + ("" if st2 == 200 else f" (no puedo releerla: [{st2}])"))
+        return 0 if st2 == 200 else 1
+    raise SystemExit(f"acción desconocida: {args.action}")
+
+
+def cmd_server(args, conf):
+    """Servidor: shutdown, reload y debug (todos exigen --yes o TTY)."""
+    if not _confirm(args, f"server {args.action}"):
+        return 1
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    fn = {"shutdown": c.server_shutdown, "reload": c.server_reload,
+          "debug": c.server_debug}[args.action]
+    st, res = _core_call(fn)
+    # Tras un shutdown/reload el socket puede cerrarse antes del 200.
+    if st not in (200, 201, 204, 502, 503, 504):
+        print(f"server {args.action} -> [{st}] {_err(res)}", file=sys.stderr)
+        return 1
+    print(f"server {args.action} enviado [{st}]")
+    return 0
+
+
+def cmd_emulator(args, conf):
+    """Emuladores del compute local: qemu-binaries, qemu-capabilities,
+    docker-images, interfaces, ports y udp --port N."""
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    act = args.action
+    simple = {
+        "qemu-binaries": (c.qemu_binaries, "binarios QEMU"),
+        "qemu-capabilities": (c.qemu_capabilities, "capacidades QEMU"),
+        "docker-images": (c.docker_images, "imágenes Docker"),
+        "interfaces": (c.network_interfaces, "interfaces de red"),
+        "ports": (c.network_ports, "puertos de red"),
+    }
+    if act in simple:
+        fn, titulo = simple[act]
+        st, res = _core_call(fn)
+        return _report(st, res, titulo, args)
+    if act == "udp":
+        if args.port is None:
+            raise SystemExit("emulator udp exige --port N")
+        st, res = _core_call(c.udp_port, args.port)
+        return _report(st, res, f"reserva UDP {args.port}", args)
+    raise SystemExit(f"acción desconocida: {act}")
+
+
 def main() -> int:
     conf = load_conf()
     if not CONF.exists():
@@ -2156,9 +2733,19 @@ def main() -> int:
 
     sub.add_parser("servers", help="servidores configurados y estado")
 
-    p = sub.add_parser("compute", help="compute(s): conexión, CPU y memoria")
-    p.add_argument("cid", nargs="?", help="compute_id o nombre (sin él, todos)")
+    p = sub.add_parser("compute", help="computes: listar o add|update|rm|ports|idlepc|action")
+    p.add_argument("action", nargs="?",
+                   help="acción (add|update|rm|ports|idlepc|action) o compute_id/nombre")
+    p.add_argument("cid", nargs="?", help="compute_id o nombre para la acción")
+    p.add_argument("emulator_arg", nargs="?", help="action: emulador (qemu, docker...)")
+    p.add_argument("remote_arg", nargs="?", help="action: acción remota (binaries, img...)")
     p.add_argument("--json", action="store_true", help="salida JSON")
+    p.add_argument("--set", action="append", default=[],
+                   help="add/update/action: clave=valor (repetible)")
+    p.add_argument("--emulator", help="action: emulador (qemu, docker...)")
+    p.add_argument("--remote-action", dest="remote_action",
+                   help="action: nombre de la acción remota (img, binaries...)")
+    p.add_argument("--yes", action="store_true", help="rm: no pedir confirmación")
 
     p = sub.add_parser("stats", help="estadísticas del servidor")
     p.add_argument("--json", action="store_true", help="salida JSON")
@@ -2169,6 +2756,51 @@ def main() -> int:
 
     p = sub.add_parser("appliances", help="appliances del catálogo GNS3")
     p.add_argument("--filter", help="texto en nombre, categoría o descripción")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    # -- GUI operativa portada a la CLI --------------------------------------- #
+    p = sub.add_parser("project", help="proyectos: duplicate, load, stats y file")
+    p.add_argument("action", choices=["duplicate", "load", "stats", "file"])
+    p.add_argument("target", nargs="?",
+                   help="duplicate: nombre nuevo; load: ruta; file: get|put")
+    p.add_argument("path", nargs="?", help="file: ruta dentro del proyecto")
+    p.add_argument("-p", "--project", help="proyecto de origen")
+    p.add_argument("--content", help="file put: contenido a escribir")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+    p.add_argument("--yes", action="store_true", help="duplicate: no pedir confirmación")
+
+    p = sub.add_parser("gns3vm", help="GNS3 VM: show, set, engines, vms")
+    p.add_argument("action", choices=["show", "set", "engines", "vms"])
+    p.add_argument("engine", nargs="?", help="vms: motor (vmware, virtualbox...)")
+    p.add_argument("--set", action="append", default=[], help="set: clave=valor (repetible)")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("notify", help="notificaciones del servidor o de un proyecto")
+    p.add_argument("project", nargs="?", help="nombre o id del proyecto")
+    p.add_argument("--count", type=int, default=10, help="eventos a leer (por defecto 10)")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("symbol", help="símbolos: dimensions, raw, default, upload")
+    p.add_argument("action", choices=["dimensions", "raw", "default", "upload"])
+    p.add_argument("symbol", nargs="?", help="id del símbolo (p. ej. :/symbols/cloud.svg)")
+    p.add_argument("--file", help="upload: fichero local a subir")
+    p.add_argument("--output", help="raw: guardar los bytes en este fichero")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+
+    p = sub.add_parser("iou-license", help="licencia IOU: get o set")
+    p.add_argument("action", choices=["get", "set"])
+    p.add_argument("--license", help="set: clave de licencia IOU")
+    p.add_argument("--json", action="store_true", help="salida JSON")
+    p.add_argument("--yes", action="store_true", help="set: no pedir confirmación")
+
+    p = sub.add_parser("server", help="servidor: shutdown, reload o debug")
+    p.add_argument("action", choices=["shutdown", "reload", "debug"])
+    p.add_argument("--yes", action="store_true", help="confirmar la acción")
+
+    p = sub.add_parser("emulator", help="emuladores del compute local (qemu, docker, red)")
+    p.add_argument("action", choices=["qemu-binaries", "qemu-capabilities",
+                                      "docker-images", "interfaces", "ports", "udp"])
+    p.add_argument("--port", type=int, help="udp: puerto a reservar")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
     for name, help_ in (("status", "proyectos y nodos"), ("up", "abre y arranca todo"),
@@ -2205,10 +2837,13 @@ def main() -> int:
 
     sub.add_parser("templates", help="plantillas del servidor")
 
-    p = sub.add_parser("template", help="plantillas: list, create, update, delete")
-    p.add_argument("action", choices=["list", "create", "update", "delete"])
-    p.add_argument("target", nargs="?", help="update/delete: nombre o id de la plantilla")
-    p.add_argument("--json", action="store_true", help="list: objeto JSON")
+    p = sub.add_parser("template", help="plantillas: listar, crear, editar, duplicar")
+    p.add_argument("action", choices=["list", "create", "update", "delete",
+                                      "duplicate", "base-config"])
+    p.add_argument("target", nargs="?", help="update/delete/duplicate/base-config: plantilla")
+    p.add_argument("filename", nargs="?", help="base-config: nombre del fichero")
+    p.add_argument("--content", help="base-config: contenido a escribir")
+    p.add_argument("--json", action="store_true", help="salida JSON")
     p.add_argument("--from-node", dest="from_node",
                    help="create: nodo del que copiar tipo y properties")
     p.add_argument("--type", help="create: tipo sin nodo de origen (qemu, vpcs, docker...)")
@@ -2225,8 +2860,9 @@ def main() -> int:
     p.add_argument("project", nargs="?")
 
     # -- consola sin VNC ---------------------------------------------------- #
-    p = sub.add_parser("console", help="consola única del nodo (interactiva o --send)")
-    p.add_argument("node")
+    p = sub.add_parser("console", help="consola del nodo (reset|url o interactiva)")
+    p.add_argument("node", help="nombre del nodo, o reset|url")
+    p.add_argument("target", nargs="?", help="nodo cuando node es reset|url")
     p.add_argument("-p", "--project")
     p.add_argument("--send", action="append",
                    help="comando a enviar sin abrir stdin (repetible)")
@@ -2278,11 +2914,16 @@ def main() -> int:
     p = sub.add_parser("new", help="crea un proyecto vacío y lo abre")
     p.add_argument("name")
 
-    p = sub.add_parser("node", help="nodos: add, rm, dup, props, switch, disk, start...")
+    p = sub.add_parser("node", help="nodos: añadir/quitar/editar/resize/links/idlepc")
     p.add_argument("action", choices=["add", "rm", "dup", "props", "switch", "disk",
+                                      "disk-resize", "links", "idlepc",
                                       "start", "stop", "reload", "suspend", "line"])
     p.add_argument("node", nargs="?")
     p.add_argument("-p", "--project")
+    p.add_argument("--size", type=float, help="disk-resize: tamaño en GB")
+    p.add_argument("--proposals", action="store_true",
+                   help="idlepc: propuestas en vez de auto_idlepc")
+    p.add_argument("--json", action="store_true", help="links/idlepc: salida JSON")
     p.add_argument("--template", help="add: nombre o id de plantilla")
     p.add_argument("--name", help="nombre nuevo (dup/add/disk)")
     p.add_argument("--set", action="append", help="props: clave=valor (repetible)")
@@ -2313,10 +2954,11 @@ def main() -> int:
     p.add_argument("action", choices=["start", "stop", "pcap"])
     p.add_argument("-p", "--project")
 
-    p = sub.add_parser("link", help="enlaces: list, add, rm, edit")
-    p.add_argument("action", choices=["list", "add", "rm", "edit"])
+    p = sub.add_parser("link", help="enlaces: list, add, rm, edit, filters")
+    p.add_argument("action", choices=["list", "add", "rm", "edit", "filters"])
     p.add_argument("nodes", nargs="*")
     p.add_argument("-p", "--project")
+    p.add_argument("--json", action="store_true", help="filters: salida JSON")
     p.add_argument("--set", action="append", default=[], help="edit: clave=valor (repetible)")
     p.add_argument("--pa", type=int, default=0, help="adapter del primer nodo")
     p.add_argument("--pb", type=int, default=0, help="adapter del segundo nodo")
@@ -2341,10 +2983,15 @@ def main() -> int:
         "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
         "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
         "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
+        "project": cmd_project, "gns3vm": cmd_gns3vm, "notify": cmd_notify,
+        "symbol": cmd_symbol, "iou-license": cmd_iou_license,
+        "server": cmd_server, "emulator": cmd_emulator,
     }
     needs_core = {"exec", "shot", "key", "type", "mon", "new", "node", "upload", "draw",
                   "link", "doctor", "compute", "stats", "symbols", "appliances",
-                  "console", "capture", "snap", "template", "images"}
+                  "console", "capture", "snap", "template", "images",
+                  "project", "gns3vm", "notify", "symbol", "iou-license",
+                  "server", "emulator"}
     if args.cmd in needs_core and core is None:
         print("falta el núcleo gns3core: revisa ~/Applications/gns3-mcp/gns3core.py",
               file=sys.stderr)
