@@ -1896,10 +1896,14 @@ def cmd_node(args, conf):
             raise SystemExit("disk-resize exige el nombre del nodo")
         if args.size is None:
             raise SystemExit("disk-resize exige --size (GB)")
+        if args.size <= 0:
+            raise SystemExit("disk-resize exige --size mayor que 0 (GB)")
         node = c.find_node(pid, args.node)
-        st, body = _core_call(c.node_resize_disk, pid, node["node_id"], args.size)
+        # la CLI habla GB; la API de GNS3 2.2 recibe MiB en `extend`.
+        mib = int(round(args.size * 1024))
+        st, body = _core_call(c.node_resize_disk, pid, node["node_id"], mib)
         ok = _ok(st)
-        print(f"{node['name']}: resize a {args.size:g} GB "
+        print(f"{node['name']}: resize a {args.size:g} GB ({mib} MiB) "
               f"-> {'OK' if ok else _err(body)}")
         return 0 if ok else 1
 
@@ -3813,6 +3817,10 @@ def _pf_config(args, pf, pfs, xml_put: str | None = None) -> int:
     """get baja el XML; put lo sube con backup y exige --yes si no viene de get."""
     if args.config_action == "get":
         doc = pf.get_config()
+        if isinstance(doc, dict) and doc.get("ok") is False:
+            # Sin esto se renderiza un <pfsense><ok>False</ok>… como si fuera la
+            # config: exit 0, y ese XML queda autorizado para un `config put`.
+            return _pf_error(args, doc.get("error") or "no se pudo leer config.xml")
         xml = pfs.render_config(doc)
         _pf_record_get(xml)
         if getattr(args, "json", False):
@@ -3849,13 +3857,17 @@ def cmd_pf(args, conf) -> int:
         pf = pfs.PfSense.from_env()
         if act == "status":
             data = pf.status()
-            return _pf_out(args, True, data,
+            return _pf_out(args, bool(data.get("ok", True)), data,
                            f"pfSense {data.get('version', '?')} "
                            f"({len(data.get('interfaces') or {})} interfaces)")
         if act == "config":
             return _pf_config(args, pf, pfs, xml_put)
         if act == "assign":
-            mapping = {"wan": args.wan, "lan": args.lan, "opt1": args.opt1}
+            # `assign` interpreta un rol ausente como "borrar la interfaz": no se
+            # manda opt1 si no se pidió, o `pf assign` sin --opt1 borra OPT1.
+            mapping = {"wan": args.wan, "lan": args.lan}
+            if args.opt1:
+                mapping["opt1"] = args.opt1
             data = pf.assign(mapping)
             return _pf_out(args, bool(data.get("ok", True)), data,
                            f"interfaces asignadas: wan={args.wan} lan={args.lan}"

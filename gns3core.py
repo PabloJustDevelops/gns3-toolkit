@@ -413,9 +413,17 @@ class Client:
 
 
     # ── GUI operativa portada a la API v2 (rutas leídas de gns3server) ──────────
-    def node_resize_disk(self, pid: str, nid: str, size: int) -> tuple[int, Any]:
-        """Equivale a «Resize disk» del diálogo de propiedades QEMU."""
-        return self.post(f"/v2/projects/{pid}/nodes/{nid}/resize_disk", {"hda_disk_size": size}, timeout=300)
+    def node_resize_disk(self, pid: str, nid: str, size: int,
+                         drive: str = "hda") -> tuple[int, Any]:
+        """Equivale a «Resize disk» del diálogo de propiedades QEMU.
+
+        GNS3 2.2 exige `{"drive_name", "extend"}` con `extend` en **MiB**; el
+        antiguo `hda_disk_size` lo rechaza el schema (400) y el disco no crece.
+        """
+        if drive not in ("hda", "hdb", "hdc", "hdd"):
+            raise ValueError(f"drive no válido: {drive!r} (hda, hdb, hdc o hdd)")
+        return self.post(f"/v2/projects/{pid}/nodes/{nid}/resize_disk",
+                         {"drive_name": drive, "extend": int(size)}, timeout=300)
 
     def console_reset(self, pid: str, nid: str) -> tuple[int, Any]:
         return self.post(f"/v2/projects/{pid}/nodes/{nid}/console/reset", timeout=60)

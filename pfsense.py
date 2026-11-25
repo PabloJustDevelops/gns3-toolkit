@@ -213,11 +213,14 @@ class PfSense:
         except (TypeError, ValueError):
             return {"cmd": self._redact(cmd), "output": "", "ok": False,
                     "error": f"timeout no válido: {timeout}"}
-        args = ["sshpass", "-p", self.password, "ssh", "-p", str(self.port),
+        # `sshpass -e` lee SSHPASS del entorno: con `-p` la contraseña aparece en
+        # argv y cualquiera la ve con `ps` mientras dura la conexión.
+        args = ["sshpass", "-e", "ssh", "-p", str(self.port),
                 "-o", "StrictHostKeyChecking=no", f"{self.user}@{self.host}", cmd]
+        env = {**os.environ, "SSHPASS": self.password}
         try:
             completed = subprocess.run(args, capture_output=True, text=True,
-                                       timeout=effective_timeout)
+                                       timeout=effective_timeout, env=env)
         except subprocess.TimeoutExpired as exc:
             detail = f"timeout tras {effective_timeout:g}s"
             stderr = self._redact(exc.stderr).strip()

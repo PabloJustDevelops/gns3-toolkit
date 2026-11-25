@@ -185,8 +185,12 @@ def test_run_enmascara_password_en_comando_stdout_y_stderr(monkeypatch, client, 
     if returncode:
         assert "***" in result["error"]
     args, kwargs = llamadas[0]
-    assert args[:4] == ["sshpass", "-p", PASSWORD, "ssh"]
-    assert kwargs == {"capture_output": True, "text": True, "timeout": 3.0}
+    assert args[:3] == ["sshpass", "-e", "ssh"]
+    assert PASSWORD not in args, "la contraseña no puede viajar en argv (visible con ps)"
+    assert kwargs["env"]["SSHPASS"] == PASSWORD
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    assert kwargs["timeout"] == 3.0
 
 
 def test_run_sin_password_o_comando_vacio_no_ejecuta_ssh(monkeypatch, client):

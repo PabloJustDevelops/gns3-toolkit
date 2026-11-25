@@ -776,8 +776,12 @@ def gns3_nodes(
                 request_ok = st in (200, 204)
             else:
                 return {"error": f"acción desconocida: {action}"}
-            time.sleep(0.8)
-            state = client.node_detail(pid, nid)
+            if action == "delete":
+                # releer el nodo tras borrarlo siempre da 404 y ensuciaría `detail`
+                state = {}
+            else:
+                time.sleep(0.8)
+                state = client.node_detail(pid, nid)
         except ConnectionError as e:
             return {"error": str(e), "results": results}
         except RuntimeError as e:

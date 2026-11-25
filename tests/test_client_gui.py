@@ -15,7 +15,7 @@ C1 = "c1"
 GUI_CASES = [
     pytest.param("node_resize_disk", (P1, N1, 128), "POST",
                  f"/v2/projects/{P1}/nodes/{N1}/resize_disk",
-                 b'{"hda_disk_size": 128}', {"hda_disk_size": 128}, False,
+                 b'{"drive_name": "hda", "extend": 128}', {"status": "resized"}, False,
                  id="node_resize_disk"),
     pytest.param("console_reset", (P1, N1), "POST",
                  f"/v2/projects/{P1}/nodes/{N1}/console/reset",
@@ -150,6 +150,22 @@ def test_operaciones_gui_propagan_http_no_200(
 
     assert getattr(Client(fake_api.url), method)(*args) == (409, error)
     assert fake_api.last(http_method, path)["body"] == request_body
+
+
+def test_node_resize_disk_permite_elegir_el_disco(fake_api):
+    path = f"/v2/projects/{P1}/nodes/{N1}/resize_disk"
+    fake_api.route("POST", path, 201, {"status": "resized"})
+
+    assert Client(fake_api.url).node_resize_disk(P1, N1, 1024, "hdb") == (
+        201, {"status": "resized"})
+    assert fake_api.last("POST", path)["body"] == b'{"drive_name": "hdb", "extend": 1024}'
+
+
+@pytest.mark.parametrize("drive", ["sda", "", None])
+def test_node_resize_disk_rechaza_discos_fuera_del_schema(fake_api, drive):
+    with pytest.raises(ValueError, match="drive"):
+        Client(fake_api.url).node_resize_disk(P1, N1, 128, drive)
+    assert fake_api.requests == []
 
 
 # ─────────────────────────────── consola WebSocket ───────────────────────────

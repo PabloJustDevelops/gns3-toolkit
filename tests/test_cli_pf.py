@@ -6,6 +6,7 @@ import json
 import sys
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,3 +119,75 @@ def test_pf_status_sin_password_nombra_la_variable_sin_imprimir_valor(
     assert "host-que-no-se-imprime" not in texto
     assert "usuario-que-no-se-imprime" not in texto
     assert fake_api.requests == []
+
+
+def _fake_pf(monkeypatch, **methods):
+    """Sustituye from_env y devuelve un pfSense falso con los métodos pedidos."""
+    fake = SimpleNamespace(**methods)
+    monkeypatch.setenv("PFSENSE_PASSWORD", "clave-de-prueba")
+    monkeypatch.setattr(pfsense.PfSense, "from_env", classmethod(lambda cls: fake))
+    return fake
+
+
+def test_pf_config_get_con_ssh_caido_no_imprime_un_config_falso(
+    cli_conf, monkeypatch, capsys, tmp_path,
+):
+    _fake_pf(monkeypatch, get_config=lambda: {"ok": False, "error": "ssh: connection refused"})
+    monkeypatch.setattr(cli, "PF_SESSION", tmp_path / "pf_get_session.json")
+
+    rc = _run_cli(monkeypatch, ["pf", "config", "get"])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "<pfsense>" not in captured.out
+    assert "ssh: connection refused" in captured.err
+    assert not cli.PF_SESSION.exists(), "un get fallido no debe autorizar un put"
+
+
+def test_pf_config_get_con_ssh_caido_en_json_devuelve_ok_false(
+    cli_conf, monkeypatch, capsys, tmp_path,
+):
+    _fake_pf(monkeypatch, get_config=lambda: {"ok": False, "error": "ssh: caído"})
+    monkeypatch.setattr(cli, "PF_SESSION", tmp_path / "pf_get_session.json")
+
+    rc = _run_cli(monkeypatch, ["pf", "config", "get", "--json"])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert "ssh: caído" in payload["data"]["error"]
+    assert not cli.PF_SESSION.exists()
+
+
+def test_pf_status_con_ssh_caido_devuelve_exit_1(cli_conf, monkeypatch, capsys):
+    _fake_pf(monkeypatch, status=lambda: {
+        "ok": False, "version": "sin ssh", "interfaces": "", "rules": "",
+        "routes": "", "errors": ["cat /etc/version: boom"],
+    })
+
+    rc = _run_cli(monkeypatch, ["pf", "status"])
+
+    assert rc == 1
+
+
+def test_pf_assign_sin_opt1_no_manda_opt1_none(cli_conf, monkeypatch):
+    llamadas = []
+    _fake_pf(monkeypatch, assign=lambda mapping: llamadas.append(mapping) or {"ok": True})
+
+    rc = _run_cli(monkeypatch, ["pf", "assign", "--wan", "em0", "--lan", "em1"])
+
+    assert rc == 0
+    assert llamadas == [{"wan": "em0", "lan": "em1"}]
+
+
+def test_pf_assign_con_opt1_lo_incluye(cli_conf, monkeypatch):
+    llamadas = []
+    _fake_pf(monkeypatch, assign=lambda mapping: llamadas.append(mapping) or {"ok": True})
+
+    rc = _run_cli(monkeypatch, [
+        "pf", "assign", "--wan", "em0", "--lan", "em1", "--opt1", "em2",
+    ])
+
+    assert rc == 0
+    assert llamadas == [{"wan": "em0", "lan": "em1", "opt1": "em2"}]
