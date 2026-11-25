@@ -48,6 +48,7 @@ Sin VNC (lo que se usa de verdad en un examen):
     gns3lab draw list|edit <id> --set k=v|rm <id>
     gns3lab link list|add|rm|edit|filters <link_id> --set k=v
     gns3lab doctor [proyecto]                    # chequeo integral antes de entregar
+    gns3lab examen setup|verify|reset [--name N] # montar, comprobar o reiniciar el kit
 
 GUI operativa portada a la CLI (llama a los métodos de gns3core, no los reimplementa):
 
@@ -3042,6 +3043,450 @@ def cmd_emulator(args, conf):
     raise SystemExit(f"acción desconocida: {act}")
 
 
+# --------------------------------------------------------------------------- #
+# examen: el kit de la asignatura en un solo comando (setup / verify / reset)
+# --------------------------------------------------------------------------- #
+EXAMEN_NAME = "Kit de examen"
+EXAMEN_MARKER = "examen-setup.json"
+
+
+def _examen_project(c, name: str, strict: bool = False):
+    """Busca el proyecto por nombre exacto; devuelve (proyecto, error).
+
+    En `strict` (setup y reset) no se acepta coincidencia parcial: un nombre
+    parecido no puede convertir un proyecto ajeno en objetivo de estas órdenes.
+    """
+    projects = c.projects()
+    exact = [p for p in projects if p.get("name") == name]
+    if len(exact) == 1:
+        return exact[0], None
+    if len(exact) > 1:
+        return None, f"hay varios proyectos llamados '{name}'"
+    if not strict:
+        hits = [p for p in projects if name.lower() in str(p.get("name", "")).lower()]
+        if len(hits) == 1:
+            return hits[0], None
+        if len(hits) > 1:
+            nombres = ", ".join(p["name"] for p in hits)
+            return None, f"'{name}' es ambiguo: {nombres}"
+    return None, f"no existe el proyecto '{name}' en {getattr(c, 'name', 'el servidor')}"
+
+
+def _examen_template(templates: list[dict], kind: str) -> dict | None:
+    """Plantilla que sirve para cada pieza del kit, por tipo y por nombre."""
+    def name(t):
+        return str(t.get("name", "")).lower()
+
+    def tt(t):
+        return str(t.get("template_type", "")).lower()
+
+    if kind == "pfsense":
+        tests = (lambda t: "pfsense" in name(t) and tt(t) == "qemu",
+                 lambda t: "pfsense" in name(t))
+    elif kind == "nat":
+        tests = (lambda t: tt(t) == "nat", lambda t: name(t) == "nat")
+    elif kind == "switch":
+        tests = (lambda t: tt(t) == "ethernet_switch", lambda t: "switch" in name(t))
+    else:                                     # vpcs
+        tests = (lambda t: tt(t) == "vpcs", lambda t: "vpcs" in name(t))
+    for test in tests:
+        for t in templates:
+            if test(t):
+                return t
+    return None
+
+
+def _examen_disks_in_use(c) -> set[str]:
+    """Discos QEMU que ya está usando un nodo arrancado en el servidor."""
+    en_uso: set[str] = set()
+    for p in c.projects():
+        if p.get("status") != "opened":
+            continue
+        for n in c.nodes(p["project_id"]):
+            if n.get("node_type") == "qemu" and n.get("status") == "started":
+                hda = (n.get("properties") or {}).get("hda_disk_image")
+                if hda:
+                    en_uso.add(os.path.basename(str(hda)))
+    return en_uso
+
+
+def _examen_disk(c, preferred: str | None = None, en_uso: set[str] | None = None):
+    """Disco QEMU de pfSense ya presente en el servidor, sin subir ni sobrescribir.
+
+    Se evita el disco que ya tiene un nodo arrancado: qemu-img no puede crear el
+    overlay del linked_clone si otro QEMU mantiene el archivo abierto.
+    """
+    candidatos = []
+    for img in c.qemu_images():
+        filename = str(img.get("filename", "")) if isinstance(img, dict) else str(img)
+        low = filename.lower()
+        if "pfsense" in low and low.endswith(".qcow2") and not low.endswith(".roto-bak"):
+            candidatos.append(filename)
+    if not candidatos:
+        return None, []
+    libres = [d for d in candidatos if d not in (en_uso or set())] or candidatos
+    if preferred and preferred in libres:
+        return preferred, candidatos
+    if "pfSense-examen.qcow2" in libres:
+        return "pfSense-examen.qcow2", candidatos
+    return sorted(libres)[0], candidatos
+
+
+def _examen_qemu_path(c, tpl: dict) -> str:
+    """Ruta al binario QEMU: la plantilla la deja vacía y el POST la exige."""
+    relleno = str(tpl.get("qemu_path") or "")
+    if relleno:
+        return relleno
+    st, binaries = c.qemu_binaries()
+    paths = [str(b.get("path")) for b in binaries if isinstance(b, dict)
+             and b.get("path")] if st == 200 and isinstance(binaries, list) else []
+    if not paths:
+        raise SystemExit("el servidor no ofrece binarios QEMU; no se crea ningún proyecto")
+    return next((p for p in paths if "x86_64" in p), paths[0])
+
+
+def _examen_source(args, conf):
+    """Disco y tipo de adaptador del proyecto local `--from` (solo lectura)."""
+    lc = core.Client.from_name("local", conf)
+    if not lc.alive():
+        raise SystemExit("--from: el servidor local no responde")
+    proj, err = _examen_project(lc, args.from_project)
+    if err:
+        raise SystemExit(f"--from: {err}")
+    nodes = lc.nodes(proj["project_id"])
+    firewall = next((n for n in nodes if n.get("node_type") == "qemu"
+                     and "pfsense" in str((n.get("properties") or {})
+                                          .get("hda_disk_image", "")).lower()), None)
+    if not firewall:
+        raise SystemExit(f"--from: '{proj['name']}' no tiene un nodo pfSense con disco QEMU")
+    props = firewall.get("properties") or {}
+    print(f"origen local: {proj['name']} / {firewall['name']} "
+          f"({props.get('hda_disk_image')})")
+    return os.path.basename(str(props["hda_disk_image"])), props.get("adapter_type") or "e1000"
+
+
+def _examen_setup(args, conf, c, name: str) -> int:
+    # La existencia se comprueba antes de crear nada: si está, no se toca.
+    previo = [p for p in c.projects() if p.get("name") == name]
+    if previo:
+        print(f"'{name}' ya existe en {c.name} ({previo[0]['project_id'][:8]}): "
+              "no lo borro ni lo modifico")
+        return 0
+
+    templates = c.templates()
+    elegidas = {}
+    for kind in ("pfsense", "nat", "switch", "vpcs"):
+        tpl = _examen_template(templates, kind)
+        if not tpl:
+            raise SystemExit(f"falta la plantilla de {kind} en {c.name}; "
+                             "no se crea ningún proyecto")
+        elegidas[kind] = tpl
+
+    preferido, adaptador = None, "e1000"
+    if getattr(args, "from_project", None):
+        preferido, adaptador = _examen_source(args, conf)
+    ocupados = _examen_disks_in_use(c)
+    if preferido and preferido in ocupados:
+        print(f"aviso: {preferido} está en uso por un nodo arrancado; "
+              "se busca otro disco libre (no se sobrescribe nada)")
+    disco, disponibles = _examen_disk(c, preferido, ocupados)
+    if not disco:
+        raise SystemExit(f"no hay ningún disco QEMU con 'pfsense' en el nombre en {c.name}. "
+                         "Nada ha sido creado ni sobrescrito: sube el disco con "
+                         "`gns3lab upload` y vuelve a intentarlo")
+    if preferido and preferido not in disponibles:
+        print(f"aviso: el disco del origen ({preferido}) no está en {c.name}; "
+              f"se usa {disco} (no se sube ni se sobrescribe nada)")
+
+    st, body = c.post("/v2/projects", {
+        "name": name,
+        "path": str(Path.home() / "GNS3/projects" / name),
+    })
+    if st not in (200, 201) or not isinstance(body, dict) or not body.get("project_id"):
+        raise SystemExit(f"no se pudo crear '{name}': [{st}] {_err(body)}")
+    pid = body["project_id"]
+    c.ensure_open(pid)
+    print(f"'{name}' creado ({pid[:8]}) en {c.name}")
+
+    def add(kind: str, node_name: str, x: int, y: int, props: dict | None = None) -> str:
+        st, res = c.post(f"/v2/projects/{pid}/templates/{elegidas[kind]['template_id']}",
+                         {"x": x, "y": y, "compute_id": "local"})
+        if st not in (200, 201) or not isinstance(res, dict) or not res.get("node_id"):
+            raise SystemExit(f"no se pudo añadir {node_name}: [{st}] {_err(res)}")
+        nid = res["node_id"]
+        cambio: dict = {"name": node_name}
+        if props:
+            cambio["properties"] = props
+        st2, res2 = c.put(f"/v2/projects/{pid}/nodes/{nid}", cambio)
+        if st2 not in (200, 201):
+            raise SystemExit(f"no se pudo configurar {node_name}: [{st2}] {_err(res2)}")
+        print(f"  + {node_name} ({kind}, {nid[:8]})")
+        return nid
+
+    # El firewall se crea por POST /nodes, no desde la plantilla: `linked_clone`
+    # sólo se fija en la creación (un PUT posterior lo ignora) y hace falta para
+    # reutilizar el disco sin «can only be used once on your server».
+    tpl_fw = elegidas["pfsense"]
+    props_fw = {k: v for k, v in tpl_fw.items() if k not in (
+        "template_id", "template_type", "name", "builtin", "category", "compute_id",
+        "default_name_format", "symbol", "usage", "console_auto_start")}
+    props_fw.update({
+        "hda_disk_image": disco,
+        "hda_disk_image_md5sum": "",
+        "linked_clone": True,
+        "adapters": 2,
+        "adapter_type": adaptador,
+        "qemu_path": _examen_qemu_path(c, tpl_fw),
+    })
+    props_fw.pop("mac_address", None)   # "" rompe el schema (minLength 1)
+    st, res = c.post(f"/v2/projects/{pid}/nodes", {
+        "name": "PF1", "compute_id": "local", "node_type": "qemu",
+        "x": -250, "y": -120, "symbol": tpl_fw.get("symbol"),
+        "properties": props_fw,
+    })
+    if st not in (200, 201) or not isinstance(res, dict) or not res.get("node_id"):
+        raise SystemExit(f"no se pudo crear PF1: [{st}] {_err(res)}")
+    pf = res["node_id"]
+    print(f"  + PF1 (qemu, {pf[:8]}) disco={disco}, linked_clone=True")
+    nat = add("nat", "NAT1", -560, -120)
+    sw = add("switch", "SW1", 40, -120)
+    vpcs = [add("vpcs", "PC1", 300, -230), add("vpcs", "PC2", 300, -30)]
+
+    def link(nid_a: str, ada: int, pa: int, nid_b: str, adb: int, pb: int) -> None:
+        st, res = c.post(f"/v2/projects/{pid}/links", {"nodes": [
+            {"node_id": nid_a, "adapter_number": ada, "port_number": pa},
+            {"node_id": nid_b, "adapter_number": adb, "port_number": pb},
+        ]})
+        if st not in (200, 201):
+            raise SystemExit(f"no se pudo crear el enlace: [{st}] {_err(res)}")
+
+    link(pf, 0, 0, nat, 0, 0)             # WAN
+    link(pf, 1, 0, sw, 0, 0)              # LAN
+    link(vpcs[0], 0, 0, sw, 0, 1)
+    link(vpcs[1], 0, 0, sw, 0, 2)
+    print(f"  4 enlaces: WAN PF1->NAT1, LAN PF1->SW1, PC1/PC2->SW1")
+
+    # La API de ficheros de nodo graba el body en crudo (gns3core.node_file_write).
+    for nid, nombre in zip(vpcs, ("PC1", "PC2")):
+        escrito = core.node_file_write(c, pid, nid, "startup.vpc",
+                                       f"# pide IP al DHCP de pfSense en cada arranque\n"
+                                       f"ip dhcp\n\nset pcname {nombre}\n")
+        if not escrito.get("ok"):
+            raise SystemExit(f"no se pudo escribir startup.vpc de {nombre}: "
+                             f"[{escrito.get('status')}] {_err(escrito.get('error'))}")
+    print("  startup.vpc de PC1 y PC2 -> ip dhcp")
+
+    texto = (f"{name} | WAN: NAT (DHCP) | LAN: 192.168.1.0/24 | "
+             f"pfSense LAN: 192.168.1.1 | DHCP: 192.168.1.100-101")
+    svg = (f'<svg width="760" height="60" viewBox="0 0 760 60" '
+           f'xmlns="http://www.w3.org/2000/svg">'
+           f'<rect width="760" height="60" fill="none" stroke="#ffffff" '
+           f'stroke-width="2" rx="6"/>'
+           f'<text x="8" y="24" font-size="14" fill="#ffffff">'
+           f'{texto.replace("&", "&amp;").replace("<", "&lt;")}</text></svg>')
+    st, res = c.drawing_create(pid, {"x": -250, "y": -320, "z": 0,
+                                     "rotation": 0, "svg": svg})
+    if st not in (200, 201):
+        print(f"  aviso: no se pudo crear la nota del canvas: [{st}] {_err(res)}",
+              file=sys.stderr)
+    else:
+        print(f"  nota en el canvas: {texto}")
+
+    # Marca local: sólo el proyecto creado aquí podrá ser reiniciado por `reset`.
+    c.project_file_write(pid, EXAMEN_MARKER, json.dumps({
+        "created_by": "gns3lab examen setup",
+        "name": name,
+        "disk": disco,
+    }, ensure_ascii=False))
+
+    st, res = c.nodes_action(pid, "start")
+    if not _ok(st) and st != 200:
+        print(f"  aviso: no se pudo arrancar el conjunto: [{st}] {_err(res)}",
+              file=sys.stderr)
+    estados = []
+    for n in c.nodes(pid):
+        estado = _wait_node_status(c, pid, n["node_id"], "started", timeout=45)
+        estados.append(f"{n['name']}={estado}")
+    print(f"  arranque: {', '.join(estados)}")
+    print(f"listo: {name}. Verifícalo con `gns3lab examen verify --name '{name}'`.")
+    return 0
+
+
+def _examen_verify_out(report: dict, args) -> int:
+    report["ok"] = not report["problems"]
+    if args.json:
+        _json_out(report)
+    else:
+        print(f"servidor {report['server']['name']} ({report['server']['url']}): "
+              f"{'OK' if report['server']['alive'] else 'NO responde'}")
+        print(f"proyecto {report['project']['name']}: "
+              f"{report['project'].get('project_id') or '-'}")
+        for n in report["nodes"]:
+            print(f"  {str(n.get('name')):<14} {str(n.get('type')):<16} "
+                  f"{str(n.get('status')):<9} console={n.get('console')}")
+        if report["problems"]:
+            print("problemas:")
+            for p in report["problems"]:
+                print(f"  - {p}")
+        else:
+            print("sin problemas")
+    return 0 if report["ok"] else 1
+
+
+def _examen_verify(args, conf, c, name: str) -> int:
+    report: dict = {
+        "server": {"name": getattr(c, "name", "-"), "url": getattr(c, "url", "-"),
+                   "alive": False},
+        "project": {"name": name, "project_id": None, "status": None},
+        "nodes": [],
+        "checks": {},
+        "problems": [],
+        "ok": False,
+    }
+    problems = report["problems"]
+    if not c.alive():
+        problems.append(f"servidor {getattr(c, 'name', '-')} "
+                        f"({getattr(c, 'url', '-')}) no responde")
+        return _examen_verify_out(report, args)
+    report["server"]["alive"] = True
+    try:
+        report["server"]["version"] = c.version().get("version")
+    except (RuntimeError, OSError, ConnectionError) as e:
+        problems.append(f"no se pudo leer la versión del servidor: {e}")
+
+    proj, err = _examen_project(c, name)
+    if err:
+        problems.append(err)
+        return _examen_verify_out(report, args)
+    pid = proj["project_id"]
+    report["project"].update({"project_id": pid, "status": proj.get("status"),
+                              "name": proj.get("name", name)})
+    try:
+        c.ensure_open(pid)
+    except (RuntimeError, OSError, ConnectionError) as e:
+        problems.append(f"no se pudo abrir '{name}': {e}")
+
+    nodes = c.nodes(pid)
+    report["nodes"] = [core.node_summary(n) for n in nodes]
+    apagados = [n["name"] for n in nodes if n.get("status") != "started"]
+    if apagados:
+        problems.append("nodos no arrancados: " + ", ".join(apagados))
+    report["checks"]["started"] = not apagados
+
+    sin_clonar = [n["name"] for n in nodes if n.get("node_type") == "qemu"
+                  and (n.get("properties") or {}).get("linked_clone") is not True]
+    if sin_clonar:
+        problems.append("linked_clone desactivado: " + ", ".join(sin_clonar))
+    report["checks"]["linked_clone"] = not sin_clonar
+
+    discos: dict[str, list[str]] = {}
+    for n in nodes:
+        hda = (n.get("properties") or {}).get("hda_disk_image")
+        if hda:
+            discos.setdefault(hda, []).append(n["name"])
+    compartidos = {d: quienes for d, quienes in discos.items() if len(quienes) > 1}
+    if compartidos:
+        for disco, quienes in compartidos.items():
+            problems.append(f"disco compartido {disco} entre {', '.join(quienes)}")
+    report["checks"]["shared_disk"] = not compartidos
+
+    report["checks"]["nat"] = any(n.get("node_type") == "nat" for n in nodes)
+    if not report["checks"]["nat"]:
+        problems.append("sin nodo NAT: la WAN se queda sin salida")
+
+    vpcs = next((n for n in nodes if n.get("node_type") == "vpcs"
+                 and n.get("status") == "started"), None)
+    if not vpcs:
+        problems.append("sin VPCS arrancado para probar la salida")
+        report["checks"]["ping"] = {"ok": False, "detail": "sin VPCS arrancado"}
+    else:
+        try:
+            con = core.console_for(c, pid, vpcs)
+        except core.ConsoleError as e:
+            problems.append(f"{vpcs['name']}: {e}")
+            report["checks"]["ping"] = {"ok": False, "detail": str(e)}
+        else:
+            try:
+                con.wait_ready(timeout=10)
+                res = con.run("ping 8.8.8.8", idle=getattr(args, "idle", 4.0), timeout=25)
+                ok = ping_ok(res["output"]) and not res["timed_out"]
+                report["checks"]["ping"] = {
+                    "node": vpcs["name"], "ok": ok, "idle": getattr(args, "idle", 4.0),
+                    "output": res["output"][-400:],
+                }
+                if not ok:
+                    problems.append(f"{vpcs['name']}: `ping 8.8.8.8` sin respuesta")
+            except (core.ConsoleError, OSError, TimeoutError, ConnectionError) as e:
+                problems.append(f"{vpcs['name']}: no se pudo probar la salida: {e}")
+                report["checks"]["ping"] = {"ok": False, "detail": str(e)}
+            finally:
+                con.close()
+    return _examen_verify_out(report, args)
+
+
+def _examen_reset(args, conf, c, name: str) -> int:
+    if not getattr(args, "yes", False):
+        print("reset exige --yes: sólo reinicia el kit creado por `examen setup`",
+              file=sys.stderr)
+        return 1
+    if not c.alive():
+        print(f"servidor {c.name} ({c.url}) no responde", file=sys.stderr)
+        return 2
+    proj, err = _examen_project(c, name, strict=True)
+    if err:
+        raise SystemExit(err)
+    pid = proj["project_id"]
+    c.ensure_open(pid)
+
+    marca = c.project_file_read(pid, EXAMEN_MARKER)
+    try:
+        datos = json.loads(marca) if isinstance(marca, str) else {}
+    except (json.JSONDecodeError, TypeError):
+        datos = {}
+    if (not isinstance(datos, dict) or datos.get("created_by") != "gns3lab examen setup"
+            or datos.get("name") != name):
+        raise SystemExit(f"'{name}' no lleva la marca de `gns3lab examen setup`; "
+                         "reset no toca proyectos ajenos")
+
+    nodos = c.nodes(pid)
+    print(f"'{name}' ({pid[:8]}): parando {len(nodos)} nodo(s)")
+    st, res = c.nodes_action(pid, "stop")
+    if not _ok(st) and st != 200:
+        print(f"no se pudieron parar: [{st}] {_err(res)}", file=sys.stderr)
+        return 1
+    for n in nodos:
+        estado = _wait_node_status(c, pid, n["node_id"], "stopped", timeout=45)
+        print(f"  - {n['name']}: {estado}")
+    print(f"'{name}': arrancando de nuevo")
+    st, res = c.nodes_action(pid, "start")
+    if not _ok(st) and st != 200:
+        print(f"no se pudieron arrancar: [{st}] {_err(res)}", file=sys.stderr)
+        return 1
+    fallos = 0
+    for n in nodos:
+        estado = _wait_node_status(c, pid, n["node_id"], "started", timeout=45)
+        print(f"  + {n['name']}: {estado}")
+        fallos += 0 if estado == "started" else 1
+    return 1 if fallos else 0
+
+
+def cmd_examen(args, conf) -> int:
+    """Monta, comprueba o reinicia el kit de examen sin tocar otros proyectos."""
+    s = Server(getattr(args, "server", "local"), conf)
+    c = _core_client(s)
+    if not c.alive():
+        print(f"servidor {s.name} ({s.url}) no responde", file=sys.stderr)
+        return 2
+    name = getattr(args, "name", None) or EXAMEN_NAME
+    if args.action == "setup":
+        return _examen_setup(args, conf, c, name)
+    if args.action == "verify":
+        return _examen_verify(args, conf, c, name)
+    if args.action == "reset":
+        return _examen_reset(args, conf, c, name)
+    raise SystemExit(f"acción de examen desconocida: {args.action}")
+
+
 def main() -> int:
     conf = load_conf()
     if not CONF.exists():
@@ -3342,6 +3787,16 @@ def main() -> int:
     p.add_argument("project", nargs="?")
     p.add_argument("--json", action="store_true", help="salida JSON (mismo contenido)")
 
+    p = sub.add_parser("examen", help="setup|verify|reset del kit de examen")
+    p.add_argument("action", choices=["setup", "verify", "reset"])
+    p.add_argument("--name", help=f"nombre del proyecto (por defecto '{EXAMEN_NAME}')")
+    p.add_argument("--from", dest="from_project",
+                   help="setup: proyecto local del que tomar disco y adaptador")
+    p.add_argument("--json", action="store_true", help="verify: salida JSON parseable")
+    p.add_argument("--idle", type=float, default=4.0,
+                   help="verify: segundos de quietud para el ping (por defecto 4)")
+    p.add_argument("--yes", action="store_true", help="reset: confirmar el reinicio")
+
     args = ap.parse_args()
     if args.cmd == "import" and args.name and args.no_rename:
         args.name = args.name
@@ -3356,6 +3811,7 @@ def main() -> int:
         "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
         "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
         "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
+        "examen": cmd_examen,
         "project": cmd_project, "gns3vm": cmd_gns3vm, "notify": cmd_notify,
         "symbol": cmd_symbol, "iou-license": cmd_iou_license,
         "server": cmd_server, "emulator": cmd_emulator,
@@ -3364,7 +3820,7 @@ def main() -> int:
         "version-v1": cmd_version_v1,
     }
     needs_core = {"exec", "shot", "key", "type", "mon", "new", "node", "upload", "draw",
-                  "link", "doctor", "compute", "stats", "symbols", "appliances",
+                  "link", "doctor", "examen", "compute", "stats", "symbols", "appliances",
                   "console", "capture", "snap", "template", "images",
                   "project", "gns3vm", "notify", "symbol", "iou-license",
                   "server", "emulator", "nio", "capture-port", "all", "disk",
