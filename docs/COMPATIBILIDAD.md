@@ -23,8 +23,11 @@ los dos frentes, en [PARIDAD.md](PARIDAD.md).
 | Computes e imágenes | listar, detalle, estadísticas, imágenes, símbolos, appliances | cubierto en el núcleo; detalle, estadísticas, símbolos y appliances llegan con los carriles CLI/MCP |
 | Consola y monitor | telnet por prompt, HMP con OCR, teclas y texto | cubierto; consola interactiva llega con el carril CLI |
 
-Los huecos concretos, con la prueba de que la ruta existe, están en
-[API-COVERAGE.md](API-COVERAGE.md#endpoints-de-2261-que-este-repo-no-cubre).
+Los huecos concretos, agrupados por handler y con la prueba de que la ruta existe, están en
+[API-COVERAGE.md](API-COVERAGE.md#rutas-del-inventario-sin-puente-agrupadas-por-handler).
+Las operaciones de la GUI ya portadas al núcleo, con su comando y su tool, están en
+[GUI-PORTADA.md](GUI-PORTADA.md). Muchas de esas filas llevan «en curso»: el método del núcleo
+existe, pero el verbo de CLI o la tool MCP están llegando en los carriles paralelos.
 
 ## GNS3 3.x: no se declara soporte
 
@@ -32,6 +35,15 @@ Este cliente construye rutas `/v2` y autentica con Basic auth leída de
 `~/.config/GNS3/2.2/gns3_server.conf`. GNS3 3.x usa `/v3`, login por token y otro esquema de
 proyectos. **No hay servidor 3.x en este entorno para verificarlo** (2026-11-25), así que no se
 declara compatibilidad: ni probada ni parcial.
+
+**De dónde sale el inventario, y no de memoria.** El `gns3server` instalado aquí es la versión
+**2.2.61** (`~/Applications/gns3/venv/lib/python3.14/site-packages/gns3server/version.py`) y su
+código es Python legible en
+`~/Applications/gns3/venv/lib/python3.14/site-packages/gns3server/handlers`. Las 361 rutas de
+`orchestration/inventario-rutas-gns3.txt` se extrajeron de los decoradores `@Route.get`,
+`@Route.post`, `@Route.put` y `@Route.delete` de ese árbol, no se recordaron ni se infirieron de
+la documentación. Eso acota la verdad de la matriz a **2.2.61**:
+para 3.x haría falta repetir la extracción sobre un servidor real, inexistente hoy.
 
 Lo que habría que cambiar, sin poder afirmar hoy que baste:
 
