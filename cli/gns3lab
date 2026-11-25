@@ -18,6 +18,7 @@ Uso:
     gns3lab snap list|create <nombre>|restore <nombre> [proyecto]
     gns3lab images                      # imágenes QEMU del servidor
     gns3lab templates                   # plantillas del servidor
+    gns3lab template list|create|delete  # plantillas: listar, crear y borrar
 
 Sin VNC (lo que se usa de verdad en un examen):
 
@@ -906,6 +907,159 @@ def cmd_templates(args, conf):
     return 0
 
 
+def _kv_value(texto: str):
+    """Valor de un --set clave=valor: JSON si se puede (números, booleanos), si no texto."""
+    try:
+        return json.loads(texto)
+    except json.JSONDecodeError:
+        return texto
+
+
+def _template_row(t: dict) -> dict:
+    return {
+        "name": t.get("name"),
+        "template_type": t.get("template_type"),
+        "template_id": t.get("template_id"),
+        "compute_id": t.get("compute_id"),
+        "console": t.get("console"),
+        "console_type": t.get("console_type"),
+    }
+
+
+def cmd_template(args, conf):
+    """Plantillas: list, create (--from-node o --type) y delete.
+
+    `console` no se puede fijar en un nodo (`PUT` lo ignora con un 200 mentiroso),
+    pero sí en la plantilla: se crea y se fija con un `PUT` aparte, porque el POST
+    de plantillas rechaza `console` y `properties` anidado con un 400 de schema.
+    """
+    s = Server(args.server, conf)
+    act = args.action
+
+    if act == "list":
+        st, body = s.get("/v2/templates")
+        if st != 200 or not isinstance(body, list):
+            print(f"GET /v2/templates -> [{st}] {_err(body)}", file=sys.stderr)
+            return 1
+        filas = [_template_row(t) for t in body]
+        if args.json:
+            print(json.dumps({"count": len(filas), "templates": filas},
+                             ensure_ascii=False, indent=2))
+            return 0
+        for r in filas:
+            cons = f"console={r['console']} ({r['console_type']})" if r.get("console") else ""
+            print(f"  {(r['template_type'] or ''):<16} {(r['name'] or ''):<32} "
+                  f"{(r['template_id'] or '')[:8]}  {(r['compute_id'] or '-'):<8} {cons}")
+        return 0
+
+    if act == "create":
+        if not args.name:
+            raise SystemExit("create exige --name")
+        if bool(args.from_node) == bool(args.type):
+            raise SystemExit("create exige --from-node O --type (uno de los dos)")
+        body: dict = {"name": args.name, "compute_id": "local"}
+        console_type = None
+        if args.from_node:
+            proj = s.resolve(args.project)
+            nodes = s.nodes(proj["project_id"])
+            needle = args.from_node.lower()
+            hits = ([n for n in nodes if str(n.get("name", "")).lower() == needle]
+                    or [n for n in nodes if needle in str(n.get("name", "")).lower()])
+            if not hits:
+                raise SystemExit(f"nodo no encontrado: {args.from_node!r}. Hay: "
+                                 f"{', '.join(n['name'] for n in nodes)}")
+            if len(hits) > 1:
+                raise SystemExit(f"'{args.from_node}' es ambiguo: "
+                                 f"{', '.join(n['name'] for n in hits)}")
+            src = hits[0]
+            body["template_type"] = src["node_type"]
+            console_type = src.get("console_type")
+            props = dict(src.get("properties") or {})
+            print(f"origen: {proj['name']} / {src['name']} ({src['node_type']})")
+        else:
+            body["template_type"] = args.type
+            props = {}
+        for kv in args.set:
+            if "=" not in kv:
+                raise SystemExit(f"--set espera clave=valor, no {kv}")
+            k, v = kv.split("=", 1)
+            props[k] = _kv_value(v)
+        # Los md5sum son del fichero del nodo, no de la plantilla, y el schema los
+        # rechaza; `console` tampoco entra en el POST (va en el PUT de después).
+        for k in [k for k in props if k.endswith("_md5sum")]:
+            del props[k]
+        props.pop("console", None)
+        body.update(props)
+        if console_type and console_type != "none":
+            body["console_type"] = console_type
+
+        st, tpl = s.post("/v2/templates", body)
+        if st not in (200, 201) or not isinstance(tpl, dict):
+            print(f"no se pudo crear: [{st}] {_err(tpl)}", file=sys.stderr)
+            return 1
+        tid = tpl["template_id"]
+
+        if args.console is not None:
+            st, res = s.put(f"/v2/templates/{tid}", {"console": args.console})
+            if st not in (200, 201):
+                print(f"creada {tid[:8]} pero sin console: [{st}] {_err(res)}", file=sys.stderr)
+                return 1
+
+        # Releer: el 200 del PUT no prueba nada.
+        st, check = s.get(f"/v2/templates/{tid}")
+        if st != 200 or not isinstance(check, dict):
+            print(f"creada {tid[:8]}, pero no puedo releerla: [{st}] {_err(check)}",
+                  file=sys.stderr)
+            return 1
+        cons = check.get("console")
+        print(f"{check.get('name')} creada: {tid} tipo={check.get('template_type')} "
+              f"compute={check.get('compute_id')}")
+        if args.console is None:
+            print(f"  console={cons} ({check.get('console_type')})")
+            return 0
+        ok = cons == args.console
+        print(f"  console={cons} ({check.get('console_type')}) "
+              f"{'verificado' if ok else f'NO es el pedido ({args.console})'}")
+        return 0 if ok else 1
+
+    if act == "delete":
+        if not args.target:
+            raise SystemExit("delete exige el nombre o id de la plantilla")
+        if not args.yes:
+            if not sys.stdin.isatty():
+                print("borrar una plantilla es irreversible y stdin no es un TTY: "
+                      "repite con --yes", file=sys.stderr)
+                return 1
+            if input(f"¿borrar la plantilla {args.target!r}? [y/N] ").strip().lower() \
+                    not in ("y", "s", "si", "sí", "yes"):
+                print("cancelado")
+                return 1
+        st, body = s.get("/v2/templates")
+        if st != 200 or not isinstance(body, list):
+            print(f"GET /v2/templates -> [{st}] {_err(body)}", file=sys.stderr)
+            return 1
+        needle = args.target
+        hits = ([t for t in body if str(t.get("template_id", "")) == needle]
+                or [t for t in body if str(t.get("template_id", "")).startswith(needle)]
+                or [t for t in body if str(t.get("name", "")).lower() == needle.lower()])
+        if not hits:
+            raise SystemExit(f"ninguna plantilla coincide con '{needle}'")
+        if len(hits) > 1:
+            raise SystemExit(f"'{needle}' es ambiguo: "
+                             + ", ".join(f"{t.get('name')} ({str(t.get('template_id'))[:8]})"
+                                         for t in hits))
+        t = hits[0]
+        st, res = s.delete(f"/v2/templates/{t['template_id']}")
+        if st not in (200, 204):
+            print(f"no se pudo borrar: [{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        print(f"borrada {t.get('name')} ({t.get('template_type')}, "
+              f"{str(t['template_id'])[:8]})")
+        return 0
+
+    raise SystemExit(f"acción desconocida: {act}")
+
+
 def cmd_snap(args, conf):
     s = Server(args.server, conf)
     proj = s.resolve(args.project)
@@ -1162,11 +1316,7 @@ def cmd_node(args, conf):
             if "=" not in kv:
                 raise SystemExit(f"--set espera clave=valor, no {kv}")
             k, v = kv.split("=", 1)
-            try:
-                v = json.loads(v)
-            except json.JSONDecodeError:
-                pass                      # texto plano
-            (top if k in TOP else props)[k] = v
+            (top if k in TOP else props)[k] = _kv_value(v)
         body: dict = {}
         if props:
             body["properties"] = props
@@ -1324,37 +1474,67 @@ def cmd_link(args, conf):
     raise SystemExit(f"acción desconocida: {args.action}")
 
 
+def _emit_doctor(report: dict, lineas: list[str], as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        for linea in lineas:
+            print(linea)
+
+
 def cmd_doctor(args, conf):
     """Chequeo integral antes de dar un lab por bueno."""
     s = Server(args.server, conf)
     problemas: list[str] = []
-    print(f"servidor {s.name} ({s.url})")
+    lineas: list[str] = []
+    report: dict = {"server": {"name": s.name, "url": s.url}, "problems": problemas}
+
+    def say(texto: str = "") -> None:
+        lineas.append(texto)
+
+    say(f"servidor {s.name} ({s.url})")
     if not s.alive():
-        print("  NO responde: arráncalo (gns3server) antes de nada", file=sys.stderr)
+        if args.json:
+            report.update({"alive": False, "ok": False})
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print("  NO responde: arráncalo (gns3server) antes de nada", file=sys.stderr)
         return 2
+    report["alive"] = True
     st, ver = s.get("/v2/version")
-    print(f"  versión {ver.get('version') if isinstance(ver, dict) else '?'}")
+    version = ver.get("version") if isinstance(ver, dict) else "?"
+    report["version"] = version
+    say(f"  versión {version}")
     st, computes = s.get("/v2/computes")
     computes = computes if isinstance(computes, list) else []
+    report["computes"] = [{"name": c.get("name"), "connected": bool(c.get("connected"))}
+                          for c in computes]
     for comp in computes:
         ok = comp.get("connected")
-        print(f"  compute {comp.get('name')}: {'conectado' if ok else 'DESCONECTADO'}")
+        say(f"  compute {comp.get('name')}: {'conectado' if ok else 'DESCONECTADO'}")
         if not ok:
             problemas.append(f"compute {comp.get('name')} desconectado")
+    herramientas: dict[str, bool] = {}
     for b in ("tesseract", "qemu-img", "tshark", "sshpass"):
-        print(f"  {b:<10} {'OK' if shutil.which(b) else 'falta'}")
-        if b == "tesseract" and not shutil.which(b):
+        presente = bool(shutil.which(b))
+        herramientas[b] = presente
+        say(f"  {b:<10} {'OK' if presente else 'falta'}")
+        if b == "tesseract" and not presente:
             problemas.append("sin tesseract: `gns3lab shot` no puede dar texto")
+    report["tools"] = herramientas
     lv = subprocess.run(["systemctl", "is-active", "libvirtd"],
                         capture_output=True, text=True).stdout.strip()
-    print(f"  libvirtd   {lv or 'desconocido'}")
+    report["libvirtd"] = lv or None
+    say(f"  libvirtd   {lv or 'desconocido'}")
     if lv != "active":
         problemas.append("libvirtd parado: los nodos NAT no arrancan "
                          "(`sudo systemctl start libvirtd`)")
     try:
         import PIL  # noqa: F401
-        print("  Pillow     OK")
+        report["pillow"] = True
+        say("  Pillow     OK")
     except ImportError:
+        report["pillow"] = False
         problemas.append("sin Pillow: el screendump queda en PPM")
 
     projs = s.projects()
@@ -1363,19 +1543,31 @@ def cmd_doctor(args, conf):
     except SystemExit:
         target = None
     if not target:
-        print(f"  {len(projs)} proyectos, ninguno seleccionable")
+        report["projects"] = {"count": len(projs), "selected": None}
+        say(f"  {len(projs)} proyectos, ninguno seleccionable")
+        report["nodes"] = []
+        report["ok"] = False
+        _emit_doctor(report, lineas, args.json)
         return 1
-    print(f"  proyecto {target['name']} ({target['project_id'][:8]}, {target.get('status')})")
+    say(f"  proyecto {target['name']} ({target['project_id'][:8]}, {target.get('status')})")
+    report["projects"] = {"count": len(projs), "selected": target["name"],
+                          "project_id": target["project_id"],
+                          "status": target.get("status")}
     if target.get("status") != "opened":
-        print("    aviso: cerrado; `gns3lab up` lo abre")
+        say("    aviso: cerrado; `gns3lab up` lo abre")
     nodes = s.nodes(target["project_id"])
     discos: dict[str, list[str]] = {}
+    report["nodes"] = []
     for n in nodes:
         props = n.get("properties") or {}
         hda = props.get("hda_disk_image") or ""
         cons = n.get("console")
-        print(f"    {n['name']:<18} {n['node_type']:<16} {(n.get('status') or '-'):<9} "
-              f"console={cons} ({n.get('console_type')})")
+        say(f"    {n['name']:<18} {n['node_type']:<16} {(n.get('status') or '-'):<9} "
+            f"console={cons} ({n.get('console_type')})")
+        report["nodes"].append({"name": n["name"], "node_type": n["node_type"],
+                                "status": n.get("status"), "console": cons,
+                                "console_type": n.get("console_type"),
+                                "hda_disk_image": hda or None})
         if hda:
             discos.setdefault(hda, []).append(n["name"])
         if n.get("status") != "started":
@@ -1393,12 +1585,17 @@ def cmd_doctor(args, conf):
     nat = any(n["node_type"] == "nat" for n in nodes)
     if not nat:
         problemas.append("sin nodo NAT: la WAN se quedará sin IP (usa `gns3lab node add --template NAT`)")
-    print("\n  resumen")
+    say("")
+    say("  resumen")
     if problemas:
         for p in problemas:
-            print(f"    - {p}")
+            say(f"    - {p}")
+        report["ok"] = False
+        _emit_doctor(report, lineas, args.json)
         return 1
-    print("    sin hallazgos")
+    say("    sin hallazgos")
+    report["ok"] = True
+    _emit_doctor(report, lineas, args.json)
     return 0
 
 
@@ -1443,6 +1640,19 @@ def main() -> int:
 
     sub.add_parser("images", help="imágenes QEMU del servidor")
     sub.add_parser("templates", help="plantillas del servidor")
+
+    p = sub.add_parser("template", help="plantillas: list, create, delete")
+    p.add_argument("action", choices=["list", "create", "delete"])
+    p.add_argument("target", nargs="?", help="delete: nombre o id de la plantilla")
+    p.add_argument("--json", action="store_true", help="list: objeto JSON")
+    p.add_argument("--from-node", dest="from_node",
+                   help="create: nodo del que copiar tipo y properties")
+    p.add_argument("--type", help="create: tipo sin nodo de origen (qemu, vpcs, docker...)")
+    p.add_argument("--name", help="create: nombre de la plantilla")
+    p.add_argument("--console", type=int, help="create: puerto de consola de la plantilla")
+    p.add_argument("--set", action="append", default=[], help="create: clave=valor (repetible)")
+    p.add_argument("-p", "--project", help="create --from-node: proyecto del nodo")
+    p.add_argument("--yes", action="store_true", help="delete: no pedir confirmación")
 
     p = sub.add_parser("snap", help="snapshots")
     p.add_argument("action", choices=["list", "create", "restore"])
@@ -1529,6 +1739,7 @@ def main() -> int:
 
     p = sub.add_parser("doctor", help="chequeo integral del lab")
     p.add_argument("project", nargs="?")
+    p.add_argument("--json", action="store_true", help="salida JSON (mismo contenido)")
 
     args = ap.parse_args()
     if args.cmd == "import" and args.name and args.no_rename:
@@ -1538,6 +1749,7 @@ def main() -> int:
         "test": cmd_test, "export": cmd_export, "import": cmd_import, "fix": cmd_fix,
         "port": cmd_port,
         "images": cmd_images, "templates": cmd_templates, "snap": cmd_snap,
+        "template": cmd_template,
         "exec": cmd_exec, "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
         "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
         "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
