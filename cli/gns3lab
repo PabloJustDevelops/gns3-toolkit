@@ -108,6 +108,7 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -756,22 +757,22 @@ def _set_body(kvs: list[str]) -> dict:
 
 
 def _resolve_id(items: list[dict], needle: str, key: str, what: str) -> dict:
-    """Busca un objeto por id exacto, prefijo de id o nombre exacto."""
+    """Busca un objeto por id exacto, nombre exacto, prefijo de id o error."""
     exact = [x for x in items if str(x.get(key, "")) == needle]
     if exact:
         return exact[0]
+    named = [x for x in items if str(x.get("name", "")).lower() == needle.lower()]
+    if len(named) == 1:
+        return named[0]
     pref = [x for x in items if str(x.get(key, "")).startswith(needle)]
     if len(pref) == 1:
         return pref[0]
-    named = [x for x in items if str(x.get("name", "")).lower() == needle.lower()]
-    hits = pref or named
+    hits = named or pref
     if not hits:
         raise SystemExit(f"{what} no encontrado: {needle!r}")
-    if len(hits) > 1:
-        raise SystemExit(f"'{needle}' es ambiguo: "
-                         + ", ".join(f"{x.get('name') or str(x.get(key))[:8]}"
-                                     for x in hits))
-    return hits[0]
+    raise SystemExit(f"'{needle}' es ambiguo: "
+                     + ", ".join(f"{x.get('name') or str(x.get(key))[:8]}"
+                                 for x in hits))
 
 
 def cmd_up(args, conf):
@@ -2089,20 +2090,22 @@ def cmd_upload(args, conf):
     name = args.name or src.name
     payload, tmp = src, None
     if args.compress and src.suffix.lower() == ".qcow2" and shutil.which("qemu-img"):
-        tmp = Path("/tmp") / f"upload-{src.stem}.qcow2"
+        fd, tmp_name = tempfile.mkstemp(prefix="upload-", suffix=".qcow2")
+        os.close(fd)                        # qemu-img trabaja sobre la ruta, no el descriptor
+        tmp = Path(tmp_name)
         print(f"comprimiendo {src.name} ({src.stat().st_size/2**20:.0f} MB)")
         r = subprocess.run(["qemu-img", "convert", "-c", "-O", "qcow2", str(src), str(tmp)],
                            capture_output=True, text=True)
         if r.returncode == 0:
             payload = tmp
             print(f"  -> {tmp.stat().st_size/2**20:.0f} MB")
-        else:
-            tmp = None
-    data = payload.read_bytes()
-    print(f"subiendo {name} ({len(data)/2**20:.0f} MB)")
-    st, body = c.compute_write_file("local", "qemu", name, data)
-    if tmp:
-        tmp.unlink(missing_ok=True)
+    try:
+        data = payload.read_bytes()
+        print(f"subiendo {name} ({len(data)/2**20:.0f} MB)")
+        st, body = c.compute_write_file("local", "qemu", name, data)
+    finally:
+        if tmp:
+            tmp.unlink(missing_ok=True)
     if st not in (200, 201, 204):
         print(f"subida falló: [{st}] {body}", file=sys.stderr)
         return 1

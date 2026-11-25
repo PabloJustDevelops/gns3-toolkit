@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
@@ -40,7 +41,8 @@ mcp = FastMCP("gns3")
 
 # ────────────────────────────── configuración ──────────────────────────────
 def _conf() -> dict[str, str]:
-    cfg = configparser.ConfigParser()
+    # Sin interpolación: una contraseña con `%` debe leerse literal, no reventar.
+    cfg = configparser.ConfigParser(interpolation=None)
     data = {"host": "127.0.0.1", "port": "3080", "user": "admin", "password": ""}
     if CONF.exists():
         cfg.read(CONF)
@@ -1913,13 +1915,13 @@ def gns3_upload(path: str, name: Optional[str] = None, compress: bool = True,
     if compress and src.suffix.lower() == ".qcow2":
         qemu_img = shutil.which("qemu-img")
         if qemu_img:
-            tmp = Path("/tmp") / f"upload-{src.stem}.qcow2"
+            fd, tmp_name = tempfile.mkstemp(prefix="upload-", suffix=".qcow2")
+            os.close(fd)                    # qemu-img trabaja sobre la ruta, no el descriptor
+            tmp = Path(tmp_name)
             r = subprocess.run([qemu_img, "convert", "-c", "-O", "qcow2", str(src), str(tmp)],
                                capture_output=True, text=True)
             if r.returncode == 0:
                 payload = tmp
-            else:
-                tmp = None
     client = _client()
     data = payload.read_bytes()
     try:
