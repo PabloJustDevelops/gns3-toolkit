@@ -1978,9 +1978,23 @@ def cmd_capture(args, conf):
         return 0
 
     if act == "pcap":
-        st, data = c.link_capture(pid, lid, "pcap")
-        if st != 200 or not isinstance(data, bytes) or not data:
-            detalle = data.decode(errors="replace")[:200] if isinstance(data, bytes) else data
+        st = 0
+        data = None
+        # GET .../pcap no termina mientras la captura está activa: espera 180 s y
+        # acaba en TimeoutError. GNS3 ya escribe el fichero en el proyecto.
+        st_link, link = c.get(f"/v2/projects/{pid}/links/{lid}")
+        activa = st_link == 200 and isinstance(link, dict) and bool(link.get("capturing"))
+        detalle = "captura activa: GET .../pcap no devuelve hasta pararla" if activa else ""
+        if not activa:
+            try:
+                st, data = c.link_capture(pid, lid, "pcap")
+            except (TimeoutError, ConnectionError) as e:
+                detalle = str(e)
+            if st != 200 or not isinstance(data, bytes) or not data:
+                detalle = (data.decode(errors="replace")[:200]
+                           if isinstance(data, bytes) else str(data))
+                data = None
+        if data is None:
             # Con la captura parada la API puede dar 409: el fichero queda en el proyecto.
             proyecto = c.project_get(pid)
             base = Path(proyecto.get("path") or "") if isinstance(proyecto, dict) else None
@@ -1988,12 +2002,14 @@ def cmd_capture(args, conf):
                            key=lambda p: p.stat().st_mtime, reverse=True) \
                 if base and base.is_dir() else []
             if not cands:
-                print(f"no pude descargar el pcap de {lid[:8]}: [{st}] {detalle}",
+                print(f"no pude descargar el pcap de {lid[:8]}: [{st or '-'}] {detalle}",
                       file=sys.stderr)
                 return 1
-            data = cands[0].read_bytes()
-            print(f"  aviso: GET .../pcap -> [{st}] {detalle}; uso {cands[0].name}",
-                  file=sys.stderr)
+            propios = [p for p in cands if lid[:8] in p.name]
+            fichero = (propios or cands)[0]
+            data = fichero.read_bytes()
+            aviso = f"GET .../pcap -> [{st}] {detalle}" if st else detalle
+            print(f"  aviso: {aviso}; uso {fichero.name}", file=sys.stderr)
         destino_dir = Path.home() / "GNS3/captures"
         destino_dir.mkdir(parents=True, exist_ok=True)
         destino = destino_dir / f"cap-{time.strftime('%Y%m%d-%H%M%S')}-{lid[:8]}.pcap"
