@@ -14,6 +14,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
 - CLI: **45 comandos**; MCP: **41 tools** (`hermes mcp test gns3` → Connected, 41 discovered).
+- `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
 - **Tests: 466 passed, cobertura 100 % de `gns3core.py`** (718 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
@@ -124,6 +125,21 @@ Cuatro worktrees desde `fbac815`, agentes `gk4-*` con `hy4-flash-free` (CLI, doc
 Gates en `master`: 456 passed con `--cov-fail-under=100`, 39 tools conectadas, 42 comandos y
 `doctor` sin hallazgos. El mismo día se importó el kit al servidor del aula (`192.168.71.251`)
 como proyecto nuevo, sin modificar `Pablo Rodriguez Garijo` (`db277172…5cf`).
+
+### Sexta tanda: batch, JSON uniforme y guard de deriva (2026-11-25)
+
+Cuatro worktrees desde `34bbf66`, agentes `gk6-*` con `hungerg-free` (MCP, tests) y
+`hy4-flash-free` (CLI, guard).
+
+- `opencode/batchmcp` → `gns3_batch` (hasta 20 tools en una llamada, results indexados,
+  bloqueo de destructivas sin `confirm`) y `gns3_informe` (Markdown con evidencia real).
+- `opencode/jsoncli` → `--json` global para todos los comandos y `gns3lab examen informe`.
+- `opencode/driftguard` → `scripts/verify.py` y `tests/test_drift.py`. Encontró **20 hallazgos**
+  de cifras obsoletas en README, PROJECT y docs; corregidos en `master` hasta `OK: sin deriva`.
+- `opencode/extests2` → tests de batch, informe y JSON uniforme sin servidor.
+
+Gates en `master`: 483 passed con `--cov-fail-under=100`, 41 tools, 3 resources + 1 template +
+2 prompts, `hermes mcp test gns3` conectado, `--json status` parseable y guard sin deriva.
 
 ### Quinta tanda: repo público, resources/prompts y skill delgada (2026-11-25)
 
