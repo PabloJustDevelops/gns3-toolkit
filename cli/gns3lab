@@ -7,6 +7,7 @@ en el destino, las imágenes base no se comparten sin linked_clone y los VPCS
 muestran mal la gateway tras `ip dhcp`.
 
 Uso:
+    gns3lab --json <comando>            # salida parseable uniforme (flag ANTES del subcomando)
     gns3lab servers                     # servidores configurados y si responden
     gns3lab status [proyecto]           # proyectos y nodos con su estado
     gns3lab up [proyecto]               # abre y arranca todo
@@ -49,6 +50,16 @@ Sin VNC (lo que se usa de verdad en un examen):
     gns3lab link list|add|rm|edit|filters <link_id> --set k=v
     gns3lab doctor [proyecto]                    # chequeo integral antes de entregar
     gns3lab examen setup|verify|reset [--name N] # montar, comprobar o reiniciar el kit
+    gns3lab examen informe [--server local|clase] [--name N] [--dest RUTA]
+                                                 # informe Markdown en ~/GNS3/informes/
+
+`--json` antes del subcomando da salida parseable para cualquier comando, sin tocar los
+handlers: si lo capturado ya es JSON se imprime tal cual; si no, se envuelve como
+{"cmd", "ok", "output"}. `stderr` no se captura y el exit code se conserva.
+
+`examen informe` sólo lee el servidor con gns3core: escribe un Markdown con la topología,
+el estado, nodos, enlaces y comprobaciones reales en ~/GNS3/informes/ y devuelve la ruta
+(con --json global, {"path", "bytes", "ok"}).
 
 GUI operativa portada a la CLI (llama a los métodos de gns3core, no los reimplementa):
 
@@ -72,6 +83,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import io
 import json
 import os
@@ -3470,6 +3482,147 @@ def _examen_reset(args, conf, c, name: str) -> int:
     return 1 if fallos else 0
 
 
+def _examen_informe(args, conf, c, name: str) -> int:
+    """Escribe un Markdown con datos reales de gns3core; no inventa resultados.
+
+    Sólo lectura: no abre ni arranca nada. Cada línea de comprobaciones sale de
+    una llamada a `gns3core` o de los datos que ésta devolvió.
+    """
+    proj, err = _examen_project(c, name)
+    if err:
+        raise SystemExit(err)
+    pid = proj["project_id"]
+    nodes = c.nodes(pid)
+    links = c.links(pid)
+    nombres = {n["node_id"]: str(n.get("name") or "?") for n in nodes}
+
+    def celda(v) -> str:
+        return str(v if v not in (None, "") else "-").replace("|", "\\|")
+
+    def nid(nodo_id) -> str:
+        return "n_" + str(nodo_id).replace("-", "_")
+
+    imagenes = sorted(
+        str(i.get("filename")) for i in c.qemu_images()
+        if isinstance(i, dict) and i.get("filename"))
+    try:
+        version = str(c.version().get("version") or "?")
+    except (RuntimeError, OSError, ConnectionError) as e:
+        version = f"no disponible ({e})"
+
+    arrancados = [n for n in nodes if n.get("status") == "started"]
+    qemu = [n for n in nodes if n.get("node_type") == "qemu"]
+    sin_clonar = [n["name"] for n in qemu
+                  if (n.get("properties") or {}).get("linked_clone") is not True]
+    discos: dict[str, list[str]] = {}
+    for n in nodes:
+        hda = (n.get("properties") or {}).get("hda_disk_image")
+        if hda:
+            discos.setdefault(str(hda), []).append(str(n.get("name") or "?"))
+    compartidos = {d: q for d, q in discos.items() if len(q) > 1}
+    monitores = {}
+    for n in qemu:
+        hda = (n.get("properties") or {}).get("hda_disk_image")
+        puerto = (core.find_monitor_port(n["node_id"], hda)
+                  if n.get("status") == "started" else None)
+        monitores[str(n.get("name") or "?")] = puerto
+    marca = c.project_file_read(pid, EXAMEN_MARKER)
+    try:
+        marca_datos = json.loads(marca) if isinstance(marca, str) else {}
+    except (json.JSONDecodeError, TypeError):
+        marca_datos = {}
+    if not isinstance(marca_datos, dict):
+        marca_datos = {}
+    marca_autor = marca_datos.get("created_by")
+
+    lineas = [
+        f"# Informe de examen — {proj.get('name') or name}",
+        "",
+        f"Generado: {time.strftime('%Y-%m-%d %H:%M:%S')}. "
+        f"Servidor {c.name} ({c.url}).",
+        "",
+        "## Estado",
+        "",
+        f"- Servidor: {c.name} ({c.url}), responde: sí, versión: {version}.",
+        f"- Proyecto: **{celda(proj.get('name') or name)}** (`{pid}`), "
+        f"estado: {celda(proj.get('status'))}.",
+        f"- {len(nodes)} nodos ({len(arrancados)} arrancados) y {len(links)} enlaces.",
+        "",
+        "## Topología",
+        "",
+        "```mermaid",
+        "graph LR",
+    ]
+    for n in nodes:
+        lineas.append(
+            f'  {nid(n["node_id"])}["{celda(n.get("name"))} · {celda(n.get("node_type"))}"]')
+    for l in links:
+        ends = l.get("nodes") or []
+        if len(ends) == 2:
+            lineas.append(f"  {nid(ends[0].get('node_id'))} --> {nid(ends[1].get('node_id'))}")
+    lineas += ["```", "", "## Nodos", "",
+               "| Nodo | Tipo | Estado | Consola | Disco QEMU |",
+               "| --- | --- | --- | --- | --- |"]
+    for n in nodes:
+        props = n.get("properties") or {}
+        cons = f"{n.get('console_type') or '-'}:{n.get('console')}"
+        lineas.append(
+            f"| {celda(n.get('name'))} | {celda(n.get('node_type'))} | "
+            f"{celda(n.get('status'))} | {celda(cons)} | "
+            f"{celda(props.get('hda_disk_image'))} |")
+    lineas += ["", "## Enlaces", "", "| ID | Tipo | Extremos |", "| --- | --- | --- |"]
+    for l in links:
+        extremos = " <-> ".join(
+            f"{celda(nombres.get(e.get('node_id'), '?'))}:"
+            f"{celda(e.get('adapter_number'))}/{celda(e.get('port_number'))}"
+            for e in (l.get("nodes") or []))
+        lineas.append(f"| {celda(str(l.get('link_id') or '-')[:8])} | "
+                      f"{celda(l.get('link_type'))} | {extremos} |")
+
+    estado_clon = "todos" if not sin_clonar else ", ".join(sin_clonar) + " sin linked_clone"
+    estado_discos = "ninguno" if not compartidos else ", ".join(
+        f"{d} ({', '.join(q)})" for d, q in compartidos.items())
+    estado_mon = ", ".join(
+        f"{k}={v if v is not None else 'no visible'}" for k, v in monitores.items()) or "ninguno"
+    estado_marca = (f"sí ({marca_autor})" if marca_autor else
+                    "no (`examen-setup.json` ausente o sin marca)")
+    lineas += [
+        "", "## Comprobaciones (gns3core)", "",
+        "Resultados leídos del servidor con `gns3core`; no se inventa ninguno.", "",
+        f"- `Client.alive()`: sí ({c.name}).",
+        f"- `Client.version()`: {version}.",
+        f"- `Client.projects()`: '{name}' encontrado ({pid[:8]}).",
+        f"- `Client.nodes()`: {len(nodes)} nodos, {len(arrancados)} arrancados.",
+        f"- `Client.links()`: {len(links)} enlaces.",
+        f"- Estado `started`: {len(arrancados)}/{len(nodes)}.",
+        f"- `linked_clone` en QEMU: {estado_clon}.",
+        f"- Discos compartidos: {estado_discos}.",
+        f"- Nodo NAT: {'sí' if any(n.get('node_type') == 'nat' for n in nodes) else 'no'}.",
+        f"- `Client.qemu_images()`: {len(imagenes)} imágenes"
+        + (f" ({', '.join(imagenes)})." if imagenes else "."),
+        f"- `find_monitor_port()` (QEMU arrancados): {estado_mon}.",
+        f"- Marca de `examen setup`: {estado_marca}.",
+        "- `ping 8.8.8.8`: no ejecutado en este informe; "
+        "se comprueba con `gns3lab examen verify`.",
+        "",
+    ]
+
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-") or "examen"
+    dest = (Path(args.dest).expanduser() if getattr(args, "dest", None)
+            else Path.home() / "GNS3/informes"
+            / f"informe-{slug}-{time.strftime('%Y%m%d-%H%M%S')}.md")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    contenido = "\n".join(lineas)
+    dest.write_text(contenido, encoding="utf-8")
+    bytes_ = dest.stat().st_size
+    if getattr(args, "global_json", False) or getattr(args, "json", False):
+        print(json.dumps({"path": str(dest), "bytes": bytes_, "ok": True},
+                         ensure_ascii=False))
+    else:
+        print(dest)
+    return 0
+
+
 def cmd_examen(args, conf) -> int:
     """Monta, comprueba o reinicia el kit de examen sin tocar otros proyectos."""
     if getattr(args, "action", None) == "reset" and not getattr(args, "yes", False):
@@ -3488,15 +3641,73 @@ def cmd_examen(args, conf) -> int:
         return _examen_verify(args, conf, c, name)
     if args.action == "reset":
         return _examen_reset(args, conf, c, name)
+    if args.action == "informe":
+        return _examen_informe(args, conf, c, name)
     raise SystemExit(f"acción de examen desconocida: {args.action}")
 
 
+def _run_handler(args, handler, conf) -> int:
+    """Ejecuta el handler; con --json global normaliza su stdout.
+
+    Sin el flag el handler corre como siempre. Con él se captura sólo stdout:
+    si el texto es JSON válido se imprime tal cual (así un comando con --json
+    local no se convierte en doble JSON); si no, se envuelve como
+    {"cmd", "ok", "output"}. stderr sigue yendo a stderr y el exit code se
+    devuelve sin cambios, también cuando el handler llama a SystemExit.
+    """
+    if not getattr(args, "global_json", False):
+        return handler(args, conf)
+    buf = io.StringIO()
+    rc = 0
+    mensaje = None
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = handler(args, conf)
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+        if not isinstance(e.code, int) and e.code is not None:
+            mensaje = str(e.code)
+    texto = buf.getvalue().rstrip("\n")
+    if mensaje:
+        texto = (texto + "\n" if texto else "") + mensaje
+    try:
+        json.loads(texto)
+    except (json.JSONDecodeError, ValueError):
+        texto = json.dumps({"cmd": args.cmd, "ok": rc == 0, "output": texto},
+                           ensure_ascii=False, indent=2)
+    print(texto)
+    return rc
+
+
 def main() -> int:
+    """Punto de entrada de la CLI.
+
+    Dos contratos nuevos, sin reescribir los handlers:
+
+    * `--json` ANTES del subcomando fuerza salida parseable para cualquier
+      comando: el JSON que el handler ya produzca se pasa tal cual; el resto
+      se envuelve como {"cmd", "ok", "output"}. No se captura stderr y se
+      conserva el exit code.
+    * `examen informe` escribe en ~/GNS3/informes/ un Markdown con la
+      topología, el estado, nodos, enlaces y comprobaciones reales de
+      gns3core; devuelve la ruta por stdout (o {"path", "bytes", "ok"} con
+      --json). No modifica ningún proyecto del servidor.
+    """
     conf = load_conf()
     if not CONF.exists():
         CONF.parent.mkdir(parents=True, exist_ok=True)
         CONF.write_text(json.dumps(DEFAULT_CONF, indent=2))
-    ap = argparse.ArgumentParser(prog="gns3lab", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(
+        prog="gns3lab",
+        description=__doc__.split("\n")[0],
+        epilog=("Salida uniforme:  gns3lab --json <comando>  "
+                "(el flag va antes del subcomando; stderr no se captura)\n"
+                "Informe de examen: gns3lab examen informe "
+                "[--server local|clase] [--name NOMBRE] [--dest RUTA]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--json", action="store_true", dest="global_json",
+                    help="salida JSON uniforme para cualquier comando (antes del subcomando)")
     ap.add_argument("--server", "-s", default=conf.get("default_server", "local"))
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -3791,12 +4002,14 @@ def main() -> int:
     p.add_argument("project", nargs="?")
     p.add_argument("--json", action="store_true", help="salida JSON (mismo contenido)")
 
-    p = sub.add_parser("examen", help="setup|verify|reset del kit de examen")
-    p.add_argument("action", choices=["setup", "verify", "reset"])
+    p = sub.add_parser("examen", help="setup|verify|reset|informe del kit de examen")
+    p.add_argument("action", choices=["setup", "verify", "reset", "informe"])
     p.add_argument("--name", help=f"nombre del proyecto (por defecto '{EXAMEN_NAME}')")
     p.add_argument("--from", dest="from_project",
                    help="setup: proyecto local del que tomar disco y adaptador")
-    p.add_argument("--json", action="store_true", help="verify: salida JSON parseable")
+    p.add_argument("--json", action="store_true",
+                   help="verify: salida JSON parseable; informe: {path, bytes, ok}")
+    p.add_argument("--dest", help="informe: ruta del Markdown (por defecto ~/GNS3/informes/)")
     p.add_argument("--idle", type=float, default=4.0,
                    help="verify: segundos de quietud para el ping (por defecto 4)")
     p.add_argument("--yes", action="store_true", help="reset: confirmar el reinicio")
@@ -3833,7 +4046,7 @@ def main() -> int:
         print("falta el núcleo gns3core: revisa ~/Applications/gns3-mcp/gns3core.py",
               file=sys.stderr)
         return 1
-    return handlers[args.cmd](args, conf)
+    return _run_handler(args, handlers[args.cmd], conf)
 
 
 if __name__ == "__main__":
