@@ -3472,6 +3472,10 @@ def _examen_reset(args, conf, c, name: str) -> int:
 
 def cmd_examen(args, conf) -> int:
     """Monta, comprueba o reinicia el kit de examen sin tocar otros proyectos."""
+    if getattr(args, "action", None) == "reset" and not getattr(args, "yes", False):
+        print("reset exige --yes: no se toca ningún proyecto ni se consulta el servidor "
+              "sin confirmación", file=sys.stderr)
+        return 1
     s = Server(getattr(args, "server", "local"), conf)
     c = _core_client(s)
     if not c.alive():

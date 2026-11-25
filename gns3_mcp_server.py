@@ -2671,13 +2671,14 @@ def gns3_diagnostico(proyecto: str) -> str:
 2. Lee `gns3://status` y `gns3://projects`. Confirma que «{proyecto}» existe y está abierto.
    Si el nombre es ambiguo, pide el project_id; no elijas un proyecto a ciegas.
 3. Lee `gns3://project/<proyecto>/topology`, sustituyendo <proyecto> por el nombre o id
-   codificado como URI. Compara nodos, estados, consolas y enlaces con el diagnóstico.
+   codificado como URI. Compara la topologia (nodos, estados, consolas y enlaces) con el
+   diagnóstico; no descarte un nodo por no aparecer en `status`.
 4. Para cada nodo relevante:
    - Consola telnet: usa `gns3_exec` con `project_name` y comandos de solo lectura adecuados
      al sistema (por ejemplo, estado de interfaces, rutas y vecinos). Fija `expect` cuando
      conozcas el prompt; si no, deja que corte por quietud (`idle`), no por sleeps fijos.
-   - Pantalla gráfica/QEMU: usa `gns3_monitor(action="text", scale=2, psm=4)`. Para menús,
-     emplea `action="key"` (`ret`, no `enter`) o `action="type"`; pide `shot` sólo si hace
+   - Pantalla gráfica/QEMU: usa `gns3_monitor(action="text", scale=2, psm=4)` para leer la
+     pantalla por OCR; para menús, emplea `action="key"` (`ret`, no `enter`) o `action="type"`; pide `shot` sólo si hace
      falta conservar una captura. El VNC es el último recurso.
 5. Verifica conectividad de extremo a extremo con ping desde los clientes hacia su gateway
    y los destinos requeridos. Exige una salida real; un 200 de la API no basta. Comprueba
@@ -2703,9 +2704,10 @@ def gns3_examen(servidor: str = "clase") -> str:
 5. Configura VLANs y direccionamiento por consola telnet (`gns3_exec`), respetando puertos
    access/trunk del switch y las interfaces del router. Lee primero la pantalla; en QEMU usa
    `gns3_monitor(action="text", scale=2, psm=4)` y teclas HMP (`ret`, `shift-<tecla>`), no VNC.
-6. Verifica el laboratorio: `gns3lab --server {servidor} doctor <proyecto>`, estados, rutas,
-   VLAN, NAT y ping entre clientes, gateway y destinos con 0% de pérdida. Pega la evidencia.
-7. Porta el proyecto con `gns3lab --server {servidor} port --from local <proyecto>
+6. Procedimiento para verificar el laboratorio: `gns3lab --server {servidor} doctor <proyecto>`,
+   estados, rutas, VLAN, NAT y ping entre clientes, gateway y destinos con 0% de pérdida. Pega
+   la evidencia real; no des un resultado por bueno sin salida observada.
+7. Instrucciones para portar el proyecto con `gns3lab --server {servidor} port --from local <proyecto>
    --name <nombre-destino> --start` cuando el origen sea local y el destino sea «{servidor}».
    Confirma antes el destino para no sobrescribir; el port puede parar y rearrancar nodos del
    origen. Repite doctor, topología y ping en el destino antes de darlo por terminado.
