@@ -12,6 +12,7 @@ lo devuelto.
 from __future__ import annotations
 
 import json
+import socket
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -134,6 +135,9 @@ class FakeTelnet:
         self._server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _TelnetHandler)
         self._server.daemon_threads = True
         self._server.owner = self
+        # Al cerrar un test el cliente puede irse con datos pendientes: el fallo de
+        # escritura del doble es esperado y no debe ensuciar la salida de pytest.
+        self._server.handle_error = lambda *args: None
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         self.port = self._server.server_address[1]
@@ -194,15 +198,21 @@ def telnet_factory():
 
 # ───────────────────────────── HMP de QEMU falso ─────────────────────────────
 class FakeHmp:
-    """Canal HMP: banner, eco carácter a carácter con ANSI y respuesta por comando."""
+    """Canal HMP: banner, eco carácter a carácter con ANSI y respuesta por comando.
+
+    `on_command(cmd) -> str` permite responder con lógica (p. ej. `screendump`, que
+    tiene que escribir un fichero) en vez de con la tabla `responses`.
+    """
 
     def __init__(self):
         self.banner = b"QEMU 9.0.0 monitor - type 'help' for more information\r\n(qemu) "
         self.responses: dict[str, str] = {"info status": "VM status: running"}
+        self.on_command = None
         self.commands: list[str] = []
         self._server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _HmpHandler)
         self._server.daemon_threads = True
         self._server.owner = self
+        self._server.handle_error = lambda *args: None   # cierre del test, no un fallo
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         self.port = self._server.server_address[1]
@@ -228,6 +238,8 @@ class _HmpHandler(socketserver.StreamRequestHandler):
             echo = b"".join(bytes([b]) + b"\x1b[K" for b in cmd.encode())
             echo += b"\x1b[D"
             resp = owner.responses.get(cmd, f"Error: unknown command '{cmd}'")
+            if owner.on_command is not None:
+                resp = owner.on_command(cmd)
             self.wfile.write(echo + b"\r\n" + resp.encode() + b"\r\n(qemu) ")
             self.wfile.flush()
 
@@ -246,3 +258,44 @@ def hmp_factory():
     yield make
     for srv in servers:
         srv.close()
+
+
+# ───────────────────────────── socket de mentira ─────────────────────────────
+class StubSock:
+    """Socket sin red para las ramas que un servidor sano no produce.
+
+    `recv` devuelve los bytes/errores de la cola en orden y, agotada, lanza
+    `socket.timeout` (lo que hace un socket ocioso). `sendall` sólo apunta lo enviado.
+    """
+
+    def __init__(self, recv=None, send_exc=None, close_exc=None):
+        self.recv_q = list(recv or [])
+        self.send_exc = send_exc
+        self.close_exc = close_exc
+        self.sent: list[bytes] = []
+
+    def settimeout(self, _seconds) -> None:
+        pass
+
+    def recv(self, _size: int) -> bytes:
+        if self.recv_q:
+            item = self.recv_q.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+        raise socket.timeout()
+
+    def sendall(self, data: bytes) -> None:
+        if self.send_exc:
+            raise self.send_exc
+        self.sent.append(data)
+
+    def close(self) -> None:
+        if self.close_exc:
+            raise self.close_exc
+
+
+@pytest.fixture
+def stub_sock():
+    """Fábrica de `StubSock` para las ramas de error de `Console` y `QemuMonitor`."""
+    return lambda **kw: StubSock(**kw)
