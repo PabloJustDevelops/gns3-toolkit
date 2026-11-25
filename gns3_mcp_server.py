@@ -14,7 +14,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import time
 import unicodedata
@@ -87,6 +86,31 @@ def _server_up() -> tuple[bool, Any]:
     if isinstance(info, dict) and info.get("error"):
         return False, info
     return True, info
+
+
+def _err_msg(status: int, body: Any, what: str) -> dict:
+    """Error de la API con el mensaje interno, no con el volcado de schema anidado."""
+    msg = body.get("message") if isinstance(body, dict) else body
+    if isinstance(msg, str) and "JSON schema error" in msg:
+        tail = re.search(r"\}'\s*:\s*(.+)$", msg, re.S)
+        if tail:
+            msg = tail.group(1)
+        else:
+            m = re.search(r'"message"\s*:\s*"([^"]+)"', msg[msg.find("{"):])
+            if m:
+                msg = m.group(1)
+    if msg is None:
+        msg = "sin detalle"
+    return {"error": f"{what} falló: [{status}] {str(msg)[:400]}"}
+
+
+def _unexpected_keys(body: Any) -> list[str]:
+    """Claves que el schema de la API rechazó (`Additional properties ... were unexpected`)."""
+    msg = body.get("message") if isinstance(body, dict) else body
+    if not isinstance(msg, str):
+        return []
+    m = re.search(r"\(([^)]*)\) were unexpected", msg)
+    return re.findall(r"'([^']+)'", m.group(1)) if m else []
 
 
 # ────────────────────────────── helpers ──────────────────────────────
@@ -165,64 +189,55 @@ def _node_summary(n: dict) -> dict:
     }
 
 
-def _clean(text: str) -> str:
-    text = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
-    text = text.replace("\x00", "")
-    return text
+def _resolve_template(client, template_id: Optional[str] = None,
+                      name: Optional[str] = None) -> tuple[Optional[dict], Optional[dict]]:
+    """Plantilla por id (admite prefijo) o nombre (exacto, luego parcial único)."""
+    tpls = client.templates()
+    names = [t.get("name") for t in tpls]
+    if not tpls:
+        return None, {"error": "el servidor no tiene plantillas"}
+    if template_id:
+        hit = next((t for t in tpls if t["template_id"] == template_id), None) or next(
+            (t for t in tpls if str(t["template_id"]).startswith(template_id)), None)
+        if hit:
+            return hit, None
+        return None, {"error": f"plantilla no encontrada: {template_id}", "available": names}
+    if not name:
+        return None, {"error": "indica name o template_id"}
+    low = name.lower()
+    hits = [t for t in tpls if str(t.get("name", "")).lower() == low]
+    if not hits:
+        hits = [t for t in tpls if low in str(t.get("name", "")).lower()
+                or str(t.get("template_id", "")).startswith(name)]
+    if len(hits) == 1:
+        return hits[0], None
+    if not hits:
+        return None, {"error": f"plantilla no encontrada: {name}", "available": names}
+    return None, {"error": f"'{name}' es ambiguo", "candidates": [t.get("name") for t in hits]}
 
 
-def _console_port(project_id: str, node: dict) -> tuple[Optional[str], Optional[int]]:
-    port = node.get("console")
-    host = node.get("console_host") or "127.0.0.1"
-    if port in (None, 0):
-        full = _api("GET", f"/v2/projects/{project_id}/nodes/{node['node_id']}")
-        if isinstance(full, dict):
-            port = full.get("console")
-            host = full.get("console_host") or host
-    return host, port
-
-
-def _telnet(host: str, port: int, commands: list[str], settle: float, timeout: float,
-            ready_timeout: float = 25.0) -> str:
-    s = socket.create_connection((host, port), timeout=timeout)
-    s.settimeout(0.4)
-    buf = b""
-
-    def drain(until: float) -> None:
-        nonlocal buf
-        while time.time() < until:
-            try:
-                chunk = s.recv(65535)
-                if not chunk:
-                    return
-                buf += chunk
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-
-    try:
-        s.sendall(b"\n")
-        # esperar prompt real: algunos discos se quedan en el menú de GRUB y hay que pulsar Enter
-        deadline = time.time() + ready_timeout
-        grub_hits = 0
-        while time.time() < deadline:
-            drain(time.time() + 0.6)
-            tail = _clean(buf.decode(errors="replace"))[-600:]
-            if "GNU GRUB" in tail and grub_hits < 3:
-                s.sendall(b"\n")
-                grub_hits += 1
-                time.sleep(1.5)
-                continue
-            if re.search(r"[#>] ?$", tail):
-                break
-        for cmd in commands:
-            s.sendall(cmd.encode() + b"\n")
-            drain(time.time() + settle)
-        drain(time.time() + 0.5)
-    finally:
-        s.close()
-    return _clean(buf.decode(errors="replace"))
+def _endpoint_error(node: dict, adapter: int, port: int, side: str) -> Optional[dict]:
+    """Explica un extremo imposible antes de que GNS3 devuelva un 404 opaco."""
+    name, ntype = node.get("name"), node.get("node_type")
+    ports = node.get("ports") or []
+    if ntype == "ethernet_switch":
+        max_port = max((p.get("port_number", 0) for p in ports), default=7)
+        if adapter != 0:
+            return {"error": f"{name} es un ethernet_switch: sus {max_port + 1} puertos viven todos "
+                             f"en el adapter 0. Con adapter_{side}={adapter}, port_{side}={port} GNS3 "
+                             f"respondería 'Port {adapter}/{port} for {name} not found'. Usa "
+                             f"adapter_{side}=0 y port_{side}=N (0-{max_port})."}
+        if not 0 <= port <= max_port:
+            return {"error": f"{name} no tiene el puerto {port} en el adapter 0 (rango 0-{max_port})",
+                    "ports": [f"0/{p.get('port_number')}" for p in ports]
+                    or [f"0/{i}" for i in range(max_port + 1)]}
+        return None
+    if ports:
+        valid = {(p.get("adapter_number", 0), p.get("port_number", 0)) for p in ports}
+        if (adapter, port) not in valid:
+            return {"error": f"{name} no tiene el puerto {adapter}/{port}",
+                    "ports": [f"{a}/{p}" for a, p in sorted(valid)]}
+    return None
 
 
 # ────────────────────────────── tools ──────────────────────────────
@@ -301,6 +316,117 @@ def gns3_templates(kind: Optional[str] = None) -> Any:
             "ram": t.get("ram"),
         })
     return out
+
+
+@mcp.tool
+def gns3_template(
+    action: str = "list",
+    name: Optional[str] = None,
+    template_id: Optional[str] = None,
+    from_node: Optional[str] = None,
+    node_type: Optional[str] = None,
+    properties: Optional[dict] = None,
+    console: Optional[int] = None,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    x: int = 0,
+    y: int = 0,
+) -> Any:
+    """Plantillas del servidor: action=list|create|delete|apply.
+
+    list   — nombre, tipo y template_id de cada plantilla.
+    create — desde un nodo existente (`from_node`, nombre o id, copia `node_type` y
+             `properties`) o desde cero (`node_type` + `properties`). `name` es el nombre
+             de la plantilla. Con `console` (puerto VNC) se fija **en la plantilla** y se
+             verifica releyéndola: el `PUT` sobre un nodo ignora `console` y devuelve 200.
+    delete — por `name` o `template_id`; devuelve `{"deleted": bool}`.
+    apply  — instancia la plantilla (`name` o `template_id`) en un proyecto, en (`x`, `y`);
+             delega en `gns3_node_edit(action="create", template=...)`.
+    """
+    action = action.lower()
+    client = _client()
+
+    if action == "list":
+        tpls = _api("GET", "/v2/templates")
+        if not isinstance(tpls, list):
+            return tpls
+        return [{"name": t.get("name"), "type": t.get("template_type"),
+                 "template_id": t.get("template_id")} for t in tpls]
+
+    if action == "create":
+        props: dict = {}
+        if from_node:
+            proj, err = _pid_or_error(client, project_id, project_name)
+            if err:
+                return err
+            try:
+                src = client.find_node(proj["project_id"], from_node)
+                src = client.node_detail(proj["project_id"], src["node_id"])
+            except SystemExit as e:
+                return {"error": str(e)}
+            node_type = src.get("node_type")
+            props = dict(src.get("properties") or {})
+            name = name or f"{src['name']}-tpl"
+        else:
+            if not (node_type and properties):
+                return {"error": "create exige from_node, o node_type + properties"}
+            props = dict(properties)
+            name = name or f"{node_type}-{int(time.time()) % 10000}"
+        # 2.2.61 rechaza `properties` anidado y los *_md5sum (los calcula el servidor):
+        # el cuerpo de la plantilla va plano, y `console` sólo se puede fijar con un PUT.
+        body: dict = {"name": name, "template_type": node_type, "compute_id": "local"}
+        body.update({k: v for k, v in props.items() if not k.endswith("_md5sum")})
+        for attempt in (1, 2):
+            st, res = client.post("/v2/templates", body, timeout=120)
+            if st in (200, 201):
+                break
+            bad = _unexpected_keys(res)
+            if attempt == 1 and bad:
+                for k in bad:
+                    body.pop(k, None)
+                continue
+            return _err_msg(st, res, "crear plantilla")
+        res = res if isinstance(res, dict) else {}
+        tid = res.get("template_id")
+        out = {"created": True, "name": res.get("name", name), "template_id": tid,
+               "type": res.get("template_type", node_type), "console": res.get("console")}
+        if console is not None and tid:
+            # en el POST no se acepta; el PUT sobre la plantilla sí (sobre el nodo, no)
+            st2, put_res = client.put(f"/v2/templates/{tid}", {"console": int(console)},
+                                      timeout=60)
+            st3, got = client.get(f"/v2/templates/{tid}")
+            real = got.get("console") if isinstance(got, dict) else None
+            out["console"] = real
+            out["console_verified"] = real == int(console)
+            if not out["console_verified"]:
+                detail = _err_msg(st2, put_res, "fijar console")["error"]
+                out["detail"] = (f"la plantilla no conserva console={console} "
+                                 f"(quedó {real}): {detail}")
+        return out
+
+    if action == "delete":
+        tpl, err = _resolve_template(client, template_id, name)
+        if err:
+            return err
+        st, res = client.delete(f"/v2/templates/{tpl['template_id']}", timeout=120)
+        ok = st in (200, 204)
+        out = {"deleted": ok, "name": tpl.get("name"), "template_id": tpl["template_id"]}
+        if not ok:
+            out.update(_err_msg(st, res, "borrar plantilla"))
+        return out
+
+    if action == "apply":
+        tpl, err = _resolve_template(client, template_id, name)
+        if err:
+            return err
+        res = gns3_node_edit(action="create", project_id=project_id,
+                             project_name=project_name, template=tpl["template_id"],
+                             x=x, y=y)
+        if isinstance(res, dict) and res.get("error"):
+            return res
+        return {"template": tpl.get("name"), "template_id": tpl["template_id"], "node": res}
+
+    return {"error": f"acción desconocida: {action}", "valid": ["list", "create", "delete", "apply"]}
 
 
 @mcp.tool
@@ -428,6 +554,128 @@ def gns3_links(
 
 
 @mcp.tool
+def gns3_link_edit(
+    action: str = "add",
+    node_a: Optional[str] = None,
+    node_b: Optional[str] = None,
+    adapter_a: int = 0,
+    adapter_b: int = 0,
+    port_a: int = 0,
+    port_b: int = 0,
+    link_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Enlaces con validación previa: action=add|delete|list.
+
+    add     — node_a/node_b (nombre o id) y puertos `adapter_*`/`port_*` (0 por defecto).
+              Antes de enviar comprueba el puerto contra los del nodo: un `ethernet_switch`
+              tiene sus 8 puertos en el **adapter 0**, y un adapter mal puesto produciría
+              `404 Port X/0 for SW1 not found`. La tool lo explica en vez de propagarlo.
+    delete  — por `link_id` (admite prefijo único) o por node_a+node_b si el enlace es único.
+    list    — enlaces con sus extremos (nodo, adapter, port).
+    """
+    action = action.lower()
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    pid = proj["project_id"]
+
+    def ends_of(link: dict, names: dict) -> list[dict]:
+        return [{"node": names.get(e.get("node_id"), e.get("node_id")),
+                 "adapter": e.get("adapter_number"), "port": e.get("port_number")}
+                for e in link.get("nodes", [])]
+
+    if action == "list":
+        names = {n["node_id"]: n["name"] for n in client.nodes(pid)}
+        return [{"link_id": l.get("link_id"), "ends": ends_of(l, names),
+                 "capturing": l.get("capturing")} for l in client.links(pid)]
+
+    if action == "add":
+        if not (node_a and node_b):
+            return {"error": "add exige node_a y node_b"}
+        try:
+            a = client.find_node(pid, node_a)
+            b = client.find_node(pid, node_b)
+        except SystemExit as e:
+            return {"error": str(e)}
+        for side, node, adapter, port in (("a", a, adapter_a, port_a),
+                                          ("b", b, adapter_b, port_b)):
+            bad = _endpoint_error(node, adapter, port, side)
+            if bad:
+                return bad
+        links = client.links(pid)
+        names = {n["node_id"]: n["name"] for n in client.nodes(pid)}
+        for l in links:
+            ep = {(e.get("node_id"), e.get("adapter_number"), e.get("port_number"))
+                  for e in l.get("nodes", [])}
+            if ((a["node_id"], adapter_a, port_a) in ep
+                    and (b["node_id"], adapter_b, port_b) in ep):
+                return {"error": f"ya existe un enlace {a['name']}:{adapter_a}/{port_a} "
+                                 f"<-> {b['name']}:{adapter_b}/{port_b}",
+                        "link_id": l.get("link_id")}
+        for side, node, adapter, port in (("a", a, adapter_a, port_a),
+                                          ("b", b, adapter_b, port_b)):
+            for l in links:
+                ep = {(e.get("node_id"), e.get("adapter_number"), e.get("port_number"))
+                      for e in l.get("nodes", [])}
+                if (node["node_id"], adapter, port) in ep:
+                    return {"error": f"el puerto {node['name']}:{adapter}/{port} ya está usado "
+                                     f"por el enlace {l.get('link_id')} ({ends_of(l, names)})",
+                            "link_id": l.get("link_id")}
+        body = {"nodes": [
+            {"node_id": a["node_id"], "adapter_number": adapter_a, "port_number": port_a},
+            {"node_id": b["node_id"], "adapter_number": adapter_b, "port_number": port_b},
+        ]}
+        st, res = client.post(f"/v2/projects/{pid}/links", body, timeout=60)
+        if st not in (200, 201):
+            out = _err_msg(st, res, "crear enlace")
+            if "not found" in out["error"]:
+                out["hint"] = ("el puerto no existe en el nodo; en un ethernet_switch todos los "
+                               "puertos están en adapter 0 (port 0-7)")
+            return out
+        res = res if isinstance(res, dict) else {}
+        return {"link_id": res.get("link_id"),
+                "ends": [{"node": a["name"], "adapter": adapter_a, "port": port_a},
+                         {"node": b["name"], "adapter": adapter_b, "port": port_b}]}
+
+    if action == "delete":
+        links = client.links(pid)
+        target = None
+        if link_id:
+            hits = [l for l in links if l.get("link_id") == link_id] or [
+                l for l in links if str(l.get("link_id", "")).startswith(link_id)]
+            if len(hits) != 1:
+                return {"error": f"enlace no encontrado o ambiguo: {link_id}",
+                        "available": [l.get("link_id") for l in links]}
+            target = hits[0]
+        elif node_a and node_b:
+            try:
+                a = client.find_node(pid, node_a)
+                b = client.find_node(pid, node_b)
+            except SystemExit as e:
+                return {"error": str(e)}
+            hits = [l for l in links
+                    if {a["node_id"], b["node_id"]} <= {e.get("node_id") for e in l.get("nodes", [])}]
+            if len(hits) != 1:
+                return {"error": f"hay {len(hits)} enlaces entre {a['name']} y {b['name']}; "
+                                 f"indica link_id",
+                        "available": [l.get("link_id") for l in hits]}
+            target = hits[0]
+        else:
+            return {"error": "delete exige link_id o node_a+node_b"}
+        st, res = client.delete(f"/v2/projects/{pid}/links/{target['link_id']}", timeout=60)
+        ok = st in (200, 204)
+        out = {"deleted": ok, "link_id": target["link_id"]}
+        if not ok:
+            out.update(_err_msg(st, res, "borrar enlace"))
+        return out
+
+    return {"error": f"acción desconocida: {action}", "valid": ["add", "delete", "list"]}
+
+
+@mcp.tool
 def gns3_topology(project_id: Optional[str] = None, project_name: Optional[str] = None) -> dict:
     """Resumen legible de la topología: nodos con estado y enlaces con sus extremos."""
     pid, proj = _resolve_project(project_id, project_name)
@@ -468,27 +716,34 @@ def gns3_console(
     timeout: float = 20.0,
     ready_timeout: float = 30.0,
 ) -> dict:
-    """Ejecuta comandos en la consola telnet de un nodo y devuelve la salida.
-    `commands` es una lista, en orden. `settle` = segundos de espera por comando.
-    `ready_timeout` = espera máxima a que el nodo dé prompt (pulsa Enter si se queda en GRUB)."""
-    pid, _ = _resolve_project(project_id, project_name)
-    if not pid:
-        return {"error": "proyecto no encontrado"}
-    err = _ensure_open(pid)
-    if err:
-        return {"error": "no se pudo abrir el proyecto", "detail": err}
-    nodes = _nodes(pid)
-    targets = _match_nodes(nodes, node)
-    if not targets:
-        return {"error": f"nodo no encontrado: {node}", "available": [n["name"] for n in nodes]}
-    t = targets[0]
-    if t.get("status") != "started":
-        return {"error": f"el nodo {t['name']} no está arrancado (status={t.get('status')})"}
-    host, port = _console_port(pid, t)
-    if not port:
-        return {"error": f"el nodo {t['name']} no expone consola telnet", "console_type": t.get("console_type")}
-    out = _telnet(host, int(port), commands, settle, timeout, ready_timeout)
-    return {"node": t["name"], "host": host, "port": port, "commands": commands, "output": out}
+    """Alias compatible de `gns3_exec`: consola telnet de un nodo, sin esperas ciegas.
+
+    Se conserva la firma antigua (`settle` = quietud exigida a la salida de cada comando,
+    no un `sleep` fijo) y la forma `{node, host, port, commands, output}`, pero toda la
+    lectura la hace `core.Console` vía `gns3_exec`: corta por prompt/quietud, responde a
+    `--More--` y a `[y/n]`, y devuelve la salida limpia de cada comando. Para el detalle
+    por comando usa `gns3_exec`.
+    """
+    res = gns3_exec(
+        node=node,
+        commands=commands,
+        project_id=project_id,
+        project_name=project_name,
+        idle=settle,
+        timeout=timeout,
+        ready_timeout=ready_timeout,
+    )
+    if isinstance(res, dict) and res.get("error"):
+        return res
+    results = res.get("results") or []
+    output = "\n".join(r.get("output", "") for r in results if r.get("output"))
+    return {
+        "node": res.get("node"),
+        "host": (res.get("console") or {}).get("host"),
+        "port": (res.get("console") or {}).get("port"),
+        "commands": commands,
+        "output": output,
+    }
 
 
 @mcp.tool
@@ -707,10 +962,10 @@ def gns3_exec(
 ) -> dict:
     """Ejecuta comandos en la consola telnet de un nodo, por prompt o por quietud.
 
-    Es la vía preferente frente a `gns3_console` y frente al VNC: no espera un tiempo
-    fijo, responde solo a `--More--` y a `[y/n]`, y devuelve la salida de cada comando
-    por separado. Si el nodo tiene consola gráfica (VNC), lo dice y remite a
-    `gns3_monitor` en vez de fallar sin explicación.
+    Es la única vía de consola: `gns3_console` es un alias compatible que delega aquí.
+    No espera un tiempo fijo, responde solo a `--More--` y a `[y/n]`, y devuelve la salida
+    de cada comando por separado. Si el nodo tiene consola gráfica (VNC), lo dice y remite
+    a `gns3_monitor` en vez de fallar sin explicación.
 
     `expect` es una regex que cierra la lectura (p. ej. `r"\\$ $"`); sin ella se corta
     cuando la salida lleva `idle` segundos quieta. `password` se usa si aparece un
@@ -743,7 +998,8 @@ def gns3_exec(
     return {
         "project": proj["name"],
         "node": node_obj["name"],
-        "console": {"type": node_obj.get("console_type"), "port": node_obj.get("console")},
+        "console": {"type": node_obj.get("console_type"), "port": node_obj.get("console"),
+                    "host": node_obj.get("console_host") or "127.0.0.1"},
         "prompt": ready.get("prompt"),
         "ready": ready.get("ready"),
         "results": results,
