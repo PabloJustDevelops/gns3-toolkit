@@ -177,7 +177,7 @@ El VNC queda para lo único que no tiene otra vía: instaladores interactivos co
 resuelve el symlink de `~/.local/bin/gns3lab` y añade la raíz a `sys.path`. Un paquete `src/`
 no aporta nada aquí y añadiría una capa de rotura justo antes del examen.
 
-En este árbol la suite completa vive en `tests/`: 593 tests recogidos con `pytest --collect-only`
+En este árbol la suite completa vive en `tests/`: 638 tests recogidos con `pytest --collect-only`
 sin servidor. Los dobles de `tests/conftest.py` cubren la API REST falsa, la consola telnet y el
 canal HMP. El único fichero que habla con el GNS3 real es `tests/test_mcp_smoke.py`, excluido de
 la colección (`collect_ignore`) y ejecutado a mano.

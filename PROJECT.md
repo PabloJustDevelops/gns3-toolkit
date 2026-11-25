@@ -15,7 +15,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
 - CLI: **46 comandos**; MCP: **42 tools** (`hermes mcp test gns3` → Connected, 41 discovered).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 593 passed, 100 % de `gns3core.py`** (720 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
+- **Tests: 638 passed, 100 % de `gns3core.py`** (720 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
 - MCP: 42 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
