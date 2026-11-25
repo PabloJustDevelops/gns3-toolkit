@@ -19,9 +19,11 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -377,6 +379,142 @@ def gns3_projects(action: str = "list", name: Optional[str] = None, project_id: 
         return client.project_get(pid)
     except (ConnectionError, RuntimeError) as e:
         return {"error": str(e)}
+
+
+def _pfsense_module():
+    """Carga pfSense sólo al usarlo para no frenar el arranque del MCP."""
+    try:
+        import pfsense
+    except ImportError as e:
+        raise RuntimeError("pfsense.py no está disponible en esta rama") from e
+    return pfsense
+
+
+def _pfsense_node(project_id: Optional[str], project_name: Optional[str],
+                  node: Optional[str]) -> tuple[Optional[dict], Optional[dict]]:
+    """Localiza un único pfSense sin abrir el proyecto ni usar SSH."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return None, {"error": "proyecto no encontrado", "project_id": project_id,
+                      "project_name": project_name}
+    nodes = _nodes(pid)
+    if node:
+        matches = _match_nodes(nodes, node)
+    else:
+        matches = [n for n in nodes if "pfsense" in str(n.get("name", "")).casefold()]
+    if not matches:
+        return None, {"error": "no se encontró el nodo pfSense",
+                      "available": [n.get("name") for n in nodes]}
+    if len(matches) > 1:
+        return None, {"error": "hay varios nodos pfSense; indica node",
+                      "candidates": [n.get("name") for n in matches]}
+    return matches[0], None
+
+
+def gns3_pfsense(action: str = "status", project_id: Optional[str] = None,
+                 project_name: Optional[str] = None, node: Optional[str] = None,
+                 **kwargs) -> Any:
+    """Opera pfSense por SSH; ``detect`` sólo lee el nodo GNS3.
+
+    Las acciones SSH leen ``PFSENSE_PASSWORD`` del entorno; ``PFSENSE_USER`` es
+    opcional. Para ``rule``, ``rule_action`` corresponde al parámetro ``action`` de pfSense.
+    """
+    action = action.lower()
+    valid = {"status", "config", "assign", "ip", "dhcp", "rule", "nat", "ssh", "detect"}
+    if action not in valid:
+        return {"ok": False, "data": None, "error": f"acción desconocida: {action}",
+                "valid": sorted(valid)}
+    if action != "detect" and not os.environ.get("PFSENSE_PASSWORD"):
+        return {"ok": False, "data": None,
+                "error": "falta la variable de entorno PFSENSE_PASSWORD"}
+
+    try:
+        pf = _pfsense_module()
+    except RuntimeError as e:
+        return {"ok": False, "data": None, "error": str(e)}
+
+    if action == "detect":
+        target, error = _pfsense_node(project_id, project_name, node)
+        if error:
+            return error
+        try:
+            detected = pf.detect_ifnames(target)
+        except Exception as e:
+            return {"error": str(e) or type(e).__name__}
+        adapter_type = (target.get("properties") or {}).get("adapter_type")
+        return {**detected, "adapter_type": adapter_type}
+
+    methods = {
+        "status": "status",
+        "config": "get_config",
+        "assign": "assign",
+        "ip": "set_ip",
+        "dhcp": "dhcp",
+        "rule": "rule",
+        "nat": "nat",
+        "ssh": "enable_ssh",
+    }
+    call_kwargs = dict(kwargs)
+    if action == "rule" and "rule_action" in call_kwargs:
+        call_kwargs["action"] = call_kwargs.pop("rule_action")
+    try:
+        client = pf.PfSense.from_env()
+        data = getattr(client, methods[action])(**call_kwargs)
+    except Exception as e:
+        return {"ok": False, "data": None, "error": str(e) or type(e).__name__}
+    failed = isinstance(data, dict) and data.get("ok") is False
+    error = None
+    if failed:
+        error = data.get("error") or data.get("detail") or _literal(data)
+    return {"ok": not failed, "data": data, "error": error}
+
+
+@mcp.tool(name="gns3_pfsense")
+def _gns3_pfsense_mcp(
+    action: str = "status",
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    node: Optional[str] = None,
+    mapping: Optional[dict] = None,
+    rule_action: Optional[str] = None,
+    ifname: Optional[str] = None,
+    ip: Optional[str] = None,
+    mask: Optional[str] = None,
+    gateway: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    dns: Optional[str | list[str]] = None,
+    proto: Optional[str] = None,
+    src: Optional[str] = None,
+    dst: Optional[str] = None,
+    port: Optional[int] = None,
+    target: Optional[str] = None,
+) -> Any:
+    """pfSense nativo: action=status|config|assign|ip|dhcp|rule|nat|ssh|detect.
+
+    ``detect`` localiza el nodo pfSense y deduce interfaces desde su adapter_type,
+    sin SSH. Las demás acciones delegan en ``pfsense.PfSense.from_env()`` y exigen
+    ``PFSENSE_PASSWORD``; ``PFSENSE_USER`` es opcional. En ``rule``, ``rule_action``
+    es pass/block.
+    """
+    kwargs = {key: value for key, value in {
+        "mapping": mapping,
+        "rule_action": rule_action,
+        "ifname": ifname,
+        "ip": ip,
+        "mask": mask,
+        "gateway": gateway,
+        "start": start,
+        "end": end,
+        "dns": dns,
+        "proto": proto,
+        "src": src,
+        "dst": dst,
+        "port": port,
+        "target": target,
+    }.items() if value is not None}
+    return gns3_pfsense(action=action, project_id=project_id,
+                        project_name=project_name, node=node, **kwargs)
 
 
 @mcp.tool
@@ -2622,69 +2760,77 @@ def _batch_block_reason(tool: str, args: dict) -> Optional[str]:
 
 
 def _batch_global_error(message: str, started: float) -> dict:
-    return {"ok": False, "error": message, "total_ms": int((time.perf_counter() - started) * 1000),
-            "results": []}
+    wall_ms = int((time.perf_counter() - started) * 1000)
+    return {"ok": False, "error": message, "total_ms": wall_ms, "wall_ms": wall_ms,
+            "parallel": False, "cache_hits": 0, "results": []}
 
 
-@mcp.tool
-def gns3_batch(operations: list[dict], stop_on_error: bool = False,
-               project_name: Optional[str] = None) -> dict:
-    """Ejecuta hasta 20 tools registradas en una llamada, con errores aislados.
+def _batch_is_read_only(tool: Any, args: Any) -> bool:
+    """Clasifica lecturas sin paralelizar acciones que puedan cambiar estado."""
+    if not isinstance(tool, str) or not isinstance(args, dict):
+        return False
+    if tool.startswith(("gns3_status", "gns3_topology", "gns3_templates",
+                        "gns3_appliances", "gns3_statistics")):
+        return True
+    action = str(args.get("action", "")).lower()
+    if tool == "gns3_projects":
+        return action in ("", "list", "info")
+    if tool == "gns3_symbols":
+        return action in ("", "list", "dimensions", "raw", "default")
+    if tool == "gns3_compute":
+        return action in ("", "info", "list", "ports") or (
+            action == "call" and args.get("body") is None)
+    if tool == "gns3_pfsense":
+        return action in ("", "status", "config", "detect")
+    return False
 
-    Cada operación es `{"tool": "gns3_exec", "args": {...}}`. `project_name` se
-    inyecta en las tools que lo admitan si la operación no fija proyecto. Las tools
-    destructivas exigen `"confirm": true` en la operación; sin eso se bloquean antes
-    de llamar a la función. `stop_on_error=True` detiene el lote tras el primer fallo.
-    """
-    started = time.perf_counter()
-    if not isinstance(operations, list):
-        return _batch_global_error("operations debe ser una lista de dicts", started)
-    if len(operations) > 20:
-        return _batch_global_error(
-            f"gns3_batch admite un máximo de 20 operaciones; recibidas {len(operations)}", started)
 
-    registered = _registered_tool_functions()
-    results: list[dict] = []
-    for index, operation in enumerate(operations):
-        op_started = time.perf_counter()
-        tool = operation.get("tool") if isinstance(operation, dict) else None
-        item: dict = {"index": index, "tool": tool, "ok": False, "ms": 0}
-        error = None
-        result = None
+def _batch_execute(index: int, operation: Any, registered: dict[str, Any],
+                   project_name: Optional[str], read_cache: Optional[dict] = None,
+                   cache_guard: Optional[threading.Lock] = None,
+                   key_guards: Optional[dict] = None) -> dict:
+    """Valida y ejecuta una operación, manteniendo el contrato de errores aislados."""
+    op_started = time.perf_counter()
+    tool = operation.get("tool") if isinstance(operation, dict) else None
+    item: dict = {"index": index, "tool": tool, "ok": False, "ms": 0}
+    error = None
+    result = None
 
-        if not isinstance(operation, dict):
-            error = "la operación debe ser un dict con tool y args"
-        elif not isinstance(tool, str) or not tool.strip():
-            error = "la operación exige tool como cadena no vacía"
+    if not isinstance(operation, dict):
+        error = "la operación debe ser un dict con tool y args"
+    elif not isinstance(tool, str) or not tool.strip():
+        error = "la operación exige tool como cadena no vacía"
+    else:
+        tool = tool.strip()
+        item["tool"] = tool
+        args = operation.get("args", {})
+        if not isinstance(args, dict):
+            error = "args debe ser un dict"
         else:
-            tool = tool.strip()
-            item["tool"] = tool
-            args = operation.get("args", {})
-            if not isinstance(args, dict):
-                error = "args debe ser un dict"
+            fn = registered.get(tool)
+            if tool == "gns3_batch":
+                error = "gns3_batch no se puede anidar dentro de otro lote"
+            elif fn is None:
+                error = f"tool no registrada: {tool}"
             else:
-                fn = registered.get(tool)
-                if tool == "gns3_batch":
-                    error = "gns3_batch no se puede anidar dentro de otro lote"
-                elif fn is None:
-                    error = f"tool no registrada: {tool}"
+                blocked = _batch_block_reason(tool, args)
+                if blocked and operation.get("confirm") is not True:
+                    error = blocked
                 else:
-                    blocked = _batch_block_reason(tool, args)
-                    if blocked and operation.get("confirm") is not True:
-                        error = blocked
-                    else:
-                        call_args = dict(args)
-                        try:
-                            params = inspect.signature(fn).parameters
-                        except (TypeError, ValueError):
-                            params = {}
-                        if (project_name is not None and not call_args.get("project_id")
-                                and not call_args.get("project_name")
-                                and _accepts_tool_arg(params, "project_name")):
-                            call_args["project_name"] = project_name
-                        if (blocked and operation.get("confirm") is True
-                                and _accepts_tool_arg(params, "confirm")):
-                            call_args["confirm"] = True
+                    call_args = dict(args)
+                    try:
+                        params = inspect.signature(fn).parameters
+                    except (TypeError, ValueError):
+                        params = {}
+                    if (project_name is not None and not call_args.get("project_id")
+                            and not call_args.get("project_name")
+                            and _accepts_tool_arg(params, "project_name")):
+                        call_args["project_name"] = project_name
+                    if (blocked and operation.get("confirm") is True
+                            and _accepts_tool_arg(params, "confirm")):
+                        call_args["confirm"] = True
+                    def invoke():
+                        nonlocal result, error
                         try:
                             result = fn(**call_args)
                         except Exception as e:
@@ -2699,15 +2845,101 @@ def gns3_batch(operations: list[dict], stop_on_error: bool = False,
                                 item["ok"] = True
                                 item["result"] = result
 
-        if error is not None:
-            item["error"] = error
-        item["ms"] = int((time.perf_counter() - op_started) * 1000)
-        results.append(item)
-        if not item["ok"] and stop_on_error:
-            break
+                    cache_key = None
+                    if read_cache is not None and _batch_is_read_only(tool, args):
+                        cache_key = (tool, json.dumps(call_args, sort_keys=True,
+                                                      ensure_ascii=False, default=str))
+                        with cache_guard:
+                            key_guard = key_guards.setdefault(cache_key, threading.Lock())
+                        with key_guard:
+                            with cache_guard:
+                                cached = read_cache.get(cache_key)
+                            if cached and time.monotonic() - cached[0] <= 2.0:
+                                result = cached[1]
+                                item["ok"] = True
+                                item["result"] = result
+                                item["cache_hit"] = True
+                            else:
+                                invoke()
+                                if item["ok"]:
+                                    with cache_guard:
+                                        read_cache[cache_key] = (time.monotonic(), result)
+                    else:
+                        invoke()
 
-    return {"ok": all(item["ok"] for item in results),
-            "total_ms": int((time.perf_counter() - started) * 1000), "results": results}
+    if error is not None:
+        item["error"] = error
+    item["ms"] = int((time.perf_counter() - op_started) * 1000)
+    return item
+
+
+@mcp.tool
+def gns3_batch(operations: list[dict], stop_on_error: bool = False,
+               project_name: Optional[str] = None) -> dict:
+    """Ejecuta hasta 20 tools registradas en una llamada, con errores aislados.
+
+    Cada operación es `{"tool": "gns3_exec", "args": {...}}`. `project_name` se
+    inyecta en las tools que lo admitan si la operación no fija proyecto. Las tools
+    destructivas exigen `"confirm": true` en la operación; sin eso se bloquean antes
+    de llamar a la función. Las lecturas contiguas se paralelizan y las consultas
+    idénticas se reutilizan durante 2 s dentro del lote (`cache_hits`). Los efectos
+    se ejecutan en orden secuencial. `stop_on_error=True` mantiene el lote secuencial
+    para detenerse antes de adelantar operaciones a un fallo.
+    """
+    started = time.perf_counter()
+    if not isinstance(operations, list):
+        return _batch_global_error("operations debe ser una lista de dicts", started)
+    if len(operations) > 20:
+        return _batch_global_error(
+            f"gns3_batch admite un máximo de 20 operaciones; recibidas {len(operations)}", started)
+
+    registered = _registered_tool_functions()
+    prepared = []
+    for index, operation in enumerate(operations):
+        tool = operation.get("tool") if isinstance(operation, dict) else None
+        args = operation.get("args", {}) if isinstance(operation, dict) else {}
+        prepared.append((index, operation, _batch_is_read_only(tool, args)))
+
+    results: list[dict] = []
+    parallel = False
+    read_cache: dict = {}
+    cache_guard = threading.Lock()
+    key_guards: dict = {}
+    offset = 0
+    while offset < len(prepared):
+        read_only = prepared[offset][2]
+        end = offset + 1
+        while end < len(prepared) and prepared[end][2] == read_only:
+            end += 1
+        group = prepared[offset:end]
+        if read_only and not stop_on_error and len(group) > 1:
+            parallel = True
+            with ThreadPoolExecutor(max_workers=len(group)) as pool:
+                futures = [pool.submit(_batch_execute, index, operation, registered,
+                                       project_name, read_cache, cache_guard, key_guards)
+                           for index, operation, _ in group]
+                group_results = [future.result() for future in futures]
+        else:
+            group_results = []
+            for index, operation, _ in group:
+                item = _batch_execute(index, operation, registered, project_name,
+                                      read_cache, cache_guard, key_guards)
+                group_results.append(item)
+                if stop_on_error and not item["ok"]:
+                    break
+        results.extend(group_results)
+        if stop_on_error and any(not item["ok"] for item in group_results):
+            break
+        if not read_only:
+            with cache_guard:
+                read_cache.clear()
+        offset = end
+
+    wall_ms = int((time.perf_counter() - started) * 1000)
+    cache_hits = sum(1 for item in results if item.get("cache_hit"))
+    return {"ok": all(item["ok"] for item in results), "total_ms": wall_ms,
+            "wall_ms": wall_ms, "parallel": parallel, "cache_hits": cache_hits,
+            "results": results}
 
 
 def _literal(value: Any) -> str:
