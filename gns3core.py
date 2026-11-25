@@ -283,10 +283,79 @@ class Client:
         return self.delete(f"/v2/templates/{tid}", timeout=120)
 
     def node_action(self, pid: str, nid: str, action: str, timeout: float = 180) -> tuple[int, Any]:
-        """start|stop|reload|suspend over un nodo."""
-        if action not in ("start", "stop", "reload", "suspend"):
+        """start|stop|reload|suspend|resume|pause|unpause sobre un nodo."""
+        if action not in ("start", "stop", "reload", "suspend", "resume", "pause", "unpause"):
             raise ValueError(f"acción de nodo desconocida: {action}")
         return self.post(f"/v2/projects/{pid}/nodes/{nid}/{action}", timeout=timeout)
+
+    def nodes_action(self, pid: str, action: str, timeout: float = 300) -> tuple[int, Any]:
+        """Acción masiva del proyecto (GUI: botones Start/Stop de toda la topología)."""
+        if action not in ("start", "stop", "suspend", "reload"):
+            raise ValueError(f"acción masiva desconocida: {action}")
+        return self.post(f"/v2/projects/{pid}/nodes/{action}", timeout=timeout)
+
+    def nodes_console_reset(self, pid: str) -> tuple[int, Any]:
+        return self.post(f"/v2/projects/{pid}/nodes/console/reset", timeout=120)
+
+    def _emulator_for(self, pid: str, nid: str) -> str:
+        """Tipo de compute del nodo (`qemu`, `vpcs`, `docker`…) para rutas `/computes/local/…`."""
+        detail = self.node_detail(pid, nid)
+        return str(detail.get("node_type") or "qemu") if isinstance(detail, dict) else "qemu"
+
+    def port_nio(self, pid: str, nid: str, adapter: int, port: int,
+                 body: Optional[dict] = None, emulator: Optional[str] = None,
+                 delete: bool = False) -> tuple[int, Any]:
+        """NIO de un puerto: la vía de enganche que señaló el REA de ubridge.
+
+        Estas rutas seSirven en el compute, no en el controller; el proxy las reenvía.
+        Un `500` del compute se devuelve tal cual: es información real, no se disfraza.
+        """
+        emu = emulator or self._emulator_for(pid, nid)
+        path = (f"/v2/computes/local/projects/{pid}/{emu}/nodes/{nid}"
+                f"/adapters/{adapter}/ports/{port}/nio")
+        if delete:
+            return self.delete(path, timeout=120)
+        return self.put(path, body or {}, timeout=120) if body is not None else self.get(path)
+
+    def port_capture(self, pid: str, nid: str, adapter: int, port: int, action: str,
+                     file_name: Optional[str] = None,
+                     emulator: Optional[str] = None) -> tuple[int, Any]:
+        """Captura por puerto (`start_capture|stop_capture|pcap`), distinta de la de enlace."""
+        if action not in ("start_capture", "stop_capture", "pcap"):
+            raise ValueError(f"acción de captura de puerto desconocida: {action}")
+        emu = emulator or self._emulator_for(pid, nid)
+        base = (f"/v2/computes/local/projects/{pid}/{emu}/nodes/{nid}"
+                f"/adapters/{adapter}/ports/{port}")
+        if action == "pcap":
+            return self.get(f"{base}/pcap", raw=True, timeout=180)
+        body = {"capture_file_name": file_name or f"port-{nid[:8]}-{adapter}-{port}.pcap"}
+        if action == "start_capture":
+            body["data_link_type"] = "DLT_EN10MB"
+        return self.post(f"{base}/{action}", body, timeout=120)
+
+    def qemu_img_binaries(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/qemu/img-binaries")
+
+    def qemu_img_config(self, body: Optional[dict] = None) -> tuple[int, Any]:
+        return self.post("/v2/computes/local/qemu/img", body, timeout=180) if body is not None \
+            else self.put("/v2/computes/local/qemu/img", {}, timeout=180)
+
+    def virtualbox_vms(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/virtualbox/vms")
+
+    def vmware_vms(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/vmware/vms")
+
+    def vmware_vmnet(self, body: Optional[dict] = None) -> tuple[int, Any]:
+        return self.post("/v2/computes/local/vmware/nodes/interfaces/vmnet",
+                         body or {}, timeout=120)
+
+    def notifications_ws_url(self, pid: Optional[str] = None) -> str:
+        base = self.url.replace("http://", "ws://").replace("https://", "wss://")
+        return f"{base}/v2/projects/{pid}/notifications/ws" if pid else f"{base}/v2/notifications/ws"
+
+    def v1_version(self) -> tuple[int, Any]:
+        return self.get("/v1/version")
 
     def node_command_line(self, pid: str, nid: str) -> str:
         detail = self.node_detail(pid, nid)
@@ -526,6 +595,16 @@ API_V2_MAP: dict[str, tuple[str, ...]] = {
                   "GET /computes/local/docker/images", "GET /network/interfaces",
                   "GET /network/ports", "POST /ports/udp",
                   "GET /nodes/{nid}/dynamips/auto_idlepc"),
+    "nio_ports": ("GET/PUT/DELETE /computes/local/projects/{id}/{emu}/nodes/{nid}"
+                  "/adapters/{a}/ports/{p}/nio",
+                  "POST /computes/local/projects/{id}/{emu}/nodes/{nid}"
+                  "/adapters/{a}/ports/{p}/{start_capture|stop_capture}",
+                  "GET /computes/local/…/ports/{p}/pcap",
+                  "POST /projects/{id}/nodes/{start|stop|suspend|reload}",
+                  "POST /projects/{id}/nodes/console/reset",
+                  "GET /computes/local/qemu/img-binaries", "POST/PUT /computes/local/qemu/img",
+                  "GET /computes/local/{virtualbox|vmware}/vms",
+                  "GET /{v1|v2}/version", "GET /notifications/ws"),
 }
 
 
