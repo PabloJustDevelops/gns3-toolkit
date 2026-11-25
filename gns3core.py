@@ -343,6 +343,158 @@ class Client:
                         data=data, ctype=ctype, timeout=1800)
 
 
+    # ── GUI operativa portada a la API v2 (rutas leídas de gns3server) ──────────
+    def node_resize_disk(self, pid: str, nid: str, size: int) -> tuple[int, Any]:
+        """Equivale a «Resize disk» del diálogo de propiedades QEMU."""
+        return self.post(f"/v2/projects/{pid}/nodes/{nid}/resize_disk", {"hda_disk_size": size}, timeout=300)
+
+    def console_reset(self, pid: str, nid: str) -> tuple[int, Any]:
+        return self.post(f"/v2/projects/{pid}/nodes/{nid}/console/reset", timeout=60)
+
+    def console_ws_url(self, pid: str, nid: str) -> str:
+        detail = self.node_detail(pid, nid)
+        if not isinstance(detail, dict):
+            return ""
+        return str(detail.get("console_url") or
+                   (f"ws://127.0.0.1:3080/v2/projects/{pid}/nodes/{nid}/console/ws"
+                    if detail.get("console_type") in ("telnet", "vnc") else ""))
+
+    def node_links(self, pid: str, nid: str) -> list[dict]:
+        st, body = self.get(f"/v2/projects/{pid}/nodes/{nid}/links")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def node_idlepc(self, pid: str, nid: str, proposals: bool = False) -> tuple[int, Any]:
+        action = "idlepc_proposals" if proposals else "auto_idlepc"
+        return self.get(f"/v2/projects/{pid}/nodes/{nid}/dynamips/{action}", timeout=120)
+
+    def link_available_filters(self, pid: str, lid: str) -> tuple[int, Any]:
+        return self.get(f"/v2/projects/{pid}/links/{lid}/available_filters")
+
+    def project_stats(self, pid: str) -> tuple[int, Any]:
+        return self.get(f"/v2/projects/{pid}/stats")
+
+    def project_duplicate(self, pid: str, name: Optional[str] = None) -> tuple[int, Any]:
+        body = {"name": name} if name else {}
+        st, res = self.post(f"/v2/projects/{pid}/duplicate", body, timeout=600)
+        if st in (200, 201) and name and isinstance(res, dict) and res.get("name") != name:
+            new_id = res.get("project_id")
+            if new_id:
+                self.put(f"/v2/projects/{new_id}", {"name": name})
+                res["name"] = name
+        return st, res
+
+    def project_load(self, path: str) -> tuple[int, Any]:
+        return self.post("/v2/projects/load", {"path": path}, timeout=300)
+
+    def project_file_read(self, pid: str, path: str) -> Any:
+        st, body = self.get(f"/v2/projects/{pid}/files/{path.lstrip('/')}", raw=True)
+        if st != 200 or not isinstance(body, bytes):
+            return {"error": f"HTTP {st}"}
+        return body.decode(errors="replace")
+
+    def project_file_write(self, pid: str, path: str, content: str) -> tuple[int, Any]:
+        return self.req("POST", f"/v2/projects/{pid}/files/{path.lstrip('/')}",
+                        data=content.encode(), ctype="text/plain", timeout=60)
+
+    def compute_create(self, body: dict) -> tuple[int, Any]:
+        return self.post("/v2/computes", body, timeout=120)
+
+    def compute_update(self, cid: str, body: dict) -> tuple[int, Any]:
+        return self.put(f"/v2/computes/{cid}", body, timeout=120)
+
+    def compute_delete(self, cid: str) -> tuple[int, Any]:
+        return self.delete(f"/v2/computes/{cid}", timeout=120)
+
+    def compute_ports(self, cid: str) -> tuple[int, Any]:
+        return self.get(f"/v2/computes/{cid}/ports")
+
+    def compute_auto_idlepc(self, cid: str) -> tuple[int, Any]:
+        return self.post(f"/v2/computes/{cid}/auto_idlepc", timeout=120)
+
+    def compute_action(self, cid: str, emulator: str, action: str,
+                       body: Optional[dict] = None) -> tuple[int, Any]:
+        """Ruta genérica `/computes/{id}/{emulator}/{action}` (GUI: img, binaries…)."""
+        path = f"/v2/computes/{cid}/{emulator}/{action}"
+        return self.post(path, body, timeout=300) if body is not None else self.get(path)
+
+    def gns3vm(self) -> tuple[int, Any]:
+        return self.get("/v2/gns3vm")
+
+    def gns3vm_update(self, body: dict) -> tuple[int, Any]:
+        return self.put("/v2/gns3vm", body, timeout=120)
+
+    def gns3vm_engines(self) -> tuple[int, Any]:
+        return self.get("/v2/gns3vm/engines")
+
+    def gns3vm_vms(self, engine: str) -> tuple[int, Any]:
+        return self.get(f"/v2/gns3vm/engines/{engine}/vms")
+
+    def notifications(self, pid: Optional[str] = None) -> tuple[int, Any]:
+        path = f"/v2/projects/{pid}/notifications" if pid else "/v2/notifications"
+        return self.get(path)
+
+    def template_duplicate(self, tid: str, name: Optional[str] = None) -> tuple[int, Any]:
+        return self.post(f"/v2/templates/{tid}/duplicate",
+                         {"name": name} if name else {}, timeout=180)
+
+    def template_base_configs(self) -> tuple[int, Any]:
+        return self.get("/v2/templates/base-configs")
+
+    def template_base_config(self, tid: str, filename: str, content: Optional[str] = None) -> Any:
+        path = f"/v2/templates/{tid}/base-config/{filename}"
+        if content is None:
+            st, body = self.get(path, raw=True)
+            return body.decode(errors="replace") if st == 200 and isinstance(body, bytes) else {"error": f"HTTP {st}"}
+        return self.put(path, {"content": content}, timeout=60)
+
+    def symbol_dimensions(self, symbol_id: str) -> tuple[int, Any]:
+        return self.get(f"/v2/symbols/{symbol_id}/dimensions")
+
+    def symbol_raw(self, symbol_id: str) -> tuple[int, Any]:
+        return self.get(f"/v2/symbols/{symbol_id}/raw", raw=True)
+
+    def symbol_raw_upload(self, symbol_id: str, data: bytes) -> tuple[int, Any]:
+        return self.req("POST", f"/v2/symbols/{symbol_id}/raw", data=data,
+                        ctype="application/octet-stream", timeout=120)
+
+    def default_symbols(self) -> tuple[int, Any]:
+        return self.get("/v2/default_symbols")
+
+    def iou_license(self) -> tuple[int, Any]:
+        return self.get("/v2/iou_license")
+
+    def iou_license_update(self, body: dict) -> tuple[int, Any]:
+        return self.put("/v2/iou_license", body, timeout=60)
+
+    # Ojo: `shutdown` y `reload` paran el servidor. Solo en un entorno de prueba.
+    def server_shutdown(self) -> tuple[int, Any]:
+        return self.post("/v2/shutdown", timeout=60)
+
+    def server_reload(self) -> tuple[int, Any]:
+        return self.post("/v2/reload", timeout=60)
+
+    def server_debug(self) -> tuple[int, Any]:
+        return self.post("/v2/debug", timeout=60)
+
+    def qemu_binaries(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/qemu/binaries")
+
+    def qemu_capabilities(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/qemu/capabilities")
+
+    def docker_images(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/docker/images")
+
+    def network_interfaces(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/network/interfaces")
+
+    def network_ports(self) -> tuple[int, Any]:
+        return self.get("/v2/computes/local/network/ports")
+
+    def udp_port(self, port: int) -> tuple[int, Any]:
+        return self.post("/v2/computes/local/ports/udp", {"port": port}, timeout=60)
+
+
 # Rutas de la API v2 cubiertas por este núcleo. La documentación usa este mapa
 # para declarar la cobertura sin inventar endpoints.
 API_V2_MAP: dict[str, tuple[str, ...]] = {
@@ -364,6 +516,16 @@ API_V2_MAP: dict[str, tuple[str, ...]] = {
                  "GET/PUT/DELETE /drawings/{did}"),
     "snapshots": ("GET/POST /v2/projects/{id}/snapshots",
                   "POST /snapshots/{sid}/restore", "DELETE /snapshots/{sid}"),
+    "symbols": ("GET /v2/symbols", "GET /symbols/{id}/dimensions",
+                "GET/POST /symbols/{id}/raw", "GET /v2/default_symbols"),
+    "gui_admin": ("GET/PUT /v2/gns3vm", "GET /gns3vm/engines", "GET /engines/{e}/vms",
+                  "GET/PUT /v2/iou_license", "GET /v2/notifications",
+                  "GET /projects/{id}/notifications", "POST /v2/shutdown",
+                  "POST /v2/reload", "POST /v2/debug"),
+    "emulators": ("GET /computes/local/qemu/binaries", "GET /qemu/capabilities",
+                  "GET /computes/local/docker/images", "GET /network/interfaces",
+                  "GET /network/ports", "POST /ports/udp",
+                  "GET /nodes/{nid}/dynamips/auto_idlepc"),
 }
 
 
