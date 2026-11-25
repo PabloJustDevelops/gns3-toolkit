@@ -22,6 +22,7 @@ echo "→ CLI enlazada: $HOME/.local/bin/gns3lab"
 
 python3 -m py_compile gns3core.py gns3_mcp_server.py cli/gns3lab
 echo "→ compila"
+python3 scripts/verify.py || echo "aviso: deriva docs/código (ver scripts/verify.py)"
 
 if [ -x "$REPO/.venv/bin/python" ]; then
   echo "→ tools del MCP:"
