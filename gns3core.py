@@ -238,6 +238,135 @@ class Client:
         return self.json_or_die(f"/v2/projects/{pid}/nodes/{nid}", f"nodo {nid[:8]}")
 
 
+    # ── superficie v2 ampliada (paridad CLI/MCP) ──────────────────────────────
+    def computes(self) -> list[dict]:
+        st, body = self.get("/v2/computes")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def compute(self, cid: str = "local") -> Optional[dict]:
+        st, body = self.get(f"/v2/computes/{cid}")
+        return body if st == 200 and isinstance(body, dict) else None
+
+    def statistics(self) -> list[dict]:
+        st, body = self.get("/v2/statistics")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def symbols(self) -> list[dict]:
+        st, body = self.get("/v2/symbols")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def appliances(self) -> list[dict]:
+        st, body = self.get("/v2/appliances")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def images(self, emulator: str = "qemu") -> list[dict]:
+        emulator = emulator.removesuffix("/images")
+        st, body = self.get(f"/v2/computes/local/{emulator}/images")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def project_get(self, pid: str) -> dict:
+        return self.json_or_die(f"/v2/projects/{pid}", f"proyecto {pid[:8]}")
+
+    def project_close(self, pid: str) -> tuple[int, Any]:
+        return self.post(f"/v2/projects/{pid}/close", timeout=180)
+
+    def project_delete(self, pid: str) -> tuple[int, Any]:
+        return self.delete(f"/v2/projects/{pid}", timeout=180)
+
+    def template_get(self, tid: str) -> tuple[int, Any]:
+        return self.get(f"/v2/templates/{tid}")
+
+    def template_update(self, tid: str, body: dict) -> tuple[int, Any]:
+        return self.put(f"/v2/templates/{tid}", body, timeout=120)
+
+    def template_delete(self, tid: str) -> tuple[int, Any]:
+        return self.delete(f"/v2/templates/{tid}", timeout=120)
+
+    def node_action(self, pid: str, nid: str, action: str, timeout: float = 180) -> tuple[int, Any]:
+        """start|stop|reload|suspend over un nodo."""
+        if action not in ("start", "stop", "reload", "suspend"):
+            raise ValueError(f"acción de nodo desconocida: {action}")
+        return self.post(f"/v2/projects/{pid}/nodes/{nid}/{action}", timeout=timeout)
+
+    def node_command_line(self, pid: str, nid: str) -> str:
+        detail = self.node_detail(pid, nid)
+        return detail.get("command_line", "") if isinstance(detail, dict) else ""
+
+    def link_update(self, pid: str, lid: str, body: dict) -> tuple[int, Any]:
+        return self.put(f"/v2/projects/{pid}/links/{lid}", body, timeout=120)
+
+    def link_delete(self, pid: str, lid: str) -> tuple[int, Any]:
+        return self.delete(f"/v2/projects/{pid}/links/{lid}", timeout=120)
+
+    def link_capture(self, pid: str, lid: str, action: str, file_name: Optional[str] = None) -> tuple[int, Any]:
+        """start|stop|pcap de la captura de un enlace."""
+        if action == "start":
+            return self.post(f"/v2/projects/{pid}/links/{lid}/start_capture", {
+                "data_link_type": "DLT_EN10MB",
+                "capture_file_name": file_name or f"capture-{lid[:8]}.pcap",
+            }, timeout=120)
+        if action == "stop":
+            return self.post(f"/v2/projects/{pid}/links/{lid}/stop_capture", timeout=120)
+        if action == "pcap":
+            return self.get(f"/v2/projects/{pid}/links/{lid}/pcap", raw=True, timeout=180)
+        raise ValueError(f"acción de captura desconocida: {action}")
+
+    def drawing_update(self, pid: str, did: str, body: dict) -> tuple[int, Any]:
+        return self.put(f"/v2/projects/{pid}/drawings/{did}", body, timeout=120)
+
+    def drawing_delete(self, pid: str, did: str) -> tuple[int, Any]:
+        return self.delete(f"/v2/projects/{pid}/drawings/{did}", timeout=120)
+
+    def snapshots(self, pid: str) -> list[dict]:
+        st, body = self.get(f"/v2/projects/{pid}/snapshots")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def snapshot_create(self, pid: str, name: str) -> tuple[int, Any]:
+        return self.post(f"/v2/projects/{pid}/snapshots", {"name": name}, timeout=300)
+
+    def snapshot_restore(self, pid: str, sid: str) -> tuple[int, Any]:
+        return self.post(f"/v2/projects/{pid}/snapshots/{sid}/restore", timeout=300)
+
+    def snapshot_delete(self, pid: str, sid: str) -> tuple[int, Any]:
+        return self.delete(f"/v2/projects/{pid}/snapshots/{sid}", timeout=180)
+
+    def drawings(self, pid: str) -> list[dict]:
+        st, body = self.get(f"/v2/projects/{pid}/drawings")
+        return body if st == 200 and isinstance(body, list) else []
+
+    def drawing_create(self, pid: str, body: dict) -> tuple[int, Any]:
+        return self.post(f"/v2/projects/{pid}/drawings", body)
+
+    def compute_write_file(self, cid: str, emulator: str, filename: str,
+                           data: bytes, ctype: str = "application/octet-stream") -> tuple[int, Any]:
+        return self.req("POST", f"/v2/computes/{cid}/{emulator}/images/{filename}",
+                        data=data, ctype=ctype, timeout=1800)
+
+
+# Rutas de la API v2 cubiertas por este núcleo. La documentación usa este mapa
+# para declarar la cobertura sin inventar endpoints.
+API_V2_MAP: dict[str, tuple[str, ...]] = {
+    "server": ("GET /v2/version",),
+    "computes": ("GET /v2/computes", "GET /v2/computes/{id}", "GET /v2/statistics",
+                 "GET /v2/computes/{id}/{emulator}/images",
+                 "POST /v2/computes/{id}/{emulator}/images/{filename}"),
+    "projects": ("GET/POST /v2/projects", "GET/PUT/DELETE /v2/projects/{id}",
+                 "POST /v2/projects/{id}/open", "POST /v2/projects/{id}/close",
+                 "GET /v2/projects/{id}/export", "POST /v2/projects/{id}/import"),
+    "templates": ("GET /v2/templates", "GET/PUT/DELETE /v2/templates/{id}",
+                  "POST /v2/projects/{id}/templates/{tid}", "GET /v2/appliances"),
+    "nodes": ("GET/POST /v2/projects/{id}/nodes", "GET/PUT/DELETE /nodes/{nid}",
+              "POST /nodes/{nid}/{start|stop|reload|suspend|duplicate}",
+              "GET/POST /nodes/{nid}/files/{path}", "GET /v2/symbols"),
+    "links": ("GET/POST /v2/projects/{id}/links", "GET/PUT/DELETE /links/{lid}",
+              "POST /links/{lid}/{start_capture|stop_capture}", "GET /links/{lid}/pcap"),
+    "drawings": ("GET/POST /v2/projects/{id}/drawings",
+                 "GET/PUT/DELETE /drawings/{did}"),
+    "snapshots": ("GET/POST /v2/projects/{id}/snapshots",
+                  "POST /snapshots/{sid}/restore", "DELETE /snapshots/{sid}"),
+}
+
+
 def match_nodes(nodes: list[dict], pattern: Optional[str]) -> list[dict]:
     if not pattern:
         return []
