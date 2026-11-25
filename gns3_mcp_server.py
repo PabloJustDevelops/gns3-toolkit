@@ -40,7 +40,40 @@ mcp = FastMCP("gns3")
 
 
 # ────────────────────────────── configuración ──────────────────────────────
+_GNS3_CONF = "~/.config/GNS3/2.2/gns3_server.conf"
+_HINT_CONF = (f"arranca el servidor GNS3 o revisa host/port en {_GNS3_CONF}; "
+              "GNS3_URL lo sobrescribe")
+_HINT_AUTH = (f"revisa user/password en {_GNS3_CONF} "
+              "(o GNS3_USER/GNS3_PASSWORD)")
+_HINT_PROJECT = ("usa gns3_projects(action='list') para ver los nombres exactos "
+                 "o pasa project_id")
+
+# La firma del fichero y del entorno decide si vale la lectura memoizada.
+_conf_cache: Optional[tuple[tuple, dict[str, str]]] = None
+
+
+def _conf_signature() -> tuple:
+    try:
+        st = CONF.stat()
+        file_signature: tuple = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        file_signature = (None, None)
+    return (str(CONF), *file_signature, os.environ.get("GNS3_URL"),
+            os.environ.get("GNS3_USER"), os.environ.get("GNS3_PASSWORD"))
+
+
 def _conf() -> dict[str, str]:
+    """Config memoizada por firma del fichero y del entorno; devuelve una copia."""
+    global _conf_cache
+    signature = _conf_signature()
+    if _conf_cache is not None and _conf_cache[0] == signature:
+        return dict(_conf_cache[1])
+    data = _conf_uncached()
+    _conf_cache = (signature, data)
+    return dict(data)
+
+
+def _conf_uncached() -> dict[str, str]:
     # Sin interpolación: una contraseña con `%` debe leerse literal, no reventar.
     cfg = configparser.ConfigParser(interpolation=None)
     data = {"host": "127.0.0.1", "port": "3080", "user": "admin", "password": ""}
@@ -64,20 +97,68 @@ def _conf() -> dict[str, str]:
     return data
 
 
+# Un cliente httpx por (url, credenciales) reutiliza la conexión TCP entre lecturas.
+_http_clients: dict[tuple[str, tuple[str, str]], Any] = {}
+_http_client_lock = threading.Lock()
+
+
+def _http_client(origin: str, auth: tuple[str, str]):
+    """Cliente con keep-alive para lecturas GET; se crea una vez por origen."""
+    key = (origin, auth)
+    client = _http_clients.get(key)
+    if client is None:
+        with _http_client_lock:
+            client = _http_clients.get(key)
+            if client is None:
+                client = httpx.Client(
+                    auth=auth, headers={"Content-Type": "application/json"})
+                _http_clients[key] = client
+    return client
+
+
+def _drop_http_client(origin: str, auth: tuple[str, str], client) -> None:
+    """Saca del pool un cliente con la conexión muerta antes de reintentar."""
+    with _http_client_lock:
+        if _http_clients.get((origin, auth)) is client:
+            _http_clients.pop((origin, auth), None)
+            try:
+                client.close()
+            except OSError:
+                pass
+
+
+def _api_get(c: dict[str, str], url: str, auth: tuple[str, str], timeout: float):
+    """GET reutilizando conexión; una conexión muerta del pool se reintenta una vez."""
+    origin = c["url"]
+    client = _http_client(origin, auth)
+    try:
+        return client.request("GET", url, timeout=timeout)
+    except (httpx.RemoteProtocolError, httpx.ConnectError,
+            httpx.ReadError, httpx.WriteError):
+        _drop_http_client(origin, auth, client)
+        return _http_client(origin, auth).request("GET", url, timeout=timeout)
+
+
 def _api(method: str, path: str, body: Any = None, timeout: float = 60.0, raw: bool = False):
     c = _conf()
     url = c["url"] + path
+    auth = (c["user"], c["password"])
     try:
-        r = httpx.request(
-            method,
-            url,
-            json=body,
-            auth=(c["user"], c["password"]),
-            timeout=timeout,
-            headers={"Content-Type": "application/json"},
-        )
+        if method.upper() == "GET":
+            r = _api_get(c, url, auth, timeout)
+        else:
+            r = httpx.request(
+                method,
+                url,
+                json=body,
+                auth=auth,
+                timeout=timeout,
+                headers={"Content-Type": "application/json"},
+            )
     except httpx.HTTPError as e:
-        return {"error": "no se pudo conectar con el servidor GNS3", "url": url, "detail": str(e)}
+        return {"error": "no se pudo conectar con el servidor GNS3", "url": url,
+                "detail": str(e), "hint": _HINT_CONF}
+
     if r.status_code >= 400:
         return {"error": f"HTTP {r.status_code}", "path": path, "detail": r.text[:1500]}
     if raw:
@@ -114,7 +195,13 @@ def _err_msg(status: int, body: Any, what: str) -> dict:
                     msg = m.group(1)
     if msg is None:
         msg = "sin detalle"
-    return {"error": f"{what} falló: [{status}] {str(msg)[:400]}"}
+    out = {"error": f"{what} falló: [{status}] {str(msg)[:400]}"}
+    if status in (401, 403):
+        out["hint"] = _HINT_AUTH
+    elif status == 404:
+        out["hint"] = ("comprueba el id/nombre con una tool de listado (p. ej. "
+                       "gns3_projects, gns3_nodes o gns3_links)")
+    return out
 
 
 def _api_error(status: int, body: Any, what: str) -> dict:
@@ -122,8 +209,17 @@ def _api_error(status: int, body: Any, what: str) -> dict:
     msg = body.get("message") if isinstance(body, dict) else body
     if isinstance(msg, bytes):
         msg = msg.decode(errors="replace")
-    return {"error": f"{what} falló: [{status}] {str(msg)[:4000] if msg is not None else 'sin detalle'}",
-            "status": status}
+    out = {"error": f"{what} falló: [{status}] {str(msg)[:4000] if msg is not None else 'sin detalle'}",
+           "status": status}
+    if status in (401, 403):
+        out["hint"] = _HINT_AUTH
+    return out
+
+
+def _unknown_action(action: str, valid: list[str], what: str = "acción") -> dict:
+    """Error uniforme de acción inválida: dice cuáles valen y cómo usarlas."""
+    return {"error": f"{what} desconocida: {action}", "valid": valid,
+            "hint": "usa una de: " + ", ".join(valid)}
 
 
 def _unexpected_keys(body: Any) -> list[str]:
@@ -175,6 +271,22 @@ def _resolve_project(project_id: Optional[str], name: Optional[str] = None) -> t
 def _nodes(project_id: str) -> list[dict]:
     res = _api("GET", f"/v2/projects/{project_id}/nodes")
     return res if isinstance(res, list) else []
+
+
+def _project_missing(project_id: Optional[str] = None,
+                     project_name: Optional[str] = None) -> dict:
+    """Proyecto inexistente: nombres reales y la tool para listarlos."""
+    projs = _projects()
+    if not isinstance(projs, list):
+        detail = projs.get("error") if isinstance(projs, dict) else None
+        return {"error": detail or "no se pudieron listar los proyectos",
+                "hint": _HINT_CONF}
+    out: dict = {"error": "proyecto no encontrado", "project_id": project_id,
+                 "project_name": project_name, "hint": _HINT_PROJECT}
+    available = sorted(str(p["name"]) for p in projs if p.get("name"))
+    if available:
+        out["available"] = available
+    return out
 
 
 def _ensure_open(project_id: str) -> Optional[dict]:
@@ -279,7 +391,8 @@ def _endpoint_error(node: dict, adapter: int, port: int, side: str = "") -> Opti
 # ────────────────────────────── tools ──────────────────────────────
 @mcp.tool
 def gns3_status() -> dict:
-    """Estado del servidor GNS3 local: versión, computes y proyecto abierto."""
+    """Estado del servidor GNS3 local: versión, computes y proyecto abierto. Úsala para
+    confirmar que el servidor responde antes de cualquier otra tool. **Lectura**."""
     up, info = _server_up()
     if not up:
         return {"running": False, "detail": info}
@@ -316,7 +429,9 @@ def gns3_status() -> dict:
 @mcp.tool
 def gns3_projects(action: str = "list", name: Optional[str] = None, project_id: Optional[str] = None,
                   project_name: Optional[str] = None, new_name: Optional[str] = None) -> Any:
-    """Proyectos: action=list|create|open|close|update|delete|info.
+    """Proyectos: action=list|create|open|close|update|delete|info. Úsala para ver o
+    cambiar proyectos; `list`/`info` leen y el resto escribe (`delete` es destructivo).
+    **Mixta**: list e info leen; create/open/close/update/delete escriben.
 
     Identifica por project_id, name o project_name. `update` renombra con `new_name`.
     """
@@ -341,7 +456,7 @@ def gns3_projects(action: str = "list", name: Optional[str] = None, project_id: 
         return res if st in (200, 201) else _err_msg(st, res, "crear proyecto")
     pid, proj = _resolve_project(project_id, name)
     if not pid:
-        return {"error": "proyecto no encontrado", "project_id": project_id, "name": name}
+        return _project_missing(project_id, name)
     if action == "open":
         try:
             st, res = client.post(f"/v2/projects/{pid}/open", timeout=180)
@@ -376,7 +491,8 @@ def gns3_projects(action: str = "list", name: Optional[str] = None, project_id: 
             out.update(_err_msg(st, res, "borrar proyecto"))
         return out
     elif action != "info":
-        return {"error": f"acción desconocida: {action}"}
+        return _unknown_action(action, ["list", "create", "open", "close",
+                                        "update", "delete", "info"])
     try:
         return client.project_get(pid)
     except (ConnectionError, RuntimeError) as e:
@@ -397,8 +513,7 @@ def _pfsense_node(project_id: Optional[str], project_name: Optional[str],
     """Localiza un único pfSense sin abrir el proyecto ni usar SSH."""
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
-        return None, {"error": "proyecto no encontrado", "project_id": project_id,
-                      "project_name": project_name}
+        return None, _project_missing(project_id, project_name)
     nodes = _nodes(pid)
     if node:
         matches = _match_nodes(nodes, node)
@@ -424,8 +539,8 @@ def gns3_pfsense(action: str = "status", project_id: Optional[str] = None,
     action = action.lower()
     valid = {"status", "config", "assign", "ip", "dhcp", "rule", "nat", "ssh", "detect"}
     if action not in valid:
-        return {"ok": False, "data": None, "error": f"acción desconocida: {action}",
-                "valid": sorted(valid)}
+        return {"ok": False, "data": None,
+                **_unknown_action(action, sorted(valid))}
     if action != "detect" and not os.environ.get("PFSENSE_PASSWORD"):
         return {"ok": False, "data": None,
                 "error": "falta la variable de entorno PFSENSE_PASSWORD"}
@@ -492,7 +607,9 @@ def _gns3_pfsense_mcp(
     port: Optional[int] = None,
     target: Optional[str] = None,
 ) -> Any:
-    """pfSense nativo: action=status|config|assign|ip|dhcp|rule|nat|ssh|detect.
+    """pfSense nativo: action=status|config|assign|ip|dhcp|rule|nat|ssh|detect. Úsala para
+    operar un pfSense ya instalado sin VNC: `detect` es lectura y el resto escribe por SSH.
+    **Mixta**: detect lee el nodo GNS3; las demás cambian la configuración por SSH.
 
     ``detect`` localiza el nodo pfSense y deduce interfaces desde su adapter_type,
     sin SSH. Las demás acciones delegan en ``pfsense.PfSense.from_env()`` y exigen
@@ -521,7 +638,9 @@ def _gns3_pfsense_mcp(
 
 @mcp.tool
 def gns3_templates(kind: Optional[str] = None) -> Any:
-    """Plantillas del servidor (qemu, docker, vpcs, iou, dynamips...). kind filtra por template_type."""
+    """Listado compacto de plantillas (qemu, docker, vpcs, iou, dynamips...). Úsala para
+    ver qué puedes instanciar; para crear, editar o borrar usa `gns3_template`.
+    **Lectura** (`GET /v2/templates`); `kind` filtra por `template_type`."""
     tpls = _api("GET", "/v2/templates")
     if not isinstance(tpls, list):
         return tpls
@@ -558,7 +677,10 @@ def gns3_template(
     content: Optional[str] = None,
     confirm: bool = False,
 ) -> Any:
-    """Plantillas del servidor: action=list|create|update|delete|apply|duplicate|base-config.
+    """Plantillas (action=list|create|update|delete|apply|duplicate|base-config): Úsala
+    para crear, editar, duplicar o instanciar una plantilla; para un listado compacto
+    usa `gns3_templates`. **Mixta**: list y base-config sin `content` leen;
+    create/update/delete/apply/duplicate y base-config con `content` (confirm=True) escriben.
 
     list   — nombre, tipo y template_id de cada plantilla.
     create — desde un nodo existente (`from_node`, nombre o id, copia `node_type` y
@@ -718,8 +840,8 @@ def gns3_template(
             return _err_msg(st, res, "escribir configuración base")
         return {"updated": True, "template": tpl.get("name"), "filename": filename}
 
-    return {"error": f"acción desconocida: {action}",
-            "valid": ["list", "create", "update", "delete", "apply", "duplicate", "base-config"]}
+    return _unknown_action(action, ["list", "create", "update", "delete", "apply",
+                                    "duplicate", "base-config"])
 
 
 @mcp.tool
@@ -732,11 +854,15 @@ def gns3_nodes(
     x: int = 0,
     y: int = 0,
 ) -> Any:
-    """Nodos: action=list|add|start|stop|reload|suspend|delete.
-    `node` acepta nombre, patrón (*, Router*, R[12]) o node_id; `template` es nombre o template_id."""
+    """Nodos: action=list|add|start|stop|reload|suspend|delete. Úsala para listar o añadir
+    nodos y para acciones masivas por patrón; para un solo nodo con estado verificado usa
+    `gns3_node_action` y para propiedades o discos `gns3_node_edit`.
+    **Mixta**: list lee; add/start/stop/reload/suspend/delete escriben.
+    `node` acepta nombre, patrón (*, Router*, R[12]) o node_id; `template` es nombre o
+    template_id."""
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
-        return {"error": "proyecto no encontrado", "project_id": project_id, "project_name": project_name}
+        return _project_missing(project_id, project_name)
     err = _ensure_open(pid)
     if err:
         return {"error": "no se pudo abrir el proyecto", "detail": err}
@@ -777,7 +903,8 @@ def gns3_nodes(
                 st, res = client.delete(f"/v2/projects/{pid}/nodes/{nid}", timeout=180)
                 request_ok = st in (200, 204)
             else:
-                return {"error": f"acción desconocida: {action}"}
+                return _unknown_action(action, ["list", "add", "start", "stop", "reload",
+                                                "suspend", "delete"])
             if action == "delete":
                 # releer el nodo tras borrarlo siempre da 404 y ensuciaría `detail`
                 state = {}
@@ -808,14 +935,16 @@ def gns3_nodes_bulk(
     project_name: Optional[str] = None,
     confirm: bool = False,
 ) -> Any:
-    """Acción masiva sobre todos los nodos: action=start|stop|suspend|reload.
+    """Acción masiva sobre todos los nodos: action=start|stop|suspend|reload. Úsala para
+    arrancar o parar la topología entera; para un nodo concreto usa `gns3_node_action`.
+    **Escritura**: exige `confirm=True` porque cambia el estado de todo el proyecto.
 
     Cambia el estado de toda la topología y exige `confirm=True`.
     """
     action = action.lower()
     if action not in ("start", "stop", "suspend", "reload"):
-        return {"error": f"acción masiva desconocida: {action}",
-                "valid": ["start", "stop", "suspend", "reload"]}
+        return _unknown_action(action, ["start", "stop", "suspend", "reload"],
+                               what="acción masiva")
     if not confirm:
         return {"error": f"acción masiva {action} exige confirm=True"}
     client = _client()
@@ -845,7 +974,9 @@ def gns3_links(
     port_b: int = 0,
     filters: Optional[dict] = None,
 ) -> Any:
-    """Enlaces: action=list|add|update|delete|filters.
+    """Enlaces: action=list|add|update|delete|filters. Úsala para filtros de calidad y CRUD
+    directo; para add/delete con validación de puertos usa `gns3_link_edit`.
+    **Mixta**: list y filters leen; add/update/delete escriben sin confirmación.
 
     add    — exige node_a y node_b (adaptadores/puertos por defecto 0).
     update — exige link_id y `filters` (p. ej. {"latency": 50, "packet_loss": 5,
@@ -853,7 +984,7 @@ def gns3_links(
     """
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
-        return {"error": "proyecto no encontrado"}
+        return _project_missing(project_id, project_name)
     err = _ensure_open(pid)
     if err:
         return {"error": "no se pudo abrir el proyecto", "detail": err}
@@ -926,7 +1057,7 @@ def gns3_links(
             return {"error": str(e)}
         return res if st == 200 else _err_msg(st, res, "obtener filtros del enlace")
 
-    return {"error": f"acción desconocida: {action}", "valid": ["list", "add", "update", "delete", "filters"]}
+    return _unknown_action(action, ["list", "add", "update", "delete", "filters"])
 
 
 @mcp.tool
@@ -942,7 +1073,9 @@ def gns3_link_edit(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """Enlaces con validación previa: action=add|delete|list.
+    """Enlaces con validación previa: action=add|delete|list. Úsala para crear o borrar
+    enlaces comprobando los puertos; para `filters` de calidad usa `gns3_links`.
+    **Mixta**: list lee; add/delete escriben.
 
     add     — node_a/node_b (nombre o id) y puertos `adapter_*`/`port_*` (0 por defecto).
               Antes de enviar comprueba el puerto contra los del nodo: un `ethernet_switch`
@@ -1048,15 +1181,17 @@ def gns3_link_edit(
             out.update(_err_msg(st, res, "borrar enlace"))
         return out
 
-    return {"error": f"acción desconocida: {action}", "valid": ["add", "delete", "list"]}
+    return _unknown_action(action, ["add", "delete", "list"])
 
 
 @mcp.tool
 def gns3_topology(project_id: Optional[str] = None, project_name: Optional[str] = None) -> dict:
-    """Resumen legible de la topología: nodos con estado y enlaces con sus extremos."""
+    """Resumen legible de la topología, nodos y enlaces: Úsala para ver el lab completo en
+    una llamada. **Lectura**: abre el proyecto si estaba cerrado, pero no cambia nodos ni
+    enlaces."""
     pid, proj = _resolve_project(project_id, project_name)
     if not pid:
-        return {"error": "proyecto no encontrado"}
+        return _project_missing(project_id, project_name)
     err = _ensure_open(pid)
     if err:
         return {"error": "no se pudo abrir el proyecto", "detail": err}
@@ -1092,7 +1227,9 @@ def gns3_console(
     timeout: float = 20.0,
     ready_timeout: float = 30.0,
 ) -> dict:
-    """Alias compatible de `gns3_exec`: consola telnet de un nodo, sin esperas ciegas.
+    """Alias compatible de `gns3_exec` para consola telnet: Úsala solo en guiones que ya
+    esperan su forma; para trabajo nuevo usa `gns3_exec`. **Escritura en el invitado**:
+    ejecuta en el nodo los comandos que le pases.
 
     Se conserva la firma antigua (`settle` = quietud exigida a la salida de cada comando,
     no un `sleep` fijo) y la forma `{node, host, port, commands, output}`, pero toda la
@@ -1130,7 +1267,9 @@ def gns3_console_control(
     project_name: Optional[str] = None,
     confirm: bool = False,
 ) -> Any:
-    """Consola de un nodo: action=reset|reset-all|url.
+    """Consola de un nodo: action=reset|reset-all|url. Úsala para arreglar el proxy de
+    consola o pedir su URL; para comandos usa `gns3_exec` y para la pantalla
+    `gns3_monitor`. **Mixta**: url lee; reset/reset-all exigen `confirm=True`.
 
     reset y reset-all reinician el proxy de consola (no el invitado) y exigen
     `confirm=True`; reset-all no exige `node`. url devuelve la URL WebSocket expuesta
@@ -1138,7 +1277,7 @@ def gns3_console_control(
     """
     action = action.lower()
     if action not in ("reset", "reset-all", "url"):
-        return {"error": f"acción desconocida: {action}", "valid": ["reset", "reset-all", "url"]}
+        return _unknown_action(action, ["reset", "reset-all", "url"])
     if action in ("reset", "reset-all") and not confirm:
         return {"error": f"{action} de la consola exige confirm=True"}
     if action != "reset-all" and not node:
@@ -1188,7 +1327,9 @@ def gns3_capture(
     summary_lines: int = 40,
     file_name: Optional[str] = None,
 ) -> Any:
-    """Captura de un enlace: action=start|stop|read.
+    """Captura de un enlace: action=start|stop|read. Úsala para el tráfico entre dos nodos;
+    para un puerto concreto del compute usa `gns3_port_capture`.
+    **Mixta**: read lee el pcap; start/stop escriben en el proyecto.
 
     start/stop/read exigen link_id o (node_a y node_b) para localizarlo. `file_name` fija
     el nombre del pcap en el proyecto (por defecto `capture-<link_id>.pcap`); `read` resume
@@ -1196,7 +1337,7 @@ def gns3_capture(
     """
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
-        return {"error": "proyecto no encontrado"}
+        return _project_missing(project_id, project_name)
     err = _ensure_open(pid)
     if err:
         return {"error": "no se pudo abrir el proyecto", "detail": err}
@@ -1270,7 +1411,7 @@ def gns3_capture(
             res["summary"] = p.stdout or p.stderr
         return res
 
-    return {"error": f"acción desconocida: {action}"}
+    return _unknown_action(action, ["start", "stop", "read"])
 
 
 @mcp.tool
@@ -1284,14 +1425,15 @@ def gns3_nio(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """NIO de un puerto del compute: action=get|set|delete.
+    """NIO de un puerto del compute: action=get|set|delete. Úsala para ver o rehacer el
+    cableado UDP/NAT de un puerto. **Mixta**: get lee; set/delete escriben.
 
     `set` recibe el schema del NIO en `nio` (p. ej. nio_udp). Para cambiar los extremos
     UDP de un NIO existente, GNS3 exige borrarlo y crearlo de nuevo.
     """
     action = action.lower()
     if action not in ("get", "set", "delete"):
-        return {"error": f"acción de NIO desconocida: {action}", "valid": ["get", "set", "delete"]}
+        return _unknown_action(action, ["get", "set", "delete"], what="acción de NIO")
     if action == "set" and not isinstance(nio, dict):
         return {"error": "action=set exige nio (dict)"}
     if not isinstance(adapter, int) or not isinstance(port, int) or adapter < 0 or port < 0:
@@ -1336,15 +1478,17 @@ def gns3_port_capture(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """Captura de un puerto del compute: action=start|stop|pcap.
+    """Captura de un puerto del compute: action=start|stop|pcap. Úsala para un puerto
+    suelto; para el tráfico entre dos nodos usa `gns3_capture`.
+    **Mixta**: pcap lee los bytes; start/stop escriben.
 
     `pcap` devuelve los bytes reales codificados en base64; no abre VNC ni modifica el nodo.
     """
     action = action.lower()
     actions = {"start": "start_capture", "stop": "stop_capture", "pcap": "pcap"}
     if action not in actions:
-        return {"error": f"acción de captura desconocida: {action}",
-                "valid": ["start", "stop", "pcap"]}
+        return _unknown_action(action, ["start", "stop", "pcap"],
+                               what="acción de captura")
     if not isinstance(adapter, int) or not isinstance(port, int) or adapter < 0 or port < 0:
         return {"error": "adapter y port deben ser enteros no negativos"}
     client = _client()
@@ -1386,12 +1530,13 @@ def gns3_snapshots(
     snapshot_id: Optional[str] = None,
     stop_nodes: bool = False,
 ) -> Any:
-    """Snapshots del proyecto: action=list|create|restore|delete.
+    """Snapshots del proyecto: action=list|create|restore|delete. Úsala para congelar o
+    volver a un estado del lab. **Mixta**: list lee; create/restore/delete escriben.
     GNS3 exige el proyecto parado para crear o restaurar: con stop_nodes=True se paran los nodos,
     se hace la operación y se vuelven a arrancar los que estaban started."""
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
-        return {"error": "proyecto no encontrado"}
+        return _project_missing(project_id, project_name)
     err = _ensure_open(pid)
     if err:
         return {"error": "no se pudo abrir el proyecto", "detail": err}
@@ -1495,12 +1640,14 @@ def gns3_snapshots(
         finally:
             restart_nodes()
         return with_restart(out)
-    return {"error": f"acción desconocida: {action}"}
+    return _unknown_action(action, ["list", "create", "restore", "delete"])
 
 
 @mcp.tool
 def gns3_images(emulator: str = "qemu") -> Any:
-    """Imágenes disponibles en el compute local para un emulador (qemu por defecto)."""
+    """Imágenes del compute local para un emulador (qemu por defecto): Úsala para saber qué
+    discos hay antes de crear un nodo; las plantillas ya creadas salen en
+    `gns3_templates`. **Lectura**."""
     client = _client()
     try:
         imgs = client.images(emulator)
@@ -1523,10 +1670,12 @@ def gns3_node_files(
     project_name: Optional[str] = None,
     content: Optional[str] = None,
 ) -> Any:
-    """Lee (sin content) o escribe (con content) un fichero dentro del directorio de un nodo."""
+    """Fichero dentro del directorio de un nodo (lee sin `content`, escribe con él): Úsala
+    para `startup-config` o `network`; para ficheros del proyecto usa
+    `gns3_project_files`. **Mixta**: lectura sin content, escritura con content."""
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
-        return {"error": "proyecto no encontrado"}
+        return _project_missing(project_id, project_name)
     err = _ensure_open(pid)
     if err:
         return {"error": "no se pudo abrir el proyecto", "detail": err}
@@ -1546,7 +1695,8 @@ def gns3_node_files(
 
 @mcp.tool
 def gns3_server_paths() -> dict:
-    """Rutas y binarios que usa el servidor local (imágenes, proyectos, ubridge)."""
+    """Rutas y binarios del servidor local (imágenes, proyectos, ubridge): Úsala cuando la
+    API no encuentra una imagen o un binario. **Lectura**."""
     c = _conf()
     return {
         "conf": str(CONF),
@@ -1575,8 +1725,10 @@ def _pid_or_error(client, project_id, project_name):
     try:
         proj = client.resolve_project(project_id or project_name)
         client.ensure_open(proj["project_id"])
-    except (SystemExit, ConnectionError, RuntimeError) as e:
-        return None, {"error": str(e)}
+    except SystemExit as e:
+        return None, {"error": str(e), "hint": _HINT_PROJECT}
+    except (ConnectionError, RuntimeError) as e:
+        return None, {"error": str(e), "hint": _HINT_CONF}
     return proj, None
 
 
@@ -1594,7 +1746,9 @@ def gns3_exec(
     wait_ready: bool = True,
     ready_timeout: float = 30.0,
 ) -> dict:
-    """Ejecuta comandos en la consola telnet de un nodo, por prompt o por quietud.
+    """Ejecuta comandos en la consola telnet de un nodo, por prompt o por quietud. Úsala como
+    vía normal de consola; si el nodo solo tiene pantalla gráfica usa `gns3_monitor`.
+    **Escritura en el invitado**: no hay modo de solo lectura, elige comandos inocuos.
 
     Es la única vía de consola: `gns3_console` es un alias compatible que delega aquí.
     No espera un tiempo fijo, responde solo a `--More--` y a `[y/n]`, y devuelve la salida
@@ -1654,7 +1808,9 @@ def gns3_monitor(
     psm: int = 4,
     delay: float = 0.08,
 ) -> dict:
-    """Canal HMP del nodo QEMU: leer la pantalla real y pulsar teclas sin VNC.
+    """Canal HMP del nodo QEMU, pantalla real y teclas sin VNC: Úsala para menús y pantallas
+    gráficas; para consola telnet usa `gns3_exec`.
+    **Mixta**: text/shot/status leen; type/key/cmd/reset escriben en el invitado.
 
     action:
       text   — screendump + OCR: devuelve el texto que hay en pantalla (lo más útil).
@@ -1709,8 +1865,8 @@ def gns3_monitor(
         elif action == "reset":
             out.update(mon.run("system_reset"))
         else:
-            return {"error": f"acción desconocida: {action}",
-                    "valid": ["text", "shot", "type", "key", "status", "cmd", "reset"]}
+            return _unknown_action(action, ["text", "shot", "type", "key", "status",
+                                            "cmd", "reset"])
         return out
     finally:
         mon.close()
@@ -1737,7 +1893,9 @@ def gns3_node_edit(
     proposals: bool = False,
     confirm: bool = False,
 ) -> Any:
-    """Crear, modificar, duplicar o borrar nodos; y operar sus discos y consola.
+    """Crear, modificar, duplicar o borrar nodos, y operar sus discos: Úsala para propiedades,
+    discos y plantillas; para arrancar o parar usa `gns3_node_action`.
+    **Escritura**: cada action cambia el proyecto; disk-resize exige `confirm=True`.
 
     action:
       create      — con `template` (nombre/id) o sin él: `node_type` + `properties`
@@ -1892,15 +2050,15 @@ def gns3_node_edit(
                 "method": modo, "node": target["name"],
                 "repointed": st in (200, 201), "disk": dst_name}
 
-    return {"error": f"acción desconocida: {action}",
-            "valid": ["create", "update", "switch", "delete", "duplicate", "clone_disk",
-                      "disk-resize", "links", "idlepc"]}
+    return _unknown_action(action, ["create", "update", "switch", "delete", "duplicate",
+                                    "clone_disk", "disk-resize", "links", "idlepc"])
 
 
 @mcp.tool
 def gns3_upload(path: str, name: Optional[str] = None, compress: bool = True,
                 emulator: str = "qemu") -> dict:
-    """Sube un disco/imagen (qcow2, iso) al compute local del servidor GNS3.
+    """Sube un disco o imagen (qcow2, iso) al compute local del servidor GNS3: Úsala para
+    portar un disco ya instalado; no toca nodos ni proyectos. **Escritura** en el compute.
 
     Con `compress` un qcow2 pasa por `qemu-img convert -c` (2,3 GB → ~500 MB) antes de
     subir; es lo que hace viable portar un pfSense ya instalado por red. Verifica al
@@ -1967,7 +2125,9 @@ def gns3_drawings(
     rotation: int = 0,
     drawing_id: Optional[str] = None,
 ) -> Any:
-    """Anotaciones del canvas: action=list|text|rect|update|clear|delete.
+    """Anotaciones del canvas: action=list|text|rect|update|clear|delete. Úsala para dejar el
+    direccionamiento del enunciado escrito en el proyecto.
+    **Mixta**: list/text leen; rect/update/clear/delete escriben.
 
     Sirve para dejar el direccionamiento del enunciado escrito en el proyecto (el
     profesor lo ve al corregir) sin añadir nodos que ocupan consola.
@@ -2076,8 +2236,7 @@ def gns3_drawings(
             return _err_msg(st, res, "crear drawing")
         return {"created": True, "drawing_id": (res or {}).get("drawing_id"), "text": text}
 
-    return {"error": f"acción desconocida: {action}",
-            "valid": ["list", "text", "rect", "update", "clear", "delete"]}
+    return _unknown_action(action, ["list", "text", "rect", "update", "clear", "delete"])
 
 
 @mcp.tool
@@ -2089,7 +2248,9 @@ def gns3_project_io(
     name: Optional[str] = None,
     open_after: bool = True,
 ) -> Any:
-    """Export/import/duplicate/load de un proyecto (.gns3p).
+    """Export/import/duplicate/load de un proyecto (.gns3p): Úsala para mover o clonar un lab
+    completo; para un nodo o un fichero suelto hay tools específicas.
+    **Mixta**: export lee; import/duplicate/load escriben en el servidor.
 
     export    — descarga a `path` o ~/GNS3/exports/<nombre>-<fecha>.gns3p (para el examen:
                 un proyecto esqueleto que se restaura en el servidor del aula).
@@ -2178,7 +2339,7 @@ def gns3_project_io(
                 "kb": round(len(body) / 1024), "opened": opened,
                 "nodes": len(client.nodes(nuevo)) if opened else None}
 
-    return {"error": f"acción desconocida: {action}", "valid": ["export", "import", "duplicate", "load"]}
+    return _unknown_action(action, ["export", "import", "duplicate", "load"])
 
 
 @mcp.tool
@@ -2186,11 +2347,11 @@ def gns3_project_stats(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """Estadísticas reales de un proyecto: nodos, enlaces y estado de sus recursos."""
+    """Estadísticas reales de un proyecto (nodos, enlaces y recursos): Úsala para un recuento
+    antes de entregar; el detalle nodo a nodo está en `gns3_topology`. **Lectura**."""
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
-        return {"error": "proyecto no encontrado", "project_id": project_id,
-                "project_name": project_name}
+        return _project_missing(project_id, project_name)
     try:
         st, res = _client().project_stats(pid)
     except ConnectionError as e:
@@ -2206,13 +2367,15 @@ def gns3_project_files(
     project_name: Optional[str] = None,
     content: Optional[str] = None,
 ) -> Any:
-    """Ficheros del proyecto: action=get|put sobre `path`.
+    """Ficheros del proyecto: action=get|put sobre `path`. Úsala para ficheros del proyecto;
+    para el directorio de un nodo usa `gns3_node_files`.
+    **Mixta**: get lee; put escribe `content` en crudo.
 
     get devuelve el contenido; put escribe `content` en crudo dentro del proyecto.
     """
     action = action.lower()
     if action not in ("get", "put"):
-        return {"error": f"acción desconocida: {action}", "valid": ["get", "put"]}
+        return _unknown_action(action, ["get", "put"])
     if not path:
         return {"error": "path es obligatorio"}
     if action == "put" and content is None:
@@ -2255,7 +2418,10 @@ def gns3_compute(
     operation: Optional[str] = None,
     confirm: bool = False,
 ) -> Any:
-    """Computes: action=info|list|add|update|delete|ports|idlepc|call.
+    """Computes: action=info|list|add|update|delete|ports|idlepc|call. Úsala para gestionar
+    computes y sus llamadas; para CPU/RAM usa `gns3_statistics`.
+    **Mixta**: info/list/ports/idlepc leen; add/update/delete y call con `body` escriben
+    (update, delete y call con body exigen `confirm=True`).
 
     info es el comportamiento original. add/update reciben `body`; update y delete
     exigen `confirm=True`. call invoca `/computes/{cid}/{emulator}/{operation}`;
@@ -2264,7 +2430,7 @@ def gns3_compute(
     action = action.lower()
     valid = ["info", "list", "add", "update", "delete", "ports", "idlepc", "call"]
     if action not in valid:
-        return {"error": f"acción desconocida: {action}", "valid": valid}
+        return _unknown_action(action, valid)
     if action in ("update", "delete") and not confirm:
         return {"error": f"{action} de compute exige confirm=True"}
     if action in ("add", "update") and not isinstance(body, dict):
@@ -2315,7 +2481,9 @@ def gns3_compute(
 
 @mcp.tool
 def gns3_statistics() -> Any:
-    """Estadísticas de uso de cada compute: CPU, disco, RAM y swap."""
+    """Estadísticas de uso de cada compute (CPU, disco, RAM y swap): Úsala para ver carga
+    antes de arrancar nodos; versión y computes conectados están en `gns3_status`.
+    **Lectura**."""
     client = _client()
     try:
         stats = client.statistics()
@@ -2334,15 +2502,16 @@ def gns3_symbols(
     content: Optional[str] = None,
     confirm: bool = False,
 ) -> Any:
-    """Símbolos: action=list|dimensions|raw|default|upload.
+    """Símbolos: action=list|dimensions|raw|default|upload. Úsala para los iconos del canvas;
+    para imágenes de disco usa `gns3_images`. **Mixta**: list/dimensions/raw/default leen;
+    upload escribe y sobrescribir exige `confirm=True`.
 
     list acepta `pattern` (glob o subcadena). dimensions/raw/upload exigen `symbol_id`.
     upload lee `path` o codifica `content`; al sobrescribir exige `confirm=True`.
     """
     action = action.lower()
     if action not in ("list", "dimensions", "raw", "default", "upload"):
-        return {"error": f"acción desconocida: {action}",
-                "valid": ["list", "dimensions", "raw", "default", "upload"]}
+        return _unknown_action(action, ["list", "dimensions", "raw", "default", "upload"])
     client = _client()
     try:
         if action == "list":
@@ -2396,9 +2565,10 @@ def gns3_symbols(
 
 @mcp.tool
 def gns3_appliances(pattern: Optional[str] = None) -> Any:
-    """Appliances del servidor (`GET /v2/appliances`), filtrables por nombre, fabricante
-    o categoría. Sin `pattern` devuelve todas; la descripción va recortada a 300 caracteres.
-    """
+    """Catálogo de appliances, filtrable por nombre, fabricante o categoría: Úsala para
+    elegir qué appliance instalar; lo ya instalado sale en `gns3_templates`.
+    **Lectura** (`GET /v2/appliances`); sin `pattern` devuelve todas y recorta cada
+    descripción a 300 caracteres."""
     client = _client()
     try:
         apps = client.appliances()
@@ -2431,7 +2601,9 @@ def gns3_node_action(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """Arranca, para, reinicia, suspende o reanuda **un** nodo.
+    """Arranca, para, reinicia, suspende o reanuda **un** nodo: Úsala para un nodo y para
+    comprobar su estado; para todos a la vez usa `gns3_nodes_bulk`.
+    **Escritura**: cambia el estado del nodo (no exige confirm).
 
     action=start|stop|reload|suspend|resume|pause|unpause. `node` acepta nombre, patrón
     o node_id. Devuelve el estado real releído del nodo, no sólo el 200 del POST.
@@ -2439,8 +2611,8 @@ def gns3_node_action(
     """
     action = action.lower()
     if action not in ("start", "stop", "reload", "suspend", "resume", "pause", "unpause"):
-        return {"error": f"acción de nodo desconocida: {action}",
-                "valid": ["start", "stop", "reload", "suspend", "resume", "pause", "unpause"]}
+        return _unknown_action(action, ["start", "stop", "reload", "suspend", "resume",
+                                        "pause", "unpause"], what="acción de nodo")
     client = _client()
     proj, err = _pid_or_error(client, project_id, project_name)
     if err:
@@ -2471,7 +2643,8 @@ def gns3_command_line(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """Línea de comandos con la que el servidor arranca el nodo (QEMU/dynamips/IOU).
+    """Línea de comandos con la que arranca el nodo (QEMU/dynamips/IOU): Úsala para depurar
+    un arranque que no llega a consola. **Lectura**.
 
     Es `command_line` del detalle del nodo: dice qué binario y qué flags usa, útil para
     depurar un arranque que no llega a consola.
@@ -2501,13 +2674,14 @@ def gns3_gns3vm(
     engine: Optional[str] = None,
     body: Optional[dict] = None,
 ) -> Any:
-    """GNS3 VM: action=show|set|engines|vms.
+    """GNS3 VM: action=show|set|engines|vms. Úsala para la VM remota que ejecuta los nodos;
+    para el servidor local usa `gns3_server`. **Mixta**: show/engines/vms leen; set escribe.
 
     set aplica `body`; vms lista las máquinas virtuales de `engine`.
     """
     action = action.lower()
     if action not in ("show", "set", "engines", "vms"):
-        return {"error": f"acción desconocida: {action}", "valid": ["show", "set", "engines", "vms"]}
+        return _unknown_action(action, ["show", "set", "engines", "vms"])
     if action == "set" and not isinstance(body, dict):
         return {"error": "set exige body (dict)"}
     if action == "vms" and not engine:
@@ -2534,7 +2708,9 @@ def gns3_gns3vm(
 
 @mcp.tool
 def gns3_events_url(project_id: Optional[str] = None, project_name: Optional[str] = None) -> Any:
-    """URL del stream WebSocket de notificaciones, global o de un proyecto.
+    """URL del stream WebSocket de notificaciones, global o de un proyecto: Úsala para
+    suscribirte tú mismo; para eventos ya decodificados usa `gns3_events`.
+    **Lectura**: la URL no lleva credenciales.
 
     La URL no lleva credenciales. Para suscribirse manualmente, usa
     `websockets.connect(url, additional_headers={"Authorization": "Basic <base64 usuario:contraseña>"})`
@@ -2545,8 +2721,7 @@ def gns3_events_url(project_id: Optional[str] = None, project_name: Optional[str
     if project_id or project_name:
         pid, _ = _resolve_project(project_id, project_name)
         if not pid:
-            return {"error": "proyecto no encontrado", "project_id": project_id,
-                    "project_name": project_name}
+            return _project_missing(project_id, project_name)
     return {"url": _client().notifications_ws_url(pid), "note": "Suscríbete con websockets.connect; "
             "cada mensaje es JSON. Para autenticación HTTP Basic usa additional_headers con "
             "Authorization: Basic <base64 usuario:contraseña>, sin poner secretos en la URL."}
@@ -2585,14 +2760,15 @@ async def _listen_notifications(url: str, seconds: float, auth: tuple[str, str])
 
 @mcp.tool
 def gns3_events(action: str = "url", seconds: float = 5) -> Any:
-    """Notificaciones WebSocket: action=url|listen.
+    """Notificaciones WebSocket: action=url|listen. Úsala para ver eventos en vivo sin montar
+    el WebSocket; para el histórico REST usa `gns3_notifications`. **Lectura**.
 
     listen devuelve los eventos JSON recibidos y termina como máximo en `seconds`.
     Usa la autenticación de la configuración local sin exponerla en la URL ni en la salida.
     """
     action = action.lower()
     if action not in ("url", "listen"):
-        return {"error": f"acción desconocida: {action}", "valid": ["url", "listen"]}
+        return _unknown_action(action, ["url", "listen"])
     if action == "url":
         return gns3_events_url()
     try:
@@ -2614,13 +2790,13 @@ def gns3_notifications(
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
-    """Notificaciones del servidor o de un proyecto concreto."""
+    """Notificaciones del servidor o de un proyecto concreto: Úsala para el histórico por
+    REST; el stream en vivo está en `gns3_events`. **Lectura**."""
     pid = None
     if project_id or project_name:
         pid, _ = _resolve_project(project_id, project_name)
         if not pid:
-            return {"error": "proyecto no encontrado", "project_id": project_id,
-                    "project_name": project_name}
+            return _project_missing(project_id, project_name)
     try:
         st, res = _client().notifications(pid)
     except ConnectionError as e:
@@ -2634,10 +2810,11 @@ def gns3_iou_license(
     body: Optional[dict] = None,
     confirm: bool = False,
 ) -> Any:
-    """Licencia IOU: action=get|set. Cambiarla exige `body` y `confirm=True`."""
+    """Licencia IOU: action=get|set. Úsala solo si el servidor pide licencia IOU.
+    **Mixta**: get lee; set exige `body` y `confirm=True`."""
     action = action.lower()
     if action not in ("get", "set"):
-        return {"error": f"acción desconocida: {action}", "valid": ["get", "set"]}
+        return _unknown_action(action, ["get", "set"])
     if action == "set":
         if not isinstance(body, dict):
             return {"error": "set exige body (dict)"}
@@ -2655,14 +2832,15 @@ def gns3_iou_license(
 
 @mcp.tool
 def gns3_server(action: str = "version", confirm: bool = False) -> Any:
-    """Servidor: action=version|shutdown|reload|debug.
+    """Servidor: action=version|shutdown|reload|debug. Úsala para la versión o para reiniciar
+    el servidor; para su estado completo usa `gns3_status`.
+    **Mixta**: version lee; shutdown/reload/debug exigen `confirm=True`.
 
     shutdown, reload y debug exigen `confirm=True` porque cambian el estado del servidor.
     """
     action = action.lower()
     if action not in ("version", "shutdown", "reload", "debug"):
-        return {"error": f"acción desconocida: {action}",
-                "valid": ["version", "shutdown", "reload", "debug"]}
+        return _unknown_action(action, ["version", "shutdown", "reload", "debug"])
     if action != "version" and not confirm:
         return {"error": f"{action} del servidor exige confirm=True"}
     client = _client()
@@ -2685,7 +2863,12 @@ def gns3_emulator(
     body: Optional[dict] = None,
     confirm: bool = False,
 ) -> Any:
-    """Emuladores y red local: action=qemu-binaries|qemu-capabilities|docker-images|interfaces|ports|udp|img-binaries|img-config|virtualbox-vms|vmware-vms|vmware-vmnet.
+    """Emuladores y red local. Úsala para binarios, capacidades, interfaces o imágenes del
+    servidor; para compute usa `gns3_compute`.
+    action=qemu-binaries|qemu-capabilities|docker-images|interfaces|ports|udp|
+    img-binaries|img-config|virtualbox-vms|vmware-vms|vmware-vmnet.
+    **Mixta**: todas leen salvo udp, img-config y vmware-vmnet, que escriben
+    (img-config y vmware-vmnet exigen `confirm=True`).
 
     udp reserva un puerto UDP y exige `port`. img-config crea una imagen qemu-img
     con `body` o la actualiza sin `body`; vmware-vmnet crea una interfaz. img-config
@@ -2700,7 +2883,7 @@ def gns3_emulator(
     action = action.lower()
     valid = list(methods) + ["udp", "img-config", "vmware-vmnet"]
     if action not in valid:
-        return {"error": f"acción desconocida: {action}", "valid": valid}
+        return _unknown_action(action, valid)
     if action == "udp" and (port is None or not 1 <= port <= 65535):
         return {"error": "udp exige port entre 1 y 65535"}
     if body is not None and not isinstance(body, dict):
@@ -2728,7 +2911,11 @@ def gns3_emulator(
 # ══════════════════════════════════════════════════════════════════════════════
 # Batch e informe: una llamada MCP para varias lecturas y evidencia reproducible.
 # ══════════════════════════════════════════════════════════════════════════════
-def _registered_tool_functions() -> dict[str, Any]:
+_tool_registry: Optional[dict[str, Any]] = None
+_tool_params: dict[Any, dict] = {}
+
+
+def _scan_tool_functions() -> dict[str, Any]:
     """Funciones Python registradas como tools, sin pasar por el transporte MCP."""
     tools: dict[str, Any] = {}
     for name, fn in list(globals().items()):
@@ -2736,6 +2923,26 @@ def _registered_tool_functions() -> dict[str, Any]:
         if callable(fn) and getattr(meta, "type", None) == "tool":
             tools[getattr(meta, "name", None) or name] = fn
     return tools
+
+
+def _registered_tool_functions() -> dict[str, Any]:
+    """Registro calculado una vez: las tools no cambian después del import."""
+    global _tool_registry
+    if _tool_registry is None:
+        _tool_registry = _scan_tool_functions()
+    return _tool_registry
+
+
+def _tool_parameters(fn: Any) -> dict:
+    """Firma de una tool memoizada por función (no cambia en caliente)."""
+    params = _tool_params.get(fn)
+    if params is None:
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            params = {}
+        _tool_params[fn] = params
+    return params
 
 
 def _accepts_tool_arg(params: dict, name: str) -> bool:
@@ -2824,10 +3031,7 @@ def _batch_execute(index: int, operation: Any, registered: dict[str, Any],
                     error = blocked
                 else:
                     call_args = dict(args)
-                    try:
-                        params = inspect.signature(fn).parameters
-                    except (TypeError, ValueError):
-                        params = {}
+                    params = _tool_parameters(fn)
                     if (project_name is not None and not call_args.get("project_id")
                             and not call_args.get("project_name")
                             and _accepts_tool_arg(params, "project_name")):
@@ -2882,7 +3086,9 @@ def _batch_execute(index: int, operation: Any, registered: dict[str, Any],
 @mcp.tool
 def gns3_batch(operations: list[dict], stop_on_error: bool = False,
                project_name: Optional[str] = None) -> dict:
-    """Ejecuta hasta 20 tools registradas en una llamada, con errores aislados.
+    """Ejecuta hasta 20 tools registradas en una llamada, con errores aislados. Úsala para
+    agrupar lecturas y ahorrar llamadas MCP; no la uses para escrituras en cadena.
+    **Mixta**: paraleliza solo lecturas; las destructivas exigen "confirm": true.
 
     Cada operación es `{"tool": "gns3_exec", "args": {...}}`. `project_name` se
     inyecta en las tools que lo admitan si la operación no fija proyecto. Las tools
@@ -3141,7 +3347,8 @@ def _informe_doctor(status: Any, project: Optional[dict], selection_error: Optio
 
 @mcp.tool
 def gns3_informe(project_name: Optional[str] = None, dest: Optional[str] = None) -> dict:
-    """Genera un Markdown con estado, topología, hallazgos y verificaciones pendientes.
+    """Genera un Markdown con estado, topología, hallazgos y pendientes: Úsala para cerrar
+    una revisión con evidencia. **Lectura** del lab: solo escribe el fichero local `dest`.
 
     No abre proyectos, no ejecuta comandos en nodos y no incluye credenciales ni rutas
     de usuarios. Si un dato no se puede leer, el informe recoge el error literal.
