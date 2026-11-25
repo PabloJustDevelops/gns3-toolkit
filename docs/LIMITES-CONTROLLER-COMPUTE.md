@@ -1,5 +1,7 @@
 # Límites entre controller y compute
 
+Secciones: Qué manda cada uno · Por qué algunas rutas devuelven 409 sin VirtualBox/VMware · `/v1/version` sí, `/v2/controller` no.
+
 Un `gns3server` 2.2 sirve dos API en el mismo proceso. `Route._route`
 (`gns3server/web/route.py`) decide el prefijo según el módulo del handler:
 

@@ -1,18 +1,20 @@
 # pfSense nativo: de la consola a `config.xml`
 
+Secciones: Estado en este árbol · 1. Detectar los nombres de interfaz · 2. Credenciales: sólo variables de entorno · 3. Orden de la configuración nativa · 4. El menú: sólo cuando aún no hay SSH · 5. Verificación con salida real · 6. Errores literales y su causa.
+
 La vía nativa habla el formato que pfSense entiende de verdad: `/conf/config.xml` y sus
 comandos (`pfctl`, `ifconfig`, `easyrule`, `/etc/rc.reload_all`) por SSH. El VNC queda para el
 primer arranque sin SSH y para instaladores con ratón; antes de abrirlo, agota consola telnet y
 monitor HMP ([EXAMEN.md](EXAMEN.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
 
-## Estado de esta rama
+## Estado en este árbol
 
-Los comandos `gns3lab pf` y el módulo `pfsense.py` están **previstos en los carriles `pfcli` y
-`pfcore`**; todavía no existen aquí. Las firmas y las variables de entorno que se documentan
-abajo vienen de los contratos de `orchestration/BRIEF-pfcore.md` y
-`orchestration/BRIEF-pfcli.md`, no de una ejecución real. `gns3lab shot/type/key`, `exec`,
-`node props` y `doctor` sí están en esta rama. Comprueba siempre `gns3lab --help` y
-`gns3lab pf --help` antes de dar un comando por bueno.
+Los comandos `gns3lab pf` y el módulo `pfsense.py` existen y están cubiertos por
+`tests/test_pfsense.py` y `tests/test_cli_pf.py`. Las firmas documentadas abajo salen de
+`pfsense.py` (`PfSense.*`) y de `gns3lab pf <acción> --help`; las que no se han ejecutado contra
+un firewall real se marcan como tales. `gns3lab shot/type/key`, `exec`, `node props` y `doctor`
+también están en el árbol. Comprueba siempre `gns3lab pf --help` antes de dar un comando por
+bueno.
 
 ## 1. Detectar los nombres de interfaz
 
@@ -143,8 +145,8 @@ API no prueba conectividad.
 
 ## 6. Errores literales y su causa
 
-Salidas tomadas de [TROUBLESHOOTING.md](TROUBLESHOOTING.md) y [EXAMEN.md](EXAMEN.md); las
-marcadas como *previsto* vienen del contrato y aún no se han ejecutado en esta rama.
+Salidas tomadas de [TROUBLESHOOTING.md](TROUBLESHOOTING.md) y [EXAMEN.md](EXAMEN.md). Las dos
+últimas son mensajes de `pfsense.py`; no se han reproducido contra un firewall real.
 
 | Salida literal | Causa | Arreglo |
 |---|---|---|
@@ -156,8 +158,8 @@ marcadas como *previsto* vienen del contrato y aún no se han ejecutado en esta 
 | `gateway=255.255.255.0` | VPCS pinta la máscara en el campo gateway | `test` usa el `DHCP SERVER` de `show ip` y reconfigura la IP |
 | `gateway=... y sin concesión DHCP; revisa pfSense` | DHCP caído, VLAN o asignación de OPT incorrectas | revisar `node switch`, la asignación y la regla `pass` en OPT |
 | `sin tesseract` / `sin Pillow: el screendump queda en PPM` (avisos de `doctor`) | faltan binarios | instalarlos; sin ellos `shot` da la imagen pero el OCR queda vacío |
-| *previsto*: error que nombra `PFSENSE_PASSWORD` | falta la variable de entorno | exportarla sin escribir su valor en ficheros ni comandos |
-| *previsto*: error de `assign()` con los nombres disponibles | el `if` pedido no existe en `ifconfig` | usar un nombre real de `pf detect` o cambiar `adapter_type` |
+| `falta la variable de entorno PFSENSE_PASSWORD` | no está exportada | exportarla sin escribir su valor en ficheros ni comandos |
+| error de `assign()` con los nombres disponibles | el `if` pedido no existe en `ifconfig` | usar un nombre real de `pf detect` o cambiar `adapter_type` |
 
 Referencia corta para la skill: [skill-sync/references/pfsense-nativo.md](../skill-sync/references/pfsense-nativo.md).
 El batch del MCP, en [MCP-VELOCIDAD.md](MCP-VELOCIDAD.md). Flags de la CLI, en

@@ -1,7 +1,9 @@
 # Eventos en vivo: WebSocket y stream HTTP
 
-GNS3 2.2 expone dos vías de notificación. El repo ya tiene la vía HTTP; la del WebSocket
-está en el núcleo como URL, sin cliente todavía.
+Secciones: URLs · Formato de cada evento · Eventos que se pueden esperar · Cómo suscribirse desde este repo.
+
+GNS3 2.2 expone dos vías de notificación. El repo tiene las dos: HTTP con `notify` y WebSocket
+con `watch` / `gns3_events`; el núcleo sólo compone la URL del WebSocket.
 
 ## URLs
 
@@ -56,20 +58,25 @@ líneas (`_notify_snapshot`) para no colgarse. La tool `gns3_notifications(proje
 project_name)` existe y devuelve la respuesta tal cual; al ser un stream permanente, conviene
 usarla con timeout corto en el cliente.
 
-**Vía WebSocket (en curso).** El núcleo sólo compone la URL. Los contratos acordados en
-`orchestration/BRIEF-niocli.md` y `orchestration/BRIEF-niomcp.md` son:
+**Vía WebSocket (existe).** El núcleo compone la URL con `notifications_ws_url()`; el canal lo
+abren la CLI y el MCP, no el núcleo:
 
-| Superficie | Contrato | Estado |
+| Superficie | Comando o tool | Cómo |
 |---|---|---|
-| CLI | `gns3lab watch [--project] [--seconds N]` | en curso |
-| MCP | `gns3_events_url(project_id, project_name)` → URL y nota de suscripción | en curso |
-| MCP | `gns3_events(action="url\|listen", seconds=5)` → eventos reales con timeout estricto | en curso |
+| CLI | `gns3lab watch [--project P] [--seconds N]` | handshake WebSocket con la stdlib, lee frames hasta el timeout y sale |
+| MCP | `gns3_events_url(project_id, project_name)` | devuelve la URL y una nota de suscripción |
+| MCP | `gns3_events(action="url\|listen", seconds=5)` | `listen` conecta con `websockets`, lee hasta el timeout y devuelve `events` |
 
-La implementación prevista es un handshake WebSocket con la stdlib en la CLI (sin dependencias
-nuevas) y el paquete `websockets` ya presente en el venv en el MCP. En ambos casos: abrir la URL
-de la tabla, leer mensajes hasta el timeout, parsear el JSON y filtrar por `action`; si no
-conecta, imprimir la URL y el error literal, nunca quedarse colgado. El servidor atiende
-ping/pong con `process_websocket()`.
+En ambos casos: abrir la URL de la tabla, leer mensajes hasta el timeout, parsear el JSON y
+filtrar por `action`; si no conecta, imprimir la URL y el error literal, nunca quedarse colgado.
+El servidor atiende ping/pong con `process_websocket()`.
+
+```bash
+gns3lab watch --project examen-kit --seconds 5
+```
+
+Confirma `WebSocket: ws://...` en `stderr` y una línea por evento; al final, el número de
+eventos leídos. Si no conecta, sale con código 1 y deja la URL y el error en `stderr`.
 
 Ver [NIO y capturas](NIO-Y-CAPTURAS.md) y
 [Límites controller/compute](LIMITES-CONTROLLER-COMPUTE.md). El informe

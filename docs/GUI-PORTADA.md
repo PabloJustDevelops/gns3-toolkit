@@ -1,11 +1,11 @@
 # De la GUI a la terminal: comando, tool y método del núcleo
 
+Secciones: Resize, consola y proyectos · Computes, GNS3 VM, notificaciones y servidor · Plantillas, símbolos y licencia IOU · Emuladores y diagnosis de nodos/enlaces · NIO, capturas por puerto, acciones masivas y eventos · Cómo se ha verificado.
+
 Tabla de las operaciones de la GUI operativa portadas a `gns3lab`, al MCP y a `gns3core`.
-Los nombres de comando y tool vienen de los contratos de `orchestration/BRIEF-guicli.md` y
-`orchestration/BRIEF-guimcp.md`; los métodos y los endpoints se han verificado en
-`gns3core.py` (`API_V2_MAP` declara 12 áreas) y el inventario de rutas en
-`orchestration/inventario-rutas-gns3.txt`. Las operaciones NIO/eventos siguen los contratos de
-`BRIEF-niocli.md` y `BRIEF-niomcp.md`.
+Los nombres de comando y tool están verificados en `cli/gns3lab` y `gns3_mcp_server.py`; los
+métodos y los endpoints, en `gns3core.py` (`API_V2_MAP` declara 12 áreas), y el inventario de
+rutas en `orchestration/inventario-rutas-gns3.txt`.
 
 **Leyenda**
 
@@ -105,8 +105,8 @@ sin disfrazarlo. Los verbos reales, el body del NIO y el significado del `500` e
 ## Cómo se ha verificado
 
 ```bash
-grep -c '^@mcp.tool' gns3_mcp_server.py                          # 34
-./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l  # 37
+grep -c '^@mcp.tool' gns3_mcp_server.py                          # 42
+./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l  # 46
 python3 - <<'PY'                                                  # 12 áreas en API_V2_MAP
 import ast, re
 s = open('gns3core.py').read()
@@ -116,7 +116,7 @@ PY
 grep -n 'def node_resize_disk\|def console_reset\|def gns3vm\|def symbols' gns3core.py
 ```
 
-Verificado en este árbol: `mcp.list_tools()` devuelve 42 tools y `gns3lab` registra 45
+Verificado en este árbol: `mcp.list_tools()` devuelve 42 tools y `gns3lab` registra 46
 subcomandos. Las operaciones de la última tabla (NIO, captura por puerto, acciones masivas,
 eventos WS y versión v1) figuran en ambas listas; los métodos del núcleo y los endpoints están
 en `gns3core.py` y en el inventario de rutas.

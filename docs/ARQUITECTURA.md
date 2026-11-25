@@ -1,5 +1,7 @@
 # Arquitectura
 
+Secciones: Tres piezas, un núcleo · Qué hace cada clase de `gns3core.py` · El servidor MCP · Por qué la consola se lee por prompt y no por `sleep` · Por qué el QEMU se maneja por HMP y no por VNC · Flujo de una orden · Estructura plana.
+
 ## Tres piezas, un núcleo
 
 ```text
@@ -102,14 +104,20 @@ Utilidades sueltas: `match_nodes`, `node_file_read/write` (el body va **en crudo
 
 `gns3_mcp_server.py` es un `FastMCP("gns3")` por stdio. Las credenciales salen de
 `~/.config/GNS3/2.2/gns3_server.conf` (`GNS3_URL`, `GNS3_USER`, `GNS3_PASSWORD` como override),
-así que no viajan en el prompt. Las 42 tools, verificadas con `hermes mcp test gns3`:
+así que no viajan en el prompt. Las 42 tools registradas, contadas con `mcp.list_tools()`:
 
 | Grupo | Tools |
 |---|---|
-| estado y proyectos | `gns3_status`, `gns3_projects`, `gns3_templates`, `gns3_images`, `gns3_server_paths`, `gns3_project_io` |
-| topología | `gns3_nodes`, `gns3_links`, `gns3_topology`, `gns3_node_edit`, `gns3_drawings` |
-| dentro del nodo | `gns3_console`, `gns3_exec`, `gns3_monitor`, `gns3_node_files` |
-| red y red de seguridad | `gns3_capture`, `gns3_snapshots`, `gns3_upload` |
+| estado y proyectos | `gns3_status`, `gns3_projects`, `gns3_project_io`, `gns3_project_stats`, `gns3_project_files`, `gns3_informe` |
+| topología | `gns3_nodes`, `gns3_nodes_bulk`, `gns3_node_edit`, `gns3_node_action`, `gns3_links`, `gns3_link_edit`, `gns3_topology`, `gns3_drawings` |
+| catálogo y computes | `gns3_templates`, `gns3_template`, `gns3_images`, `gns3_upload`, `gns3_compute`, `gns3_statistics`, `gns3_symbols`, `gns3_appliances`, `gns3_server_paths`, `gns3_command_line` |
+| dentro del nodo | `gns3_console`, `gns3_console_control`, `gns3_exec`, `gns3_monitor`, `gns3_node_files` |
+| red, captura y seguridad | `gns3_capture`, `gns3_nio`, `gns3_port_capture`, `gns3_snapshots` |
+| admin y eventos | `gns3_gns3vm`, `gns3_iou_license`, `gns3_server`, `gns3_emulator`, `gns3_notifications`, `gns3_events_url`, `gns3_events` |
+| pfSense y lotes | `gns3_pfsense`, `gns3_batch` |
+
+Además expone 3 resources (`gns3://status`, `gns3://projects`, `gns3://templates`), un resource
+template (`gns3://project/{project}/topology`) y 2 prompts (`gns3-diagnostico`, `gns3-examen`).
 
 `gns3_exec` es la vía preferente sobre `gns3_console`: no espera un tiempo fijo y devuelve la
 salida de cada comando por separado. `gns3_console` se mantiene por compatibilidad con la
@@ -169,6 +177,7 @@ El VNC queda para lo único que no tiene otra vía: instaladores interactivos co
 resuelve el symlink de `~/.local/bin/gns3lab` y añade la raíz a `sys.path`. Un paquete `src/`
 no aporta nada aquí y añadiría una capa de rotura justo antes del examen.
 
-En esta rama, `tests/` sólo trae `test_mcp_smoke.py`, que sí necesita el servidor real. La suite
-sin servidor (consola contra un telnet falso, monitor HMP falso) está en el carril de tests
-(PROJECT.md, hito 3) y todavía no está aquí.
+En este árbol la suite completa vive en `tests/`: 551 tests recogidos con `pytest --collect-only`
+sin servidor. Los dobles de `tests/conftest.py` cubren la API REST falsa, la consola telnet y el
+canal HMP. El único fichero que habla con el GNS3 real es `tests/test_mcp_smoke.py`, excluido de
+la colección (`collect_ignore`) y ejecutado a mano.

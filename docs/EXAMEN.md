@@ -1,10 +1,25 @@
 # Guion del examen
 
+Secciones: Atajo: el kit en tres comandos · 1. Comprobar el servidor · 2. Levantar el kit · 3. Leer el menú de pfSense por OCR · 4. Asignar interfaces · 5. VLANs en el switch · 6. Verificar con ping y doctor · 7. Llevarlo al servidor del aula · Lista final.
+
 Secuencia para montar y entregar el escenario sin GUI, en el orden en que se hace. Cada paso
 lleva el comando exacto y la salida que confirma que salió bien. Si un paso no imprime lo que
 pone aquí, no sigas: está en [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 Referencia de flags: [COMANDOS.md](COMANDOS.md). El proyecto se llama `examen` en todo el guion.
+
+## Atajo: el kit en tres comandos
+
+`gns3lab` trae el montaje automatizado. Cambia estado del servidor, así que se reporta:
+
+```bash
+gns3lab examen setup --name "Kit de examen"    # crea proyecto, nodos y enlaces
+gns3lab examen verify --name "Kit de examen"   # estado, enlaces y ping real
+gns3lab examen informe --name "Kit de examen"  # Markdown en ~/GNS3/informes/
+```
+
+Si el kit ya está montado a mano, el guion de abajo sigue siendo la referencia de qué se
+comprueba y qué salida confirma cada paso.
 
 ## 1. Comprobar el servidor
 

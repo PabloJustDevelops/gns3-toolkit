@@ -1,214 +1,181 @@
 # Cobertura de la API v2
 
-`gns3core.API_V2_MAP` declara **12 áreas**: `server`, `computes`, `projects`, `templates`,
-`nodes`, `links`, `drawings`, `snapshots`, `symbols`, `gui_admin`, `emulators` y `nio_ports` (las
-8 originales, tres añadidas con la GUI operativa y una con NIO/capturas por puerto). Esto es lo
-que hay detrás de cada una en este árbol (2026-11-25): método del núcleo, verbo de `gns3lab`,
-tool MCP y test.
+Secciones: Cómo se verificó · `server` · `computes` · `projects` · `templates` · `nodes` · `links` · `drawings` · `snapshots` · `symbols` · `gui_admin` · `emulators` · `nio_ports` · Rutas del inventario sin método en el núcleo.
 
-**Cómo está verificado.** Servidor GNS3 2.2.61 en `http://127.0.0.1:3080`, sólo `GET` de
-lectura: `200` = ruta viva; `405` o `403` = ruta viva con otro método; `409` = captura no
-iniciada; timeout = descarga o stream en curso. El inventario se contrastó con
+`gns3core.API_V2_MAP` declara **12 áreas**: `server`, `computes`, `projects`, `templates`,
+`nodes`, `links`, `drawings`, `snapshots`, `symbols`, `gui_admin`, `emulators` y `nio_ports`.
+Este documento dice qué método del núcleo cubre cada endpoint, qué verbo de `gns3lab` y qué
+acción MCP lo consumen, y qué test lo prueba.
+
+Fuente de verdad: `gns3core.py` (`API_V2_MAP` y las firmas de `Client`), `cli/gns3lab` (dict
+`handlers` y handlers) y `gns3_mcp_server.py` (funciones `@mcp.tool`). Las cifras se recuentan
+con `python3 scripts/verify.py`; no se copian de memoria.
+
+## Cómo se verificó
+
+Servidor GNS3 2.2.61 en `http://127.0.0.1:3080`. Sólo `GET` de lectura: `200` es ruta viva;
+`405` o `403`, ruta viva con otro método; `409`, estado esperado (captura parada, proyecto
+abierto); timeout, descarga o stream en curso. El inventario se contrastó con
 `gns3server/handlers/api/` de la instalación local.
 
-**Leyenda**
+Leyenda: `—` no existe en ese lado. `URL` significa que el núcleo compone la dirección pero no
+abre el canal.
 
-- `—`: no existe en ese lado.
-- `†`: el método existe en `Client` pero todavía no lo consume ni la CLI ni el MCP.
-- `contrato`: nombre acordado en `orchestration/BRIEF-cli.md` o `BRIEF-mcp-paridad.md`; ese
-  carril aún no está en este árbol.
-- `pendiente`: sin test en `tests/`.
-- `†`: el método del núcleo existe y está consumido por el verbo/tool indicado en la fila.
-  `scripts/verify.py` recuenta las cifras reales desde el código al ejecutarse.
+## `server`
 
-La superficie ampliada de `Client` (`computes`, `compute`, `statistics`, `symbols`,
-`appliances`, `images`, `project_get/close/delete`, `template_get/update/delete`,
-`node_action`, `node_command_line`, `link_update/link_delete/link_capture`,
-`drawing_update/drawing_delete`, `snapshots/snapshot_create/restore/delete`,
-`drawings/drawing_create`, `compute_write_file`) y la de la GUI operativa (`node_resize_disk`,
-`console_reset`, `console_ws_url`, `node_links`, `node_idlepc`, `link_available_filters`,
-`project_stats/duplicate/load`, `project_file_read/write`,
-`compute_create/update/delete/ports/auto_idlepc/action`, `gns3vm*`, `notifications`,
-`template_duplicate/base_configs/base_config`, `symbol_dimensions/raw/raw_upload/default_symbols`,
-`iou_license*`, `server_shutdown/reload/debug`, `qemu_binaries/capabilities`, `docker_images`,
-`network_interfaces/ports`, `udp_port`) están en el núcleo y **todavía no tienen consumidor**
-en este árbol: las conectan los carriles `opencode/cli` y `opencode/mcp`, y las de la GUI
-operativa los carriles `opencode/guicli` y `opencode/guimcp`. Por eso muchas filas llevan `†`.
-
-## server
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET /v2/version` | `version()`, `alive()` | `servers`, `status`, `doctor` | `gns3_status` | `test_client.py::test_alive_contra_servidor_levantado` |
+| `GET /v2/version` | `version()`, `alive()` | `servers`, `status`, `doctor` | `gns3_status` | `test_client_v2.py::test_version_devuelve_el_dict` |
+| `GET /v1/version` | `v1_version()` | `version-v1` | `gns3_status` (`version_v1`) | `test_client_nio.py::test_consultas_ampliadas_de_compute_y_version` |
 
-Sondeo: `GET /v2/version` → 200, `{"version": "2.2.61"}`.
+## `computes`
 
-Además, `GET /v2/statistics` está asignado al área `computes` en el mapa.
-
-## computes
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET /v2/computes` | `computes()†` | `doctor` (los lista) | `gns3_status` (resumen) | — |
-| `GET /v2/computes/{id}` | `compute(cid)†` | `compute [id]` (contrato) | `gns3_compute` (contrato) | pendiente |
-| `GET /v2/statistics` | `statistics()†` | `stats` (contrato) | `gns3_statistics` (contrato) | pendiente |
-| `GET /v2/computes/{id}/{emulator}/images` | `images()†`, `qemu_images()` | `images` (sólo qemu) | `gns3_images` (sólo qemu) | — |
-| `POST /v2/computes/{id}/{emulator}/images/{filename}` | `compute_write_file()†` (CLI y MCP hacen `POST` crudo) | `upload` | `gns3_upload` | pendiente |
+| `GET /v2/computes` | `computes()` | `compute`, `doctor` | `gns3_compute` (list), `gns3_status` | `test_client_v2.py::test_computes_estadisticas_simbolos_y_appliances` |
+| `POST /v2/computes` | `compute_create()` | `compute add` | `gns3_compute` (add) | `test_client_gui.py` |
+| `GET/PUT/DELETE /v2/computes/{id}` | `compute()`, `compute_update()`, `compute_delete()` | `compute [id]`, `compute update`, `compute rm` | `gns3_compute` (info/update/delete) | `test_client_v2.py::test_compute_devuelve_dict_o_none` |
+| `GET /v2/computes/{id}/ports` | `compute_ports()` | `compute ports` | `gns3_compute` (ports) | `test_client_gui.py` |
+| `POST /v2/computes/{id}/auto_idlepc` | `compute_auto_idlepc()` | `compute idlepc` | `gns3_compute` (idlepc) | `test_client_gui.py` |
+| `GET /v2/computes/{id}/{emulator}/{action}` | `compute_action()` (GET sin body, POST con body) | `compute action` | `gns3_compute` (call) | `test_client_nio.py::test_consultas_ampliadas_de_compute_y_version` |
+| `GET /v2/statistics` | `statistics()` | `stats` | `gns3_statistics` | `test_client_v2.py::test_computes_estadisticas_simbolos_y_appliances` |
+| `GET /v2/computes/{id}/{emulator}/images` | `images()`, `qemu_images()` | `images` | `gns3_images` | `test_client_v2.py::test_images_acepta_el_sufijo_images` |
+| `POST /v2/computes/{id}/{emulator}/images/{filename}` | `compute_write_file()` | `upload` | `gns3_upload` | `test_client_v2.py::test_compute_write_file_manda_los_bytes_tal_cual` |
 
-Sondeo: `GET /v2/computes`, `/v2/computes/local`, `/v2/statistics` y
-`/v2/computes/local/qemu/images` → 200.
+## `projects`
 
-## projects
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET/POST /v2/projects` | `projects()`; `POST` en crudo | `status`, `fix`, `port` (GET); `new` (POST) | `gns3_projects` (list/create) | `test_client.py::test_projects_devuelve_la_lista`, `::test_projects_propaga_el_error_http` |
-| `GET/PUT/DELETE /v2/projects/{id}` | `project_get()†`; `PUT`/`DELETE` en crudo | `status` (GET); `import` y `port` (PUT del nombre) | `gns3_projects` (info/delete); `gns3_project_io` (PUT al importar) | pendiente |
-| `POST /v2/projects/{id}/open` | `ensure_open()` | `up`, `new`, `port` | `_ensure_open()` en todas las tools; `gns3_projects` (open) | pendiente |
-| `POST /v2/projects/{id}/close` | `project_close()†` | `down` | `gns3_projects` (close) | pendiente |
-| `GET /v2/projects/{id}/export` | — (`GET` crudo con `raw=True`) | `export`, `port` | `gns3_project_io` (export) | pendiente |
-| `POST /v2/projects/{id}/import` | — (`POST` crudo) | `import`, `port` | `gns3_project_io` (import/duplicate) | pendiente |
+| `GET/POST /v2/projects` | `projects()`; `POST` en crudo | `status`; `new` | `gns3_projects` (list/create) | `test_client.py::test_projects_devuelve_la_lista` |
+| `GET/PUT/DELETE /v2/projects/{id}` | `project_get()`, `project_close()`, `project_delete()`; `PUT` en crudo | `status`, `import`, `port` | `gns3_projects` (info/update/delete) | `test_client_v2.py::test_project_get_y_errores` |
+| `POST /v2/projects/{id}/open` | `ensure_open()` | `up`, `new`, `port` | `_ensure_open()` en las tools | `test_client_v2.py::test_ensure_open_abre_el_proyecto` |
+| `POST /v2/projects/{id}/close` | `project_close()` | `down` | `gns3_projects` (close) | `test_client_v2.py::test_project_close_y_delete` |
+| `GET /v2/projects/{id}/export` | GET crudo con `raw=True` | `export`, `port` | `gns3_project_io` (export) | `test_client_v2.py` |
+| `POST /v2/projects/{id}/import` | POST crudo | `import`, `port` | `gns3_project_io` (import) | `test_client_v2.py` |
+| `POST /v2/projects/{id}/duplicate` | `project_duplicate()` | `project duplicate` | `gns3_project_io` (duplicate) | `test_client_gui.py` |
+| `POST /v2/projects/load` | `project_load()` | `project load` | `gns3_project_io` (load) | `test_client_gui.py` |
+| `GET /v2/projects/{id}/stats` | `project_stats()` | `project stats` | `gns3_project_stats` | `test_client_gui.py` |
+| `GET/POST /v2/projects/{id}/files/{path}` | `project_file_read()`, `project_file_write()` | `project file` | `gns3_project_files` | `test_client_gui.py` |
 
-Sondeo: `GET /v2/projects` y `GET /v2/projects/{id}` → 200; `GET .../open`, `.../close` e
-`.../import` → 405.
+## `templates`
 
-## templates
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET /v2/templates` | `templates()` | `templates`, `template list`, `node add` | `gns3_templates`, `gns3_template` (list), `gns3_nodes` (add) | — |
-| `GET/PUT/DELETE /v2/templates/{id}` | `template_get/update/delete()†` (CLI y MCP hacen `GET`/`PUT`/`DELETE` crudos) | `template create` (PUT de `console` + GET de verificación), `template delete` | `gns3_template` (create y delete) | pendiente |
-| `POST /v2/templates` (fuera del mapa) | — (`POST` crudo) | `template create` | `gns3_template` (create) | pendiente |
-| `POST /v2/projects/{id}/templates/{tid}` | — (`POST` crudo) | `node add` | `gns3_nodes` (add), `gns3_template` (apply), `gns3_node_edit` (create) | pendiente |
-| `GET /v2/appliances` | `appliances()†` | `appliances` (contrato) | `gns3_appliances` (contrato) | pendiente |
+| `GET /v2/templates` | `templates()` | `templates`, `template list`, `node add` | `gns3_templates`, `gns3_template` (list) | `test_client_v2.py::test_links_templates_y_qemu_images` |
+| `GET/PUT/DELETE /v2/templates/{id}` | `template_get/update/delete()` | `template update|delete` | `gns3_template` (update/delete) | `test_client_v2.py::test_template_get_update_delete` |
+| `POST /v2/templates` | POST crudo | `template create` | `gns3_template` (create) | `test_client_gui.py` |
+| `POST /v2/projects/{id}/templates/{tid}` | POST crudo | `node add` | `gns3_nodes` (add), `gns3_template` (apply) | `test_client.py::test_nodes_pide_el_proyecto_correcto` |
+| `POST /v2/templates/{id}/duplicate` | `template_duplicate()` | `template duplicate` | `gns3_template` (duplicate) | `test_client_gui.py` |
+| `GET /v2/templates/base-configs` | `template_base_configs()` | `template base-config` | `gns3_template` (base-config) | `test_client_gui.py` |
+| `GET/PUT /v2/templates/{id}/base-config/{filename}` | `template_base_config()` | `template base-config` | `gns3_template` (base-config) | `test_client_gui.py` |
+| `GET /v2/appliances` | `appliances()` | `appliances` | `gns3_appliances` | `test_client_v2.py::test_computes_estadisticas_simbolos_y_appliances` |
 
-Sondeo: `GET /v2/templates` y `/v2/appliances` → 200.
+## `nodes`
 
-## nodes
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET/POST /v2/projects/{id}/nodes` | `nodes()`; `POST` en crudo | `status` (GET) | `gns3_nodes` (list), `gns3_node_edit` (create sin plantilla) | `test_client.py::test_nodes_pide_el_proyecto_correcto` |
-| `GET/PUT/DELETE /nodes/{nid}` | `node_detail()`, `find_node()`; `PUT`/`DELETE` en crudo | `node props`, `node switch`, `node disk` (PUT); `node rm` | `gns3_node_edit` (update/switch/delete), `gns3_nodes` (delete), `gns3_command_line` (contrato: GET del detalle) | pendiente |
-| `POST /nodes/{nid}/{start\|stop\|reload\|suspend\|duplicate}` | `node_action()`† (sin `duplicate`: `POST` crudo) | `up`/`down` (POST en crudo), `node dup` | `gns3_nodes` (start/stop/reload/suspend), `gns3_node_action` (contrato), `gns3_node_edit` (duplicate) | pendiente |
-| `GET/POST /nodes/{nid}/files/{path}` | `node_file_read()`, `node_file_write()` | — | `gns3_node_files` | `test_files.py` (3 tests, sólo escritura) |
-| `GET /v2/symbols` | `symbols()†` | `symbols` (contrato) | `gns3_symbols` (contrato) | pendiente |
+| `GET/POST /v2/projects/{id}/nodes` | `nodes()`; `POST` en crudo | `status`; `node add` | `gns3_nodes` (list/add), `gns3_node_edit` (create) | `test_client.py::test_nodes_pide_el_proyecto_correcto` |
+| `GET/PUT/DELETE /v2/projects/{id}/nodes/{nid}` | `node_detail()`, `find_node()`; `PUT`/`DELETE` en crudo | `node props`, `node switch`, `node disk`, `node rm` | `gns3_node_edit`, `gns3_nodes` (delete) | `test_client_v2.py::test_consultas_de_nodo_propagan_http_no_200` |
+| `POST /v2/projects/{id}/nodes/{nid}/{start|stop|reload|suspend|resume|pause|unpause}` | `node_action()` | `node start`, `node pause`… | `gns3_node_action`, `gns3_nodes` | `test_client_v2.py::test_node_action_valida_manda_el_post` |
+| `POST /v2/projects/{id}/nodes/{start|stop|suspend|reload}` | `nodes_action()` | `all start|stop|suspend|reload` | `gns3_nodes_bulk` | `test_client_nio.py::test_nodes_action_manda_las_cuatro_acciones` |
+| `POST /v2/projects/{id}/nodes/console/reset` | `nodes_console_reset()` | `console reset-all` | `gns3_console_control` (reset-all) | `test_client_nio.py::test_nodes_console_reset_manda_el_post` |
+| `POST /v2/projects/{id}/nodes/{nid}/duplicate` | POST crudo | `node dup` | `gns3_node_edit` (duplicate) | `test_client_gui.py` |
+| `GET/POST /v2/projects/{id}/nodes/{nid}/files/{path}` | `node_file_read()`, `node_file_write()` | — | `gns3_node_files` | `test_files.py` |
+| `GET /v2/projects/{id}/nodes/{nid}/links` | `node_links()` | `node links` | `gns3_node_edit` (links) | `test_client_gui.py` |
+| `POST /v2/projects/{id}/nodes/{nid}/resize_disk` | `node_resize_disk()` | `node disk-resize` | `gns3_node_edit` (disk-resize) | `test_client_gui.py` |
+| `POST /v2/projects/{id}/nodes/{nid}/console/reset` | `console_reset()` | `console reset` | `gns3_console_control` (reset) | `test_client_gui.py` |
+| `GET /v2/projects/{id}/nodes/{nid}/console/ws` | `console_ws_url()` (URL) | `console url` | `gns3_console_control` (url) | `test_client_gui.py` |
+| sin ruta propia: `GET /v2/projects/{id}/nodes/{nid}` y campo `command_line` | `node_command_line()` | `node line` | `gns3_command_line` | `test_client_v2.py::test_node_command_line_lee_el_detalle` |
+| `GET /v2/projects/{id}/nodes/{nid}/dynamips/auto_idlepc` | `node_idlepc()` | `node idlepc` | `gns3_node_edit` (idlepc) | `test_client_gui.py` |
+| `GET /v2/symbols` | `symbols()` | `symbols` | `gns3_symbols` (list) | `test_client_v2.py::test_computes_estadisticas_simbolos_y_appliances` |
 
-Sondeo: `GET .../nodes` → 200; `GET .../nodes/{nid}` → 200; `POST .../duplicate`,
-`.../start` y `.../stop` → 405; `GET /v2/symbols` → 200.
+## `links`
 
-## links
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET/POST /v2/projects/{id}/links` | `links()`; `POST` en crudo | `link list`, `link add` | `gns3_links` (list/add), `gns3_link_edit` (list/add) | — |
-| `GET/PUT/DELETE /links/{lid}` | `link_update()†`, `link_delete()†`; `GET` sin método propio | `link rm`; `link edit` (contrato) | `gns3_links` (delete), `gns3_link_edit` (delete), `gns3_links` (update, contrato) | pendiente |
-| `POST /links/{lid}/{start_capture\|stop_capture}` | `link_capture()†` | `capture start`/`stop` (contrato) | `gns3_capture` (start/stop; `file_name`, contrato) | pendiente |
-| `GET /links/{lid}/pcap` | `link_capture(action="pcap")†` | `capture pcap` (contrato) | `gns3_capture` (read) | pendiente |
+| `GET/POST /v2/projects/{id}/links` | `links()`; `POST` en crudo | `link list`, `link add` | `gns3_links`, `gns3_link_edit` | `test_client_v2.py::test_links_templates_y_qemu_images` |
+| `GET/PUT/DELETE /v2/projects/{id}/links/{lid}` | `link_update()`, `link_delete()` | `link edit`, `link rm` | `gns3_links` (update/delete), `gns3_link_edit` | `test_client_v2.py::test_link_update_y_delete` |
+| `GET /v2/projects/{id}/links/{lid}/available_filters` | `link_available_filters()` | `link filters` | `gns3_links` (filters) | `test_client_gui.py` |
+| `POST /v2/projects/{id}/links/{lid}/{start_capture|stop_capture}` | `link_capture()` | `capture … start|stop` | `gns3_capture` | `test_client_v2.py::test_link_capture_start_usa_el_nombre_por_defecto` |
+| `GET /v2/projects/{id}/links/{lid}/pcap` | `link_capture(action="pcap")` | `capture … pcap` | `gns3_capture` (read) | `test_client_v2.py::test_link_capture_stop_y_pcap` |
 
-Sondeo: `GET .../links` y `GET .../links/{lid}` → 200; `POST .../start_capture` → 405;
-`GET .../pcap` → 409 (no hay captura activa).
+## `drawings`
 
-## drawings
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET/POST /v2/projects/{id}/drawings` | `drawings()†`, `drawing_create()†` (CLI y MCP hacen `POST` crudo) | `draw` (sólo crear) | `gns3_drawings` (list, text, rect) | — |
-| `GET/PUT/DELETE /drawings/{did}` | `drawing_update()†`, `drawing_delete()†`; `GET` sin método | `draw edit` y `draw rm` (contrato) | `gns3_drawings` (update contrato, delete/clear) | pendiente |
+| `GET/POST /v2/projects/{id}/drawings` | `drawings()`, `drawing_create()` | `draw`, `draw list` | `gns3_drawings` (list/text/rect) | `test_client_v2.py::test_drawings_y_drawing_create` |
+| `GET/PUT/DELETE /v2/projects/{id}/drawings/{did}` | `drawing_update()`, `drawing_delete()` | `draw edit`, `draw rm` | `gns3_drawings` (update/delete/clear) | `test_client_v2.py::test_drawing_update_y_delete` |
 
-Sondeo: `GET .../drawings` → 200; `GET .../drawings/{id}` con id inventado → 404 JSON (la
-ruta existe, el dibujo no).
+## `snapshots`
 
-## snapshots
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET/POST /v2/projects/{id}/snapshots` | `snapshots()†`, `snapshot_create()†` | `snap list`, `snap create` | `gns3_snapshots` (list/create) | pendiente |
-| `POST /snapshots/{sid}/restore` | `snapshot_restore()†` | `snap restore` | `gns3_snapshots` (restore) | pendiente |
-| `DELETE /snapshots/{sid}` | `snapshot_delete()†` | `snap delete` (contrato) | `gns3_snapshots` (delete) | pendiente |
+| `GET/POST /v2/projects/{id}/snapshots` | `snapshots()`, `snapshot_create()` | `snap list`, `snap create` | `gns3_snapshots` (list/create) | `test_client_v2.py::test_snapshots_y_acciones` |
+| `POST /v2/projects/{id}/snapshots/{sid}/restore` | `snapshot_restore()` | `snap restore` | `gns3_snapshots` (restore) | `test_client_v2.py::test_snapshots_y_acciones` |
+| `DELETE /v2/projects/{id}/snapshots/{sid}` | `snapshot_delete()` | `snap delete` | `gns3_snapshots` (delete) | `test_client_v2.py::test_snapshots_y_acciones` |
 
-Sondeo: `GET .../snapshots` → 200; `POST .../restore` → 405. Listar, crear y restaurar están en
-CLI y MCP; borrar llega con el contrato de CLI y ya está en MCP.
+## `symbols`
 
-## symbols
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET /v2/symbols` | `symbols()` † | `symbols` | `gns3_symbols` (list en curso) | pendiente |
-| `GET /v2/symbols/{id}/dimensions` | `symbol_dimensions()` † | `symbol dimensions` (contrato, en curso) | `gns3_symbols(action="dimensions")` (contrato, en curso) | pendiente |
-| `GET/POST /v2/symbols/{id}/raw` | `symbol_raw()`, `symbol_raw_upload()` † | `symbol raw`/`upload` (contrato, en curso) | `gns3_symbols(action="raw\|upload")` (contrato, en curso) | pendiente |
-| `GET /v2/default_symbols` | `default_symbols()` † | `symbol default` (contrato, en curso) | `gns3_symbols(action="default")` (contrato, en curso) | pendiente |
+| `GET /v2/symbols` | `symbols()` | `symbols` | `gns3_symbols` (list) | `test_client_v2.py::test_computes_estadisticas_simbolos_y_appliances` |
+| `GET /v2/symbols/{id}/dimensions` | `symbol_dimensions()` | `symbol dimensions` | `gns3_symbols` (dimensions) | `test_client_gui.py` |
+| `GET/POST /v2/symbols/{id}/raw` | `symbol_raw()`, `symbol_raw_upload()` | `symbol raw`, `symbol upload` | `gns3_symbols` (raw/upload) | `test_client_gui.py` |
+| `GET /v2/default_symbols` | `default_symbols()` | `symbol default` | `gns3_symbols` (default) | `test_client_gui.py` |
 
-Sondeo: `GET /v2/symbols` y `/v2/default_symbols` → 200; `GET /v2/symbols/{id}/dimensions` y
-`.../raw` → 200.
+## `gui_admin`
 
-## gui_admin
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET/PUT /v2/gns3vm` | `gns3vm()`, `gns3vm_update()` † | `gns3vm show`/`set` (contrato, en curso) | `gns3_gns3vm(action="show\|set")` (contrato, en curso) | pendiente |
-| `GET /v2/gns3vm/engines`, `/engines/{e}/vms` | `gns3vm_engines()`, `gns3vm_vms()` † | `gns3vm engines`/`vms` (contrato, en curso) | `gns3_gns3vm(action="engines\|vms")` (contrato, en curso) | pendiente |
-| `GET/PUT /v2/iou_license` | `iou_license()`, `iou_license_update()` † | `iou-license get`/`set` (contrato, en curso) | `gns3_iou_license` (contrato, en curso) | pendiente |
-| `GET /v2/notifications`, `/projects/{id}/notifications` | `notifications()` † | `notify` (contrato, en curso) | `gns3_notifications` (contrato, en curso) | pendiente |
-| `POST /v2/shutdown`, `/reload`, `/debug` | `server_shutdown()`, `server_reload()`, `server_debug()` † | `server shutdown\|reload\|debug --yes` (contrato, en curso) | `gns3_server(action=…, confirm=True)` (contrato, en curso) | pendiente |
+| `GET/PUT /v2/gns3vm` | `gns3vm()`, `gns3vm_update()` | `gns3vm show|set` | `gns3_gns3vm` (show/set) | `test_client_gui.py` |
+| `GET /v2/gns3vm/engines`, `/engines/{e}/vms` | `gns3vm_engines()`, `gns3vm_vms()` | `gns3vm engines|vms` | `gns3_gns3vm` (engines/vms) | `test_client_gui.py` |
+| `GET/PUT /v2/iou_license` | `iou_license()`, `iou_license_update()` | `iou-license get|set` | `gns3_iou_license` | `test_client_gui.py` |
+| `GET /v2/notifications`, `/v2/projects/{id}/notifications` | `notifications()` | `notify` | `gns3_notifications` | `test_client_gui.py` |
+| `POST /v2/shutdown`, `/reload`, `/debug` | `server_shutdown()`, `server_reload()`, `server_debug()` | `server shutdown|reload|debug --yes` | `gns3_server` (`confirm=True`) | `test_client_gui.py` |
 
-Sondeo: `GET /v2/gns3vm`, `/iou_license`, `/notifications` → 200; los `POST` de shutdown, reload
-y debug devuelven 405 con `GET` (ruta viva). No ejecutarlos contra el servidor real.
+## `emulators`
 
-## emulators
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET /v2/computes/local/qemu/binaries` | `qemu_binaries()` † | `emulator qemu-binaries` (contrato, en curso) | `gns3_emulator(action="qemu-binaries")` (contrato, en curso) | pendiente |
-| `GET /v2/computes/local/qemu/capabilities` | `qemu_capabilities()` † | `emulator qemu-capabilities` (contrato, en curso) | `gns3_emulator(action="qemu-capabilities")` (contrato, en curso) | pendiente |
-| `GET /v2/computes/local/docker/images` | `docker_images()` † | `emulator docker-images` (contrato, en curso) | `gns3_emulator(action="docker-images")` (contrato, en curso) | pendiente |
-| `GET /v2/computes/local/network/interfaces` | `network_interfaces()` † | `emulator interfaces` (contrato, en curso) | `gns3_emulator(action="interfaces")` (contrato, en curso) | pendiente |
-| `GET /v2/computes/local/network/ports` | `network_ports()` † | `emulator ports` (contrato, en curso) | `gns3_emulator(action="ports")` (contrato, en curso) | pendiente |
-| `POST /v2/computes/local/ports/udp` | `udp_port()` † | `emulator udp <puerto>` (contrato, en curso) | `gns3_emulator(action="udp", port=…)` (contrato, en curso) | pendiente |
-| `GET /v2/projects/{id}/nodes/{nid}/dynamips/auto_idlepc` | `node_idlepc()` † | `node idlepc` (contrato, en curso) | `gns3_node_edit(action="idlepc")` (contrato, en curso) | pendiente |
+| `GET /v2/computes/local/qemu/binaries` | `qemu_binaries()` | `emulator qemu-binaries` | `gns3_emulator` (qemu-binaries) | `test_client_gui.py` |
+| `GET /v2/computes/local/qemu/capabilities` | `qemu_capabilities()` | `emulator qemu-capabilities` | `gns3_emulator` (qemu-capabilities) | `test_client_gui.py` |
+| `GET /v2/computes/local/docker/images` | `docker_images()` | `emulator docker-images` | `gns3_emulator` (docker-images) | `test_client_gui.py` |
+| `GET /v2/computes/local/network/interfaces` | `network_interfaces()` | `emulator interfaces` | `gns3_emulator` (interfaces) | `test_client_gui.py` |
+| `GET /v2/computes/local/network/ports` | `network_ports()` | `emulator ports` | `gns3_emulator` (ports) | `test_client_gui.py` |
+| `POST /v2/computes/local/ports/udp` | `udp_port()` | `emulator udp --port N` | `gns3_emulator` (udp) | `test_client_gui.py` |
+| `GET /v2/computes/local/qemu/img-binaries`, `POST/PUT .../qemu/img` | `qemu_img_binaries()`, `qemu_img_config()` | `disk binaries|config` | `gns3_emulator` (img-binaries/img-config) | `test_client_nio.py::test_qemu_img_config_con_y_sin_body` |
+| `GET /v2/computes/local/{virtualbox|vmware}/vms`, `POST .../vmware/nodes/interfaces/vmnet` | `virtualbox_vms()`, `vmware_vms()`, `vmware_vmnet()` | `vm vms|vmnet` | `gns3_emulator` (virtualbox-vms/vmware-vms/vmware-vmnet) | `test_client_nio.py::test_vmware_vmnet_con_y_sin_body` |
 
-Sondeo: `GET /v2/computes/local/qemu/binaries` → 200; las rutas de emulador del controlador
-(`GET /v2/qemu/images`, `GET /v2/capabilities`) → 404: viven en el compute, no aquí.
+## `nio_ports`
 
-## nio_ports
-
-| endpoint | método de `gns3core` | CLI | MCP | test |
+| Endpoint | Método de `gns3core` | CLI | MCP | Test |
 |---|---|---|---|---|
-| `GET/PUT/DELETE /v2/computes/local/projects/{id}/{emu}/nodes/{nid}/adapters/{a}/ports/{p}/nio` | `port_nio()†`, `_emulator_for()†` | `nio get\|add\|rm` (en curso) | `gns3_nio(action="get\|set\|delete")` (en curso) | pendiente |
-| `POST /…/ports/{p}/start_capture`, `stop_capture` | `port_capture()†` | `capture-port start\|stop` (en curso) | `gns3_port_capture(action="start\|stop")` (en curso) | pendiente |
-| `GET /…/ports/{p}/pcap` | `port_capture(action="pcap")†` | `capture-port pcap` (en curso) | `gns3_port_capture(action="pcap")` (en curso) | pendiente |
-| `POST /v2/projects/{id}/nodes/{start\|stop\|suspend\|reload}` (en lote) | `nodes_action()†` | `all start\|stop\|suspend\|reload` (en curso) | `gns3_nodes_bulk` (en curso) | pendiente |
-| `POST /v2/projects/{id}/nodes/console/reset` (global) | `nodes_console_reset()†` | `console reset-all` (en curso) | `gns3_console_control(action="reset-all")` (en curso) | pendiente |
-| `GET /v2/computes/local/qemu/img-binaries`, `POST/PUT …/qemu/img` | `qemu_img_binaries()†`, `qemu_img_config()†` | `disk binaries\|config` (en curso) | `gns3_emulator(action="img-binaries\|img-config")` (en curso) | pendiente |
-| `GET /v2/computes/local/{virtualbox\|vmware}/vms`, `POST …/vmware/nodes/interfaces/vmnet` | `virtualbox_vms()†`, `vmware_vms()†`, `vmware_vmnet()†` | `vm vms\|vmnet` (en curso) | `gns3_emulator(action="virtualbox-vms\|vmware-vms\|vmware-vmnet")` (en curso) | pendiente |
-| `GET /v2/notifications/ws`, `/v2/projects/{id}/notifications/ws` | `notifications_ws_url()†` (compone la URL, no abre el socket) | `watch` (en curso) | `gns3_events_url`, `gns3_events` (en curso) | pendiente |
-| `GET /v1/version` | `v1_version()†` | `version-v1` (en curso) | `gns3_status` con `version_v1` (en curso) | pendiente |
+| `GET/PUT/DELETE /v2/computes/local/projects/{id}/{emu}/nodes/{nid}/adapters/{a}/ports/{p}/nio` | `port_nio()`, `_emulator_for()` | `nio get|add|rm` | `gns3_nio` (get/set/delete) | `test_client_nio.py::test_port_nio_cubre_metodos_y_emulador` |
+| `POST /…/ports/{p}/start_capture`, `stop_capture` | `port_capture()` | `capture-port … start|stop` | `gns3_port_capture` | `test_client_nio.py::test_port_capture_start_y_stop_mandan_el_body_exacto` |
+| `GET /…/ports/{p}/pcap` | `port_capture(action="pcap")` | `capture-port … pcap` | `gns3_port_capture` (pcap) | `test_client_nio.py::test_port_capture_pcap_devuelve_los_bytes_en_crudo` |
+| `GET /v2/notifications/ws`, `/v2/projects/{id}/notifications/ws` | `notifications_ws_url()` (URL) | `watch` | `gns3_events_url`, `gns3_events` | `test_client_nio.py::test_notifications_ws_url_con_y_sin_proyecto` |
+| `GET /v1/version` | `v1_version()` | `version-v1` | `gns3_status` (version_v1) | `test_client_nio.py::test_consultas_ampliadas_de_compute_y_version` |
 
-`node_action()` acepta además `resume`, `pause` y `unpause` (fila de `nodes`). Las acciones
-masivas, `reset-all` y `disk config` son disruptivas: los contratos de CLI y MCP exigen
-`--yes`/`confirm=True`. Sin sondeo de escritura contra el servidor real: iniciar una captura o
-cambiar un NIO modifica el laboratorio. Los verbos y los handlers se verificaron en el código de
-`gns3core.py` y en el `gns3server` 2.2.61 instalado. Detalle en
+Las acciones masivas, `reset-all` y los cambios de configuración son disruptivos: la CLI exige
+`--yes` o TTY y el MCP `confirm=True`. Las escrituras contra el servidor real no se sondean en
+este documento: iniciar una captura o cambiar un NIO modifica el laboratorio. Detalle en
 [NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md) y [EVENTOS.md](EVENTOS.md).
 
-## Rutas del inventario sin puente (agrupadas por handler)
+## Rutas del inventario sin método en el núcleo
 
-El fichero `orchestration/inventario-rutas-gns3.txt` tiene **361 líneas** de rutas, extraídas de
-`~/Applications/gns3/venv/lib/python3.14/site-packages/gns3server/handlers` (el brief las cifra
-en 78; el recuento real del fichero es 361). Sólo la API del **controlador** (`:3080`) es
+`orchestration/inventario-rutas-gns3.txt` reúne **361 líneas** de rutas extraídas de los
+decoradores `@Route` de `gns3server` 2.2.61. Sólo la API del **controlador** (`:3080`) es
 operable desde este repo: `GET /v2/qemu/images` y `GET /v2/capabilities` devuelven 404 porque
 viven en el compute.
 
-Se considera **sin puente** lo que no tiene método en `gns3core.py`, aunque tenga contrato en
-los briefs (eso se marca `en curso` en las secciones anteriores). Se separa en dos grupos.
+Se considera **sin método** lo que no existe en `gns3core.py`, no lo que no tenga consumidor:
+todo lo que está en `API_V2_MAP` tiene método y consumidor en CLI o MCP.
 
 ### Internas de compute (NIO y capturas por puerto)
 
-No son funcionalidad de usuario: son el cableado y la captura dentro del proceso de compute.
-Antes no tenían puente; ahora el área `nio_ports` las expone en el núcleo con `port_nio()` y
-`port_capture()` contra el compute local, todavía sin consumidor CLI/MCP. Para capturar un
-enlace (ruta del controlador) usa `POST /v2/projects/{id}/links/{lid}/start_capture`
-(`link_capture()`). La tabla de handlers sigue siendo el inventario de rutas disponibles.
+No son funcionalidad de usuario: son el cableado y la captura dentro del proceso de compute. El
+área `nio_ports` las expone con `port_nio()` y `port_capture()` contra el compute local. La
+tabla de handlers sigue siendo el inventario de rutas disponibles:
 
 | handler | rutas | NIO | capturas | pcap |
 |---|---:|---:|---:|---:|
@@ -227,30 +194,22 @@ enlace (ruta del controlador) usa `POST /v2/projects/{id}/links/{lid}/start_capt
 | `api/compute/vmware_handler.py` | 19 | 3 | 2 | 1 |
 | `api/compute/vpcs_handler.py` | 17 | 3 | 2 | 1 |
 
-Las restantes rutas de esos handlers (crear/borrar/arrancar/parar el nodo de cada emulador,
-listar imágenes, reset y WS de consola) también son internas de compute: el repo hace lo
-equivalente por las rutas genéricas del controlador `/v2/projects/{id}/nodes…`. Otros handlers
-de compute sin puente propio: `capabilities_handler.py` (`GET /capabilities`),
-`network_handler.py` (`POST /ports/udp`, `GET /network/interfaces`, `GET /network/ports` — el
-repo los llama por la pasarela `/v2/computes/local/...`), `notification_handler.py`
-(`GET /notifications/ws`), `project_handler.py` (10 rutas de proyecto dentro del compute) y
-`server_handler.py` (`GET /version`, `/statistics`, `/debug`).
+Las demás rutas de esos handlers (crear/borrar/arrancar/parar el nodo, listar imágenes, reset y
+WS de consola) también son internas de compute: el repo hace lo equivalente por las rutas
+genéricas del controlador.
 
-### Funcionalidad de usuario sin puente
+### Funcionalidad de usuario sin método
 
 | handler | ruta(s) | por qué no está cubierta |
 |---|---|---|
-| `api/controller/node_handler.py` | `GET /v2/projects/{id}/nodes/{nid}/console/ws` | websocket: `console_ws_url()` compone la URL, no abre el canal |
-| `api/controller/notification_handler.py` | `GET /v2/notifications/ws` | websocket; `notifications()` usa `GET /v2/notifications` y `notifications_ws_url()` sólo compone la URL |
-| `api/controller/project_handler.py` | `GET /v2/projects/{id}/notifications/ws` | websocket: `notifications_ws_url(pid)` compone la URL, no abre el canal |
+| `api/controller/node_handler.py` | `GET /v2/projects/{id}/nodes/{nid}/console/ws` | websocket: `console_ws_url()` compone la URL; el canal lo abre el cliente |
+| `api/controller/notification_handler.py` | `GET /v2/notifications/ws` | `notifications_ws_url()` compone la URL; `watch` y `gns3_events` abren el canal fuera del núcleo |
+| `api/controller/project_handler.py` | `GET /v2/projects/{id}/notifications/ws` | ídem, con `notifications_ws_url(pid)` |
 | `api/controller/server_handler.py` | `POST /v2/version` | cambia la versión informada; sin método en el núcleo |
-| `api/controller/compute_handler.py` | `GET /v2/computes/endpoint/{id}/{emulator}/{action}` y `PUT /v2/computes/{id}/{emulator}/{action}` | pasarela y descarga de imágenes; `compute_action()` cubre sólo `GET`/`POST` |
+| `api/controller/compute_handler.py` | `GET /v2/computes/endpoint/{id}/{emulator}/{action}` | pasarela de descarga; `compute_action()` cubre GET/POST, no el endpoint de descarga |
 | `api/controller/link_handler.py` | `GET /v2/projects/{id}/links/{lid}` (detalle) | `links()` da la lista; no hay `link_get()` |
 | `api/controller/drawing_handler.py` | `GET /v2/projects/{id}/drawings/{did}` (detalle) | `drawings()` da la lista; no hay `drawing_get()` |
-| `index_handler.py` | `/`, `/debug`, `/upload`, `/compute`, `/controller`, `/projects/{id}`, `/static/web-ui/{filename}` | rutas de la propia web UI, no API de operación de laboratorio. `/v1/version` sí tiene método (`v1_version()`) y está en `nio_ports` |
-
-Las rutas con método en el núcleo pero sin consumidor CLI/MCP están en las secciones
-[symbols](#symbols), [gui_admin](#gui-admin) y [emulators](#emulators), no en esta lista.
+| `index_handler.py` | `/`, `/debug`, `/upload`, `/compute`, `/controller`, `/projects/{id}`, `/static/web-ui/{filename}` | rutas de la web UI, no API de operación |
 
 Ver también [GUI-PORTADA.md](GUI-PORTADA.md), [NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md),
 [EVENTOS.md](EVENTOS.md), [LIMITES-CONTROLLER-COMPUTE.md](LIMITES-CONTROLLER-COMPUTE.md),

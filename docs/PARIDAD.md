@@ -1,117 +1,138 @@
 # Paridad CLI ↔ MCP
 
-Una fila por operación. Sirve para ver de un vistazo si algo está sólo en un lado.
+Secciones: Servidor y proyectos · Computes, imágenes y catálogo · Plantillas · Nodos · Enlaces, dibujos y snapshots · Consola y pantalla · Capturas, NIO y eventos · Sólo en un lado · Cómo se comprueba.
 
-- Los nombres con `*` son el contrato de los carriles `opencode/cli` y `opencode/mcp`
-  (`orchestration/BRIEF-cli.md` y `BRIEF-mcp-paridad.md`); en este árbol todavía no existen.
+Una fila por operación. La columna CLI cita el verbo real de `gns3lab`; la del MCP, la tool y
+su acción. Ambas se comprueban con el código: `cli/gns3lab` (dict `handlers`) y
+`gns3_mcp_server.py` (funciones decoradas con `@mcp.tool`).
+
 - `—`: no existe en ese lado.
-- Tests: `—` no hay prueba. El carril `opencode/tests` busca el 100% de `gns3core.py`; cuando
-  entre, esta columna se actualiza.
+- Consulta [COMANDOS.md](COMANDOS.md) para flags y ejemplos; [API-COVERAGE.md](API-COVERAGE.md)
+  para el endpoint que hay detrás.
 
 ## Servidor y proyectos
 
-| Operación | CLI (`gns3lab`) | MCP (`gns3`) | Test |
-|---|---|---|---|
-| Estado del servidor | `servers`, `status`, `doctor` | `gns3_status` | `test_client.py::test_alive_contra_servidor_levantado` |
-| Resolver proyecto por nombre, id o único abierto | todos los que llevan `-p` o posicional | `_resolve_project` en todas las tools | `test_client.py` (8 tests de `resolve_project`) |
-| Listar proyectos | `status` | `gns3_projects` (list) | `test_client.py::test_projects_devuelve_la_lista` |
-| Crear proyecto | `new` | `gns3_projects` (create) | — |
-| Abrir proyecto | `up`, `new`, `port` | `gns3_projects` (open); el resto abre solo | — |
-| Cerrar proyecto | `down` | `gns3_projects` (close) | — |
-| Borrar proyecto | — | `gns3_projects` (delete) | — |
-| Exportar `.gns3p` | `export`, `port` | `gns3_project_io` (export) | — |
-| Importar `.gns3p` | `import`, `port` | `gns3_project_io` (import) | — |
-| Duplicar proyecto | — | `gns3_project_io` (duplicate: export + import) | — |
+| Operación | CLI (`gns3lab`) | MCP (`gns3`) |
+|---|---|---|
+| Estado del servidor | `servers`, `status`, `doctor` | `gns3_status` |
+| Version v1 | `version-v1` | `gns3_status` (`version_v1`) |
+| Estadísticas de computes | `stats` | `gns3_statistics` |
+| Listar proyectos | `status` | `gns3_projects` (list) |
+| Crear proyecto | `new` | `gns3_projects` (create) |
+| Abrir / cerrar | `up`, `down` | `gns3_projects` (open/close); el resto abre solo |
+| Borrar proyecto | — | `gns3_projects` (delete) |
+| Renombrar / actualizar | — | `gns3_projects` (update) |
+| Duplicar proyecto | `project duplicate` | `gns3_project_io` (duplicate) |
+| Cargar `.gns3` desde ruta | `project load` | `gns3_project_io` (load) |
+| Estadísticas del proyecto | `project stats` | `gns3_project_stats` |
+| Ficheros del proyecto | `project file get|put` | `gns3_project_files` (get/put) |
+| Exportar / importar `.gns3p` | `export`, `import`, `port` | `gns3_project_io` (export/import) |
+| Kit de examen | `examen setup|verify|reset|informe` | `gns3_informe` |
 
 ## Computes, imágenes y catálogo
 
-| Operación | CLI (`gns3lab`) | MCP (`gns3`) | Test |
-|---|---|---|---|
-| Listar computes | `doctor` | `gns3_status` (resumen) | — |
-| Detalle de un compute | `compute [id]`* | `gns3_compute`* | — |
-| Estadísticas del servidor | `stats`* | `gns3_statistics`* | — |
-| Listar imágenes | `images` (qemu) | `gns3_images` (qemu) | — |
-| Subir imagen o disco | `upload` | `gns3_upload` | — |
-| Listar símbolos | `symbols`* | `gns3_symbols`* | — |
-| Listar appliances | `appliances`* | `gns3_appliances`* | — |
-| Rutas y binarios del servidor local | — | `gns3_server_paths` | — |
+| Operación | CLI (`gns3lab`) | MCP (`gns3`) |
+|---|---|---|
+| Listar / detalle de compute | `compute [id]` | `gns3_compute` (list/info) |
+| Alta, edición, borrado de compute | `compute add|update|rm` | `gns3_compute` (add/update/delete) |
+| Puertos del compute | `compute ports` | `gns3_compute` (ports) |
+| Auto idlepc del compute | `compute idlepc` | `gns3_compute` (idlepc) |
+| Pasarela al compute | `compute action` | `gns3_compute` (call) |
+| Listar imágenes | `images [--emulator]` | `gns3_images` |
+| Subir imagen o disco | `upload` | `gns3_upload` |
+| Símbolos | `symbols`, `symbol …` | `gns3_symbols` (list/dimensions/raw/default/upload) |
+| Appliances | `appliances` | `gns3_appliances` |
+| Rutas y binarios del servidor | — | `gns3_server_paths` |
 
 ## Plantillas
 
-| Operación | CLI (`gns3lab`) | MCP (`gns3`) | Test |
-|---|---|---|---|
-| Listar plantillas | `templates`, `template list` | `gns3_templates`, `gns3_template` (list) | — |
-| Crear plantilla | `template create` | `gns3_template` (create) | — |
-| Editar plantilla | `template update`* | — (`gns3_template` create ya fija `console`) | — |
-| Borrar plantilla | `template delete` | `gns3_template` (delete) | — |
-| Instanciar plantilla | `node add --template` | `gns3_template` (apply), `gns3_nodes` (add) | — |
+| Operación | CLI (`gns3lab`) | MCP (`gns3`) |
+|---|---|---|
+| Listar | `templates`, `template list` | `gns3_templates`, `gns3_template` (list) |
+| Crear | `template create` | `gns3_template` (create) |
+| Editar | `template update` | `gns3_template` (update) |
+| Borrar | `template delete` | `gns3_template` (delete) |
+| Duplicar | `template duplicate` | `gns3_template` (duplicate) |
+| Base-config | `template base-config` | `gns3_template` (base-config) |
+| Instanciar | `node add --template` | `gns3_template` (apply), `gns3_nodes` (add), `gns3_node_edit` (create) |
 
 ## Nodos
 
-| Operación | CLI (`gns3lab`) | MCP (`gns3`) | Test |
-|---|---|---|---|
-| Listar nodos y estado | `status` | `gns3_nodes` (list), `gns3_topology` | `test_client.py::test_nodes_pide_el_proyecto_correcto` |
-| Añadir nodo | `node add` | `gns3_nodes` (add), `gns3_node_edit` (create) | — |
-| Arrancar, parar, recargar, suspender | `up`, `down` (todo); `node start/stop/reload/suspend`* | `gns3_nodes` (start/stop/reload/suspend), `gns3_node_action`* | — |
-| Borrar nodo | `node rm` | `gns3_nodes` (delete), `gns3_node_edit` (delete) | — |
-| Duplicar nodo | `node dup` | `gns3_node_edit` (duplicate) | — |
-| Editar propiedades | `node props` | `gns3_node_edit` (update) | — |
-| VLANs del switch | `node switch` | `gns3_node_edit` (switch) | — |
-| Clonar disco | `node disk` | `gns3_node_edit` (clone_disk) | — |
-| Ver la línea de comandos de QEMU | — | `gns3_command_line`* | — |
-| Leer fichero del nodo | — | `gns3_node_files` (sin `content`) | — |
-| Escribir fichero del nodo | — | `gns3_node_files` (con `content`) | `test_files.py` (3 tests) |
+| Operación | CLI (`gns3lab`) | MCP (`gns3`) |
+|---|---|---|
+| Listar nodos y estado | `status` | `gns3_nodes` (list), `gns3_topology` |
+| Añadir nodo | `node add` | `gns3_nodes` (add), `gns3_node_edit` (create) |
+| Arrancar, parar, recargar, suspender | `node start|stop|reload|suspend`; `up`/`down` en bloque | `gns3_nodes`, `gns3_node_action` |
+| Reanudar / pausar / despausar | `node resume|pause|unpause` | `gns3_node_action` |
+| Acción masiva | `all start|stop|suspend|reload` | `gns3_nodes_bulk` |
+| Borrar nodo | `node rm` | `gns3_nodes` (delete), `gns3_node_edit` (delete) |
+| Duplicar nodo | `node dup` | `gns3_node_edit` (duplicate) |
+| Editar propiedades | `node props` | `gns3_node_edit` (update) |
+| VLANs del switch | `node switch` | `gns3_node_edit` (switch) |
+| Clonar disco | `node disk` | `gns3_node_edit` (clone_disk) |
+| Redimensionar disco | `node disk-resize` | `gns3_node_edit` (disk-resize) |
+| Enlaces del nodo | `node links` | `gns3_node_edit` (links) |
+| Idlepc del nodo | `node idlepc` | `gns3_node_edit` (idlepc) |
+| Línea de comandos del nodo | `node line` | `gns3_command_line` |
+| Leer / escribir fichero del nodo | — | `gns3_node_files` |
 
-## Enlaces y capturas
+## Enlaces, dibujos y snapshots
 
-| Operación | CLI (`gns3lab`) | MCP (`gns3`) | Test |
-|---|---|---|---|
-| Listar enlaces | `link list` | `gns3_links` (list), `gns3_link_edit` (list) | — |
-| Crear enlace | `link add` | `gns3_links` (add), `gns3_link_edit` (add) | — |
-| Borrar enlace | `link rm` | `gns3_links` (delete), `gns3_link_edit` (delete) | — |
-| Editar enlace (filtros) | `link edit`* | `gns3_links` (update)* | — |
-| Iniciar o parar captura | `capture start/stop`* | `gns3_capture` (start/stop) | — |
-| Descargar y resumir el pcap | `capture pcap`* | `gns3_capture` (read) | — |
-| Nombrar el fichero de captura | — | `gns3_capture` (`file_name`)* | — |
-
-## Dibujos y snapshots
-
-| Operación | CLI (`gns3lab`) | MCP (`gns3`) | Test |
-|---|---|---|---|
-| Listar dibujos | — | `gns3_drawings` (list) | — |
-| Crear nota o rectángulo | `draw` | `gns3_drawings` (text/rect) | — |
-| Editar dibujo | `draw edit`* | `gns3_drawings` (update)* | — |
-| Borrar un dibujo | `draw rm`* | `gns3_drawings` (delete) | — |
-| Borrar todos los dibujos | — | `gns3_drawings` (clear) | — |
-| Listar snapshots | `snap list` | `gns3_snapshots` (list) | — |
-| Crear snapshot | `snap create` | `gns3_snapshots` (create) | — |
-| Restaurar snapshot | `snap restore` | `gns3_snapshots` (restore) | — |
-| Borrar snapshot | `snap delete`* | `gns3_snapshots` (delete) | — |
+| Operación | CLI (`gns3lab`) | MCP (`gns3`) |
+|---|---|---|
+| Listar enlaces | `link list` | `gns3_links` (list), `gns3_link_edit` (list) |
+| Crear enlace | `link add` | `gns3_links` (add), `gns3_link_edit` (add) |
+| Editar enlace | `link edit` | `gns3_links` (update) |
+| Borrar enlace | `link rm` | `gns3_links`, `gns3_link_edit` (delete) |
+| Filtros disponibles | `link filters` | `gns3_links` (filters) |
+| Listar / crear dibujo | `draw`, `draw list` | `gns3_drawings` (list/text/rect) |
+| Editar / borrar dibujo | `draw edit|rm` | `gns3_drawings` (update/delete) |
+| Borrar todos los dibujos | — | `gns3_drawings` (clear) |
+| Snapshots | `snap list|create|restore|delete` | `gns3_snapshots` (list/create/restore/delete) |
 
 ## Consola y pantalla
 
-| Operación | CLI (`gns3lab`) | MCP (`gns3`) | Test |
-|---|---|---|---|
-| Ejecutar comandos por consola telnet | `exec` | `gns3_exec`, `gns3_console` | `test_console.py` (5 tests) |
-| Consola interactiva por stdin | `console`* | — | — |
-| Leer la pantalla con OCR | `shot` | `gns3_monitor` (text/shot) | `test_qemu.py` (HMP); OCR sin test |
-| Escribir texto con `sendkey` | `type` | `gns3_monitor` (type) | `test_qemu.py` |
-| Pulsar teclas | `key` | `gns3_monitor` (key) | `test_qemu.py`, `test_keymap.py` |
-| Comando HMP crudo, estado o reset | `mon` | `gns3_monitor` (cmd/status/reset) | `test_qemu.py` |
+| Operación | CLI (`gns3lab`) | MCP (`gns3`) |
+|---|---|---|
+| Comandos por consola telnet | `exec` | `gns3_exec`, `gns3_console` |
+| Consola interactiva por stdin | `console` | — |
+| Reset de una consola / de todas | `console reset`, `console reset-all` | `gns3_console_control` (reset/reset-all) |
+| URL WebSocket de la consola | `console url` | `gns3_console_control` (url) |
+| Leer pantalla con OCR | `shot` | `gns3_monitor` (text/shot) |
+| Escribir texto | `type` | `gns3_monitor` (type) |
+| Pulsar teclas | `key` | `gns3_monitor` (key) |
+| HMP crudo, estado o reset | `mon` | `gns3_monitor` (cmd/status/reset) |
+
+## Capturas, NIO y eventos
+
+| Operación | CLI (`gns3lab`) | MCP (`gns3`) |
+|---|---|---|
+| Captura de enlace | `capture <link> start|stop|pcap` | `gns3_capture` (start/stop/read) |
+| Captura por puerto | `capture-port <nodo> start|stop|pcap` | `gns3_port_capture` |
+| NIO de un puerto | `nio get|add|rm` | `gns3_nio` (get/set/delete) |
+| Notificaciones HTTP | `notify` | `gns3_notifications` |
+| Eventos WebSocket | `watch` | `gns3_events_url`, `gns3_events` (url/listen) |
+| Lote de tools | — | `gns3_batch` |
+| Informe Markdown | `examen informe` | `gns3_informe` |
 
 ## Sólo en un lado
 
 **Sólo CLI:** `fix` (repara un `.gns3p` importado), `port` (porta proyecto y discos entre
-servidores), `test` (conectividad VPCS), `servers` (lista de servidores de la config),
-`doctor --json` y `console`* (consola interactiva por stdin; el MCP no la tiene).
+servidores), `test` (conectividad VPCS), `servers`, `doctor` y `console` interactiva.
 
-**Sólo MCP:** `gns3_topology`, `gns3_server_paths`, borrar proyecto, duplicar proyecto (como
-export + import), leer y escribir ficheros de nodo, `gns3_drawings` (clear) y el nombre de
-fichero de captura.
+**Sólo MCP:** `gns3_topology`, `gns3_server_paths`, `gns3_node_files`, borrar y renombrar
+proyectos, `gns3_drawings` (clear), `gns3_batch` y las resources/prompts.
 
-**En ninguno de los dos:** estadísticas de proyecto (`GET /v2/projects/{id}/stats`), duplicado
-directo por endpoint (proyecto y plantilla), acciones de nodo en lote, notificaciones, gestión
-de computes (alta, edición, borrado, puertos, idlepc), descarga de imágenes por HTTP,
-`base-config` de plantillas, `available_filters` de enlaces, detalle de un enlace o de un
-dibujo, `console/reset` y `console/ws`. Las rutas están en
-[API-COVERAGE.md](API-COVERAGE.md#endpoints-de-2261-que-este-repo-no-cubre).
+## Cómo se comprueba
+
+```bash
+# 46 comandos: claves del dict handlers
+./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l
+
+# 42 tools: decoradores @mcp.tool
+env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python -c \
+  "import asyncio,gns3_mcp_server as s; print(len(asyncio.run(s.mcp.list_tools())))"
+```
+
+Superficie por endpoint en [API-COVERAGE.md](API-COVERAGE.md); referencias de flags en
+[COMANDOS.md](COMANDOS.md).

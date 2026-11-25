@@ -1,5 +1,7 @@
 # NIO y capturas: enlace frente a puerto
 
+Secciones: Captura de enlace · Captura por puerto · NIO de un puerto · Qué significa un 500 del compute · Estado verificado.
+
 Hay dos capturas distintas. La de **enlace** es del controlador. La de **puerto** se reenvía al
 compute. Confundirlas da un 404 o un 500. El informe
 [REA de ubridge](research/ubridge-console-enganche.md) explica por qué el enganche de la
@@ -10,12 +12,11 @@ consola pasa por la API del compute y no por el binario ubridge.
 | Dueño de la ruta | controller (`:3080`) | compute local, vía proxy `/v2/computes/local/…` |
 | Endpoint | `POST /v2/projects/{id}/links/{lid}/start_capture`, `stop_capture`; `GET …/pcap` | `POST /v2/computes/local/projects/{id}/{emu}/nodes/{nid}/adapters/{a}/ports/{p}/start_capture`, `stop_capture`; `GET …/pcap` |
 | Método del núcleo | `link_capture(pid, lid, action, file_name)` (`start\|stop\|pcap`) | `port_capture(pid, nid, adapter, port, action, file_name, emulator)` (`start_capture\|stop_capture\|pcap`) |
-| CLI | `gns3lab capture <link_id> start\|stop\|pcap [-p PROY]` (existe) | `gns3lab capture-port <nodo> start\|stop\|pcap --adapter N --port N [-p PROY]` (en curso) |
-| Tool MCP | `gns3_capture(action="start\|stop\|read", …)` (existe) | `gns3_port_capture(node, adapter, port, action="start\|stop\|pcap", …)` (en curso) |
+| CLI | `gns3lab capture <link_id> start\|stop\|pcap [-p PROY]` | `gns3lab capture-port <nodo> start\|stop\|pcap --adapter N --port N [-p PROY]` |
+| Tool MCP | `gns3_capture(action="start\|stop\|read", …)` | `gns3_port_capture(node, adapter, port, action="start\|stop\|pcap", …)` |
 
-«En curso» = contrato acordado en `orchestration/BRIEF-niocli.md` y
-`orchestration/BRIEF-niomcp.md`. El método del núcleo existe; el verbo de CLI y la tool aún no
-están en este árbol (`gns3lab --help` y `mcp.list_tools()` no los listan).
+Las dos superficies existen en este árbol. `capture-port` pasa por el compute local y necesita el
+nodo arrancado para capturar; `capture` es del controlador y funciona con computes remotos.
 
 ## Captura de enlace
 
@@ -58,10 +59,10 @@ compute con `/nio` al final:
 | `delete=True` | `DELETE` | borra el NIO |
 
 El contrato de CLI es `gns3lab nio get|add|rm …` y el de MCP
-`gns3_nio(action="get|set|delete", …)` (ambos en curso). **Límite real**: crear un NIO UDP es
-`POST` en el handler QEMU y sólo acepta `nio_udp`; cambiar `lport`/`rhost`/`rport` exige borrar
-y recrear. El núcleo todavía no expone ese `POST`, así que `add`/`set` no debe leerse como
-«crear un NIO UDP nuevo» sin verificar el verbo que usa la tool cuando se integre.
+`gns3_nio(action="get|set|delete", …)`. **Límite real**: crear un NIO UDP es `POST` en el
+handler QEMU y sólo acepta `nio_udp`; cambiar `lport`/`rhost`/`rport` exige borrar y recrear.
+El núcleo no expone ese `POST`, así que `nio add` (que hace `PUT`) no crea un NIO UDP nuevo:
+sólo actualiza `filters` y `suspend` sobre el NIO existente.
 
 Body mínimo del NIO, según `gns3server/schemas/nio.py:26-56`:
 
@@ -93,8 +94,8 @@ a 409; un 500 nunca es un estado normal de NIO/captura. Ver
 
 Sin servidor GNS3: los métodos `port_nio`, `port_capture`, `link_capture`, `_emulator_for` y
 `notifications_ws_url` están en `gns3core.py`; `API_V2_MAP` declara 12 áreas, `nio_ports` entre
-ellas. La CLI y el MCP de este árbol no tienen aún los contratos `nio`, `capture-port`,
-`gns3_nio` ni `gns3_port_capture`. Los verbos y handlers citados se leyeron del `gns3server`
+ellas. La CLI tiene `nio`, `capture-port` y `capture`; el MCP tiene `gns3_nio`,
+`gns3_port_capture` y `gns3_capture`. Los verbos y handlers citados se leyeron del `gns3server`
 2.2.61 instalado en esta máquina, no de una sesión de captura real.
 
 Matriz endpoint a endpoint en [API-COVERAGE.md](API-COVERAGE.md); operaciones de GUI en

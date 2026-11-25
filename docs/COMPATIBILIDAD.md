@@ -1,5 +1,7 @@
 # Compatibilidad
 
+Secciones: Qué significa «compatibilidad total» aquí · GNS3 3.x: no se declara soporte · Límites reales · Lo que este proyecto no es.
+
 ## Qué significa «compatibilidad total» aquí
 
 Cubrir la API v2 que hace falta para **operar un laboratorio entero desde terminal**: proyectos,
@@ -14,20 +16,21 @@ los dos frentes, en [PARIDAD.md](PARIDAD.md).
 
 | Área | Qué incluye | Estado |
 |---|---|---|
-| Proyectos | listar, crear, abrir, cerrar, borrar, exportar, importar, renombrar | cubierto; faltan `stats`, `duplicate` por endpoint (el MCP lo hace como export + import) y `files/{path}` |
-| Plantillas | listar, crear, editar, borrar, instanciar | cubierto; faltan `duplicate` y `base-config` |
-| Nodos | listar, crear, editar, borrar, duplicar, arrancar/parar/recargar/suspender, ficheros, VLANs, disco | cubierto; faltan acciones en lote, `resize_disk` y `console/reset` |
-| Enlaces | listar, crear, editar, borrar, captura | cubierto; falta `available_filters` |
-| Dibujos | listar, crear, editar, borrar | cubierto; editar y borrar llegan con el contrato de CLI/MCP |
-| Snapshots | listar, crear, restaurar, borrar | cubierto |
-| Computes e imágenes | listar, detalle, estadísticas, imágenes, símbolos, appliances | cubierto en el núcleo; detalle, estadísticas, símbolos y appliances llegan con los carriles CLI/MCP |
-| Consola y monitor | telnet por prompt, HMP con OCR, teclas y texto | cubierto; consola interactiva llega con el carril CLI |
+| Proyectos | listar, crear, abrir, cerrar, borrar, exportar, importar, renombrar, duplicar, cargar, estadísticas y ficheros | cubierto |
+| Plantillas | listar, crear, editar, borrar, duplicar, instanciar y `base-config` | cubierto |
+| Nodos | listar, crear, editar, borrar, duplicar, arrancar/parar/recargar/suspender/reanudar, acciones en lote, ficheros, VLANs, disco, resize, enlaces, idlepc y línea de comandos | cubierto |
+| Enlaces | listar, crear, editar, borrar, captura y `available_filters` | cubierto |
+| Dibujos | listar, crear, editar y borrar | cubierto |
+| Snapshots | listar, crear, restaurar y borrar | cubierto |
+| Computes e imágenes | listar, detalle, alta/edición/borrado, puertos, idlepc, estadísticas, imágenes, símbolos y appliances | cubierto |
+| Consola y monitor | telnet por prompt, sesión interactiva, reset, URL WS, HMP con OCR, teclas y texto | cubierto |
+| Eventos | stream HTTP acotado y WebSocket con timeout | cubierto |
+| pfSense | detectar interfaces, asignar, IP, DHCP, reglas, NAT, SSH y `config.xml` | cubierto |
 
 Los huecos concretos, agrupados por handler y con la prueba de que la ruta existe, están en
-[API-COVERAGE.md](API-COVERAGE.md#rutas-del-inventario-sin-puente-agrupadas-por-handler).
+[API-COVERAGE.md](API-COVERAGE.md#rutas-del-inventario-sin-método-en-el-núcleo).
 Las operaciones de la GUI ya portadas al núcleo, con su comando y su tool, están en
-[GUI-PORTADA.md](GUI-PORTADA.md). Muchas de esas filas llevan «en curso»: el método del núcleo
-existe, pero el verbo de CLI o la tool MCP están llegando en los carriles paralelos.
+[GUI-PORTADA.md](GUI-PORTADA.md).
 
 ## GNS3 3.x: no se declara soporte
 
@@ -71,8 +74,6 @@ Mientras eso no exista y no se pruebe, la respuesta es la misma: **sólo GNS3 2.
 - **El monitor HMP es local.** `shot`, `type`, `key` y `mon` localizan el proceso QEMU en
   `/proc` y hablan con su `-monitor tcp` en `127.0.0.1`; necesitan el nodo arrancado en este
   equipo y `/proc` legible.
-- **`gns3lab snap restore` manda el nombre en la ruta donde la API espera `snapshot_id`.** El
-  MCP `gns3_snapshots` sí resuelve el id por nombre. Para restaurar, usa el MCP o pasa el id.
 - **Las capturas se guardan y se resumen, no se diseccionan.** Se descarga el `.pcap` y, si hay
   `tshark`, se muestran las primeras líneas; el análisis de paquetes es de `tshark`/Wireshark.
 
