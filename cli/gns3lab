@@ -146,6 +146,164 @@ try:
 except (ImportError, ValueError):
     core = None
 
+# Versión local y comprobación no bloqueante de releases/tags en GitHub.
+VERSION_FILE = CORE_DIR / "VERSION"
+UPDATE_REPO = "PabloJustDevelops/gns3-toolkit"
+UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}"
+UPDATE_TTL = 24 * 60 * 60
+UPDATE_TIMEOUT = 3
+UPDATE_DISABLE_ENV = "GNS3LAB_NO_UPDATE_CHECK"
+
+
+def local_version() -> str:
+    """Versión instalada; `VERSION` es la única fuente de verdad."""
+    try:
+        texto = VERSION_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "0.0.0"
+    return texto.removeprefix("v") or "0.0.0"
+
+
+def _version_tuple(texto):
+    """`vX.Y.Z` o `X.Y.Z` a tupla numérica; cualquier otra cosa, None."""
+    if texto is None:
+        return None
+    coincidencia = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", str(texto).strip(), re.I)
+    if not coincidencia:
+        return None
+    return tuple(int(parte) for parte in coincidencia.groups())
+
+
+def _version_normalizada(texto):
+    partes = _version_tuple(texto)
+    return ".".join(str(parte) for parte in partes) if partes else None
+
+
+def _version_mayor(publicada, instalada) -> bool:
+    a, b = _version_tuple(publicada), _version_tuple(instalada)
+    return bool(a and b and a > b)
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _iso(epoch: float) -> str:
+    import datetime
+
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat(
+        timespec="seconds")
+
+
+def _cache_file() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "gns3-toolkit" / "update-check.json"
+
+
+def _read_cache():
+    try:
+        datos = json.loads(_cache_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(datos, dict) or not isinstance(datos.get("epoch"), (int, float)):
+        return None
+    return datos
+
+
+def _write_cache(datos: dict) -> None:
+    ruta = _cache_file()
+    try:
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(json.dumps({"epoch": _now(), **datos}, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except OSError:
+        pass  # la caché es una comodidad, nunca un requisito
+
+
+def _get_json(url: str):
+    import urllib.request
+
+    peticion = urllib.request.Request(
+        url, headers={"User-Agent": f"gns3lab/{local_version()}",
+                      "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(peticion, timeout=UPDATE_TIMEOUT) as respuesta:
+        return json.loads(respuesta.read().decode("utf-8"))
+
+
+def _fetch_latest() -> tuple[str | None, str, str | None]:
+    """Última versión publicada: release, o tags si la release da 404."""
+    import urllib.error
+
+    try:
+        datos = _get_json(f"{UPDATE_API}/releases/latest")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+        tags = _get_json(f"{UPDATE_API}/tags")
+        nombres = [t.get("name") for t in tags if isinstance(t, dict)] \
+            if isinstance(tags, list) else []
+        candidatas = [(v, _version_normalizada(n)) for n in nombres
+                      if (v := _version_tuple(n)) is not None]
+        if not candidatas:
+            return None, "tags", "sin tags con versión X.Y.Z"
+        return max(candidatas)[1], "tags", None
+    if not isinstance(datos, dict):
+        raise ValueError("respuesta de releases inesperada")
+    latest = _version_normalizada(datos.get("tag_name"))
+    return latest, "releases", None if latest else "la release no tiene tag X.Y.Z"
+
+
+def check_updates() -> dict:
+    """Comprueba si hay versión nueva; cualquier fallo se devuelve en `error`."""
+    import urllib.error
+
+    ahora = _now()
+    instalada = local_version()
+    desactivado = os.environ.get(UPDATE_DISABLE_ENV) == "1"
+    cache = _read_cache()
+    if cache is not None and (desactivado or ahora - float(cache["epoch"]) < UPDATE_TTL):
+        datos = {campo: cache.get(campo)
+                 for campo in ("latest", "source", "checked_at", "error")}
+        datos["installed"] = instalada
+        datos["update_available"] = _version_mayor(datos["latest"], instalada)
+        if desactivado:
+            datos["note"] = ("sin comprobación remota "
+                             f"({UPDATE_DISABLE_ENV}=1); datos de la caché local")
+        return datos
+    if desactivado:
+        return {"installed": instalada, "latest": None, "update_available": False,
+                "source": "none", "checked_at": _iso(ahora), "error": None,
+                "note": f"sin comprobación remota ({UPDATE_DISABLE_ENV}=1)"}
+    try:
+        latest, source, nota = _fetch_latest()
+        datos = {"installed": instalada, "latest": latest,
+                 "update_available": _version_mayor(latest, instalada),
+                 "source": source, "checked_at": _iso(ahora), "error": None}
+        if nota:
+            datos["note"] = nota
+        _write_cache(datos)
+        return datos
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        motivo = str(exc) or exc.__class__.__name__
+        return {"installed": instalada, "latest": None, "update_available": False,
+                "source": "none", "checked_at": _iso(ahora),
+                "error": (f"no se pudo comprobar actualizaciones en {UPDATE_API}: "
+                          f"{motivo}. Revisa la conexión o define "
+                          f"{UPDATE_DISABLE_ENV}=1 para omitir la consulta.")}
+
+
+def _say_updates(say, updates: dict) -> None:
+    say("")
+    say("  actualizaciones")
+    say(f"    installed: {updates.get('installed')}")
+    say(f"    latest: {updates.get('latest') or 'desconocida'}")
+    say(f"    update_available: {'sí' if updates.get('update_available') else 'no'}")
+    if updates.get("note"):
+        say(f"    nota: {updates['note']}")
+    if updates.get("error"):
+        say(f"    error: {updates['error']}")
+
+
 DEFAULT_CONF = {
     "servers": {
         "local": {"url": "http://127.0.0.1:3080", "auth": "from-gns3-conf"},
@@ -2718,12 +2876,20 @@ def cmd_doctor(args, conf):
     def say(texto: str = "") -> None:
         lineas.append(texto)
 
+    if getattr(args, "check_updates", False):
+        updates = check_updates()
+        report["updates"] = updates
+        _say_updates(say, updates)
+
     say(f"servidor {s.name} ({s.url})")
     if not s.alive():
         if args.json:
             report.update({"alive": False, "ok": False})
             print(json.dumps(report, ensure_ascii=False, indent=2))
         else:
+            if getattr(args, "check_updates", False):
+                for linea in lineas:
+                    print(linea)
             print("  NO responde: arráncalo (gns3server) antes de nada", file=sys.stderr)
         return 2
     report["alive"] = True
@@ -4046,6 +4212,8 @@ def main() -> int:
                     help="salida JSON uniforme para cualquier comando (antes del subcomando)")
     ap.add_argument("--server", "-s", default=None,
                     help="servidor configurado (por defecto, default_server)")
+    ap.add_argument("--version", action="version", version=local_version(),
+                    help="muestra la versión local (VERSION) y sale")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("servers", help="lista los servidores configurados y si responden")
@@ -4340,6 +4508,8 @@ def main() -> int:
     p = sub.add_parser("doctor", help="comprueba servidor, proyecto, nodos y herramientas")
     p.add_argument("project", nargs="?")
     p.add_argument("--json", action="store_true", help="salida JSON (mismo contenido)")
+    p.add_argument("--check-updates", action="store_true",
+                   help="consulta si hay versión nueva (no bloqueante, caché 24 h)")
 
     p = sub.add_parser("examen", help="monta, verifica o reinicia el kit de examen")
     p.add_argument("action", choices=["setup", "verify", "reset", "informe"])

@@ -18,6 +18,7 @@ escribieron.
 | [NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md) | diferencia entre captura de enlace y de puerto, NIO y errores del compute | `port_nio()`, `port_capture()`, `link_capture()` | `pytest -q tests/test_client_nio.py` |
 | [EVENTOS.md](EVENTOS.md) | notificaciones HTTP y WebSocket, formato y eventos esperados | `notifications()`, `notifications_ws_url()`, handlers de `gns3server` | `gns3lab watch --seconds 5`; `pytest -q tests/test_mcp_resources.py` |
 | [PFSENSE-NATIVO.md](PFSENSE-NATIVO.md) | llevar pfSense por `config.xml` y SSH, con el menú sólo como último recurso | `pfsense.py`, `cli/gns3lab pf` | `pytest -q tests/test_pfsense.py tests/test_cli_pf.py`; `gns3lab pf --help` |
+| [UPDATES.md](UPDATES.md) | aviso de versión nueva por CLI, caché y publicación de releases | `VERSION` y `check_updates()` en `cli/gns3lab` | `pytest -q tests/test_update_check.py`; `gns3lab doctor --check-updates --json` |
 | [MCP-VELOCIDAD.md](MCP-VELOCIDAD.md) | qué hace `gns3_batch`, qué paraleliza y cómo medirlo | `gns3_batch()` y `_batch_is_read_only()` | el bloque `Cómo medirlo` del documento |
 | [EXAMEN.md](EXAMEN.md) | guion ordenado del examen, con la salida que confirma cada paso | CLI, `pfsense.py` y `examen` | `gns3lab examen verify`; `gns3lab doctor` |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | síntoma literal, causa y arreglo | mensajes del código y de la API | `grep` del mensaje en el código; `gns3lab doctor` |

@@ -42,6 +42,7 @@ hermes mcp add gns3 --command <repo>/.venv/bin/python --args <repo>/gns3_mcp_ser
 ```bash
 gns3lab servers                          # qué servidores hay y si responden
 gns3lab doctor examen-kit                # servidor, computes, libvirt, discos, NAT, monitores
+gns3lab doctor --check-updates           # lo anterior + aviso de versión nueva (sin instalar nada)
 gns3lab shot PF1 -p examen-kit           # la pantalla del nodo, como texto
 gns3lab exec PC1 "ip dhcp" "show ip" -p examen-kit
 gns3lab -s clase port examen-kit --name "Pablo Rodriguez" --start
@@ -103,7 +104,7 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 - El puerto de consola no se puede fijar por `PUT` en un nodo: se fija en la plantilla.
 Declaración de alcance: 12 áreas, 42 tools y 46 comandos, recalculados por `scripts/verify.py`.
 - El OCR lee bien 720x400 con fuente VGA; no espera texto pequeño.
-- Tests: 593 passed, cobertura 100 % de `gns3core.py` (720 sentencias, 0 miss) y 100 % de
+- Tests: 611 passed, cobertura 100 % de `gns3core.py` (720 sentencias, 0 miss) y 100 % de
   `pfsense.py` (435 sentencias, 0 miss), con dobles
   de HTTP, telnet y HMP y sin servidor GNS3. La matriz de lo que cubre cada
   endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).

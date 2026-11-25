@@ -88,15 +88,17 @@ Confirma bloques `gateway` y `conectividad` sin ningún `FALLO`. La prueba es `0
 ### `doctor`
 
 ```text
-usage: gns3lab doctor [-h] [--json] [project]
+usage: gns3lab doctor [-h] [--json] [--check-updates] [project]
 ```
 
 Chequeo integral: servidor y versión, computes, binarios (`tesseract`, `qemu-img`, `tshark`,
 `sshpass`), `libvirtd`, Pillow, proyecto, nodos, monitor HMP, discos compartidos y nodo NAT.
+Con `--check-updates` añade si hay versión nueva; sin el flag no toca la red.
 
 ```bash
 gns3lab doctor examen-kit
 gns3lab --json doctor examen-kit
+gns3lab doctor --check-updates --json
 ```
 
 Confirma un bloque `resumen` con `sin hallazgos` y código 0. Cada línea `- ...` es un problema.
