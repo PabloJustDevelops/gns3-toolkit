@@ -103,7 +103,7 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 - El puerto de consola no se puede fijar por `PUT` en un nodo: se fija en la plantilla.
 Declaración de alcance: 12 áreas, 42 tools y 46 comandos, recalculados por `scripts/verify.py`.
 - El OCR lee bien 720x400 con fuente VGA; no espera texto pequeño.
-- Tests: 588 passed, cobertura 100 % de `gns3core.py` (720 sentencias, 0 miss) y 100 % de
+- Tests: 593 passed, cobertura 100 % de `gns3core.py` (720 sentencias, 0 miss) y 100 % de
   `pfsense.py` (435 sentencias, 0 miss), con dobles
   de HTTP, telnet y HMP y sin servidor GNS3. La matriz de lo que cubre cada
   endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).
