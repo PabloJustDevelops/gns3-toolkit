@@ -1,9 +1,10 @@
 # Cobertura de la API v2
 
-`gns3core.API_V2_MAP` declara **11 áreas**: `server`, `computes`, `projects`, `templates`,
-`nodes`, `links`, `drawings`, `snapshots`, `symbols`, `gui_admin` y `emulators` (las 8 originales
-más las tres añadidas con la GUI operativa). Esto es lo que hay detrás de cada una en este árbol
-(2026-11-25): método del núcleo, verbo de `gns3lab`, tool MCP y test.
+`gns3core.API_V2_MAP` declara **12 áreas**: `server`, `computes`, `projects`, `templates`,
+`nodes`, `links`, `drawings`, `snapshots`, `symbols`, `gui_admin`, `emulators` y `nio_ports` (las
+8 originales, tres añadidas con la GUI operativa y una con NIO/capturas por puerto). Esto es lo
+que hay detrás de cada una en este árbol (2026-11-25): método del núcleo, verbo de `gns3lab`,
+tool MCP y test.
 
 **Cómo está verificado.** Servidor GNS3 2.2.61 en `http://127.0.0.1:3080`, sólo `GET` de
 lectura: `200` = ruta viva; `405` o `403` = ruta viva con otro método; `409` = captura no
@@ -17,9 +18,10 @@ iniciada; timeout = descarga o stream en curso. El inventario se contrastó con
 - `contrato`: nombre acordado en `orchestration/BRIEF-cli.md` o `BRIEF-mcp-paridad.md`; ese
   carril aún no está en este árbol.
 - `pendiente`: sin test en `tests/`.
-- `en curso`: nombre acordado en `BRIEF-guicli.md`/`BRIEF-guimcp.md` que aún no está en este
-  árbol (`gns3lab --help` da 30 subcomandos y `mcp.list_tools()` da 26 tools, sin esas acciones).
-  El método del núcleo sí existe y está verificado.
+- `en curso`: nombre acordado en los briefs de carril que aún no está en este árbol. Medido
+  aquí: `gns3lab --help` da 37 subcomandos y `mcp.list_tools()` da 34 tools; ni `nio`,
+  `capture-port`, `watch`, `gns3_nio`, `gns3_port_capture` ni `gns3_events` figuran en esas
+  listas. El método del núcleo sí existe y está verificado.
 
 La superficie ampliada de `Client` (`computes`, `compute`, `statistics`, `symbols`,
 `appliances`, `images`, `project_get/close/delete`, `template_get/update/delete`,
@@ -170,6 +172,27 @@ y debug devuelven 405 con `GET` (ruta viva). No ejecutarlos contra el servidor r
 Sondeo: `GET /v2/computes/local/qemu/binaries` → 200; las rutas de emulador del controlador
 (`GET /v2/qemu/images`, `GET /v2/capabilities`) → 404: viven en el compute, no aquí.
 
+## nio_ports
+
+| endpoint | método de `gns3core` | CLI | MCP | test |
+|---|---|---|---|---|
+| `GET/PUT/DELETE /v2/computes/local/projects/{id}/{emu}/nodes/{nid}/adapters/{a}/ports/{p}/nio` | `port_nio()†`, `_emulator_for()†` | `nio get\|add\|rm` (en curso) | `gns3_nio(action="get\|set\|delete")` (en curso) | pendiente |
+| `POST /…/ports/{p}/start_capture`, `stop_capture` | `port_capture()†` | `capture-port start\|stop` (en curso) | `gns3_port_capture(action="start\|stop")` (en curso) | pendiente |
+| `GET /…/ports/{p}/pcap` | `port_capture(action="pcap")†` | `capture-port pcap` (en curso) | `gns3_port_capture(action="pcap")` (en curso) | pendiente |
+| `POST /v2/projects/{id}/nodes/{start\|stop\|suspend\|reload}` (en lote) | `nodes_action()†` | `all start\|stop\|suspend\|reload` (en curso) | `gns3_nodes_bulk` (en curso) | pendiente |
+| `POST /v2/projects/{id}/nodes/console/reset` (global) | `nodes_console_reset()†` | `console reset-all` (en curso) | `gns3_console_control(action="reset-all")` (en curso) | pendiente |
+| `GET /v2/computes/local/qemu/img-binaries`, `POST/PUT …/qemu/img` | `qemu_img_binaries()†`, `qemu_img_config()†` | `disk binaries\|config` (en curso) | `gns3_emulator(action="img-binaries\|img-config")` (en curso) | pendiente |
+| `GET /v2/computes/local/{virtualbox\|vmware}/vms`, `POST …/vmware/nodes/interfaces/vmnet` | `virtualbox_vms()†`, `vmware_vms()†`, `vmware_vmnet()†` | `vm vms\|vmnet` (en curso) | `gns3_emulator(action="virtualbox-vms\|vmware-vms\|vmware-vmnet")` (en curso) | pendiente |
+| `GET /v2/notifications/ws`, `/v2/projects/{id}/notifications/ws` | `notifications_ws_url()†` (compone la URL, no abre el socket) | `watch` (en curso) | `gns3_events_url`, `gns3_events` (en curso) | pendiente |
+| `GET /v1/version` | `v1_version()†` | `version-v1` (en curso) | `gns3_status` con `version_v1` (en curso) | pendiente |
+
+`node_action()` acepta además `resume`, `pause` y `unpause` (fila de `nodes`). Las acciones
+masivas, `reset-all` y `disk config` son disruptivas: los contratos de CLI y MCP exigen
+`--yes`/`confirm=True`. Sin sondeo de escritura contra el servidor real: iniciar una captura o
+cambiar un NIO modifica el laboratorio. Los verbos y los handlers se verificaron en el código de
+`gns3core.py` y en el `gns3server` 2.2.61 instalado. Detalle en
+[NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md) y [EVENTOS.md](EVENTOS.md).
+
 ## Rutas del inventario sin puente (agrupadas por handler)
 
 El fichero `orchestration/inventario-rutas-gns3.txt` tiene **361 líneas** de rutas, extraídas de
@@ -184,8 +207,10 @@ los briefs (eso se marca `en curso` en las secciones anteriores). Se separa en d
 ### Internas de compute (NIO y capturas por puerto)
 
 No son funcionalidad de usuario: son el cableado y la captura dentro del proceso de compute.
-El repo no las expone; para capturar un enlace usa la ruta del controlador
-`POST /v2/projects/{id}/links/{lid}/start_capture` (`link_capture()`).
+Antes no tenían puente; ahora el área `nio_ports` las expone en el núcleo con `port_nio()` y
+`port_capture()` contra el compute local, todavía sin consumidor CLI/MCP. Para capturar un
+enlace (ruta del controlador) usa `POST /v2/projects/{id}/links/{lid}/start_capture`
+(`link_capture()`). La tabla de handlers sigue siendo el inventario de rutas disponibles.
 
 | handler | rutas | NIO | capturas | pcap |
 |---|---:|---:|---:|---:|
@@ -217,19 +242,18 @@ repo los llama por la pasarela `/v2/computes/local/...`), `notification_handler.
 
 | handler | ruta(s) | por qué no está cubierta |
 |---|---|---|
-| `api/controller/node_handler.py` | `POST /v2/projects/{id}/nodes/{start\|stop\|suspend\|reload}` (en lote) | el repo itera nodo a nodo con `POST /nodes/{nid}/…` |
-| `api/controller/node_handler.py` | `POST /v2/projects/{id}/nodes/console/reset` (global) | `console_reset()` resetea un nodo, no todos |
 | `api/controller/node_handler.py` | `GET /v2/projects/{id}/nodes/{nid}/console/ws` | websocket: `console_ws_url()` compone la URL, no abre el canal |
-| `api/controller/notification_handler.py` | `GET /v2/notifications/ws` | websocket; `notifications()` usa `GET /v2/notifications` |
-| `api/controller/project_handler.py` | `GET /v2/projects/{id}/notifications/ws` | websocket sin método en el núcleo |
+| `api/controller/notification_handler.py` | `GET /v2/notifications/ws` | websocket; `notifications()` usa `GET /v2/notifications` y `notifications_ws_url()` sólo compone la URL |
+| `api/controller/project_handler.py` | `GET /v2/projects/{id}/notifications/ws` | websocket: `notifications_ws_url(pid)` compone la URL, no abre el canal |
 | `api/controller/server_handler.py` | `POST /v2/version` | cambia la versión informada; sin método en el núcleo |
 | `api/controller/compute_handler.py` | `GET /v2/computes/endpoint/{id}/{emulator}/{action}` y `PUT /v2/computes/{id}/{emulator}/{action}` | pasarela y descarga de imágenes; `compute_action()` cubre sólo `GET`/`POST` |
 | `api/controller/link_handler.py` | `GET /v2/projects/{id}/links/{lid}` (detalle) | `links()` da la lista; no hay `link_get()` |
 | `api/controller/drawing_handler.py` | `GET /v2/projects/{id}/drawings/{did}` (detalle) | `drawings()` da la lista; no hay `drawing_get()` |
-| `index_handler.py` | `/`, `/debug`, `/upload`, `/compute`, `/controller`, `/projects/{id}`, `/static/web-ui/{filename}`, `/v1/version` | rutas de la propia web UI, no API de operación de laboratorio |
+| `index_handler.py` | `/`, `/debug`, `/upload`, `/compute`, `/controller`, `/projects/{id}`, `/static/web-ui/{filename}` | rutas de la propia web UI, no API de operación de laboratorio. `/v1/version` sí tiene método (`v1_version()`) y está en `nio_ports` |
 
 Las rutas con método en el núcleo pero sin consumidor CLI/MCP están en las secciones
 [symbols](#symbols), [gui_admin](#gui-admin) y [emulators](#emulators), no en esta lista.
 
-Ver también [GUI-PORTADA.md](GUI-PORTADA.md), [COMPATIBILIDAD.md](COMPATIBILIDAD.md) y
-[PARIDAD.md](PARIDAD.md).
+Ver también [GUI-PORTADA.md](GUI-PORTADA.md), [NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md),
+[EVENTOS.md](EVENTOS.md), [LIMITES-CONTROLLER-COMPUTE.md](LIMITES-CONTROLLER-COMPUTE.md),
+[COMPATIBILIDAD.md](COMPATIBILIDAD.md) y [PARIDAD.md](PARIDAD.md).
