@@ -11,11 +11,13 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 
 - `gns3core.py`: `Client`, `Console` (prompt/quietud, `--More--`, `[y/n]`, `Password:`),
   `QemuMonitor` (sendkey, type_text con wake, screendump PNG, OCR), utilidades de fichero de nodo.
-- MCP: 18 tools, verificadas con `hermes mcp test gns3`.
-- CLI: 22 comandos, verificados contra GNS3 2.2.61 local (VPCS, switch, NAT, pfSense).
+- MCP: **20 tools**, verificadas con `hermes mcp test gns3` (`Connected`, 20 discovered).
+- CLI: **23 comandos** (22 + `template`), verificados contra GNS3 2.2.61 local.
+- **Tests: 54 passed** (`pytest -q`), sin servidor: dobles de HTTP, telnet y HMP.
 - Kit `examen-kit` montado y probado end-to-end: PF1 (disco clonado, arranca al menú),
-  NAT1 en WAN, SW1, PC1/PC2 con DHCP 192.168.1.100/101, `ping 8.8.8.8` con 0 % pérdida.
-- Tests: pendiente (carril abierto).
+  NAT1 en WAN, SW1, PC1/PC2 con DHCP `192.168.1.100/101`, `ping 8.8.8.8` con 0 % pérdida.
+- Docs: `docs/COMANDOS.md` (23 secciones), `EXAMEN.md`, `ARQUITECTURA.md`,
+  `TROUBLESHOOTING.md` y README reescrito.
 
 ## Hitos
 
@@ -23,10 +25,28 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 |---|---|---|
 | 1 | Núcleo + MCP + CLI funcionando | hecho |
 | 2 | Kit de examen verificado | hecho |
-| 3 | Suite de tests sin servidor | en curso |
-| 4 | Gestión de plantillas por CLI (`template`) | en curso |
-| 5 | Paridad MCP/CLI completa | en curso |
-| 6 | Publicar el repo (privado) y README de uso | propuesto |
+| 3 | Suite de tests sin servidor (54) | hecho (`opencode/tests`) |
+| 4 | Gestión de plantillas por CLI (`template`) | hecho (`opencode/template`) |
+| 5 | Paridad MCP/CLI (`template`, `link_edit`, consola única) | hecho (`opencode/mcp`) |
+| 6 | Documentación completa | hecho (`opencode/docs`) |
+| 7 | Publicar el repo (privado) | propuesto |
+
+## Bitácora de los carriles paralelos (2026-11-25)
+
+Cuatro worktrees desde `3320b4f`, agentes opencode en tabs de Herdr con modelos gratuitos
+(`opencode-go/hungerg-free` y `opencode-go/hy4-flash-free`, fijados por `opencode.json` de
+cada worktree, excluido de git). Reparto por ficheros para que no se pisaran: `tests/`,
+`cli/gns3lab`, `gns3_mcp_server.py`, `docs/`+README. Briefs en `orchestration/`.
+
+- `opencode/tests` → 53 tests + 1 xfail que documentaba un bug real de `Console.run`
+  (respondía en bucle a `[y/n]` y se comía el timeout).
+- `opencode/mcp` → `gns3_template`, `gns3_link_edit` y `gns3_console` delegando en
+  `gns3_exec`; `_telnet` eliminado.
+- `opencode/template` → `gns3lab template list|create|delete` y `doctor --json`.
+- `opencode/docs` → 1059 líneas de documentación, 0 enlaces rotos.
+
+El bug del xfail se arregló después del merge, en `master`, con el test en verde (54 passed).
+
 
 ## Límites conocidos
 
