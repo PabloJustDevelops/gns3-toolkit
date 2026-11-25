@@ -1,23 +1,53 @@
 #!/usr/bin/env python3
-"""Prueba end-to-end del MCP propio contra el GNS3 2.2.61 local."""
+"""Smoke del MCP propio en proceso, sin servidor externo.
+
+Pytest lo excluye con `collect_ignore` en `tests/conftest.py`: el modo completo
+toca un GNS3 real (arranca nodos, captura tráfico y crea snapshots).
+
+Cómo se lanza a mano:
+
+    .venv/bin/python tests/test_mcp_smoke.py --list   # solo inventario, no toca GNS3
+    .venv/bin/python tests/test_mcp_smoke.py          # modo completo (opt-in)
+
+El modo `--list` conecta al objeto `FastMCP` del repo y cuenta tools, recursos y
+prompts; no contacta con la API de GNS3. El modo completo hace lo mismo y además
+opera sobre el proyecto `lab-prueba`, así que exige GNS3 2.2.x en marcha.
+"""
+import argparse
 import asyncio
 import json
+import sys
+from pathlib import Path
 
 from fastmcp import Client
 
-SERVER = "/home/pablorg/Applications/gns3-mcp/gns3_mcp_server.py"
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import gns3_mcp_server  # noqa: E402  (necesita la raíz del repo en sys.path)
 
 
 def unwrap(r):
-    """FastMCP 4 devuelve las listas como TextContent JSON, no como structured data."""
+    """Extrae el payload de un `CallToolResult` de fastmcp 4.2.6.
+
+    Orden real de la API: `data` (salida estructurada ya deserializada),
+    `structured_content` (dict crudo) y, si no hay salida estructurada, el
+    primer bloque de texto (JSON o texto plano).
+    """
     if r.data is not None:
         return r.data
     if r.structured_content:
         return r.structured_content
-    try:
-        return json.loads(r.content[0].text)
-    except Exception:
-        return str(r.content)[:1500]
+    for block in r.content:
+        text = getattr(block, "text", None)
+        if text is None:
+            continue
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    return str(r.content)[:1500]
 
 
 def show(title, val, limit=900):
@@ -26,8 +56,18 @@ def show(title, val, limit=900):
     print(s[:limit])
 
 
+async def list_only():
+    async with Client(gns3_mcp_server.mcp) as c:
+        tools = await c.list_tools()
+        resources = await c.list_resources()
+        prompts = await c.list_prompts()
+    print(f"tools={len(tools)}")
+    print(f"resources={len(resources)}")
+    print(f"prompts={len(prompts)}")
+
+
 async def main():
-    async with Client(SERVER) as c:
+    async with Client(gns3_mcp_server.mcp) as c:
         tools = await c.list_tools()
         print(f"tools={len(tools)}: {[t.name for t in tools]}")
 
@@ -101,4 +141,16 @@ async def main():
         show("paths", unwrap(r))
 
 
-asyncio.run(main())
+def cli():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--list", action="store_true",
+                        help="solo inventario de tools/recursos/prompts; no toca GNS3")
+    args = parser.parse_args()
+    if args.list:
+        asyncio.run(list_only())
+    else:
+        asyncio.run(main())
+
+
+if __name__ == "__main__":
+    cli()
