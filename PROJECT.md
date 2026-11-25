@@ -14,9 +14,13 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
 - CLI: **42 comandos**; MCP: **39 tools** (`hermes mcp test gns3` → Connected, 39 discovered).
-- **Tests: 456 passed, cobertura 100 % de `gns3core.py`** (718 sentencias, 0 miss).
+- **Tests: 466 passed, cobertura 100 % de `gns3core.py`** (718 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
+- MCP: 39 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
+  **2 prompts** (`gns3-diagnostico`, `gns3-examen`).
+- Skill `gns3-lab-automation` reescrita como envoltorio del repo público, con backup en
+  `/tmp/gns3-skill-backup-20261125-1909.tar.gz`.
 - Documentación nueva: `docs/GUI-PORTADA.md` (50 filas), `API-COVERAGE.md` (97 filas),
   `COMPATIBILIDAD.md`, `PARIDAD.md` y el informe de REA
   `docs/research/ubridge-console-enganche.md` (23 KB). 0 enlaces rotos.
@@ -36,6 +40,8 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 | 9 | NIO/captura por puerto, acciones masivas y eventos WS (12 áreas) | hecho (`7622e25` + carriles `gk4-*`) |
 | 10 | REA de `ubridge` y vías de enganche documentadas | hecho (`opencode/rea`) |
 | 11 | Publicar el repo (público) | hecho (`PabloJustDevelops/gns3-toolkit`) |
+| 12 | Resources/prompts MCP y comando `examen` | hecho (`6c048cc` + carriles `gk5-*`) |
+| 13 | Skill delgada apuntando al repo público | hecho (`skill-sync/` aplicado con backup) |
 
 ## Bitácora de los carriles paralelos (2026-11-25)
 
@@ -118,6 +124,27 @@ Cuatro worktrees desde `fbac815`, agentes `gk4-*` con `hy4-flash-free` (CLI, doc
 Gates en `master`: 456 passed con `--cov-fail-under=100`, 39 tools conectadas, 42 comandos y
 `doctor` sin hallazgos. El mismo día se importó el kit al servidor del aula (`192.168.71.251`)
 como proyecto nuevo, sin modificar `Pablo Rodriguez Garijo` (`db277172…5cf`).
+
+### Quinta tanda: repo público, resources/prompts y skill delgada (2026-11-25)
+
+`gh repo create gns3-toolkit --public --source=. --remote=origin --push`: repo verificado como
+`PUBLIC` en `PabloJustDevelops/gns3-toolkit`. Revisión previa de secretos en ficheros versionados:
+0 coincidencias. Cuatro worktrees desde `6c048cc`, agentes `gk5-*` con `hy4-flash-free`
+(CLI, skill) y `hungerg-free` (MCP, tests).
+
+- `opencode/examcli` → `gns3lab examen setup|verify|reset`, idempotente y con `--yes` obligatorio
+  antes de cualquier consulta al servidor.
+- `opencode/mcpres` → `gns3://status`, `gns3://projects`, `gns3://templates` y el template
+  `gns3://project/{project}/topology`; prompts `gns3-diagnostico` y `gns3-examen`.
+- `opencode/skillres` → `skill-sync/` con SKILL.md, README y envoltorio `gns3.sh`. Aplicado a
+  `~/.hermes/skills/devops/gns3-lab-automation/` con backup previo; `skill_view` lo carga y el
+  envoltorio ejecuta `doctor` sin hallazgos.
+- `opencode/extests` → tests de resources/prompts y del contrato de `examen`, sin servidor.
+
+Tres fallos de integración (reset consultaba el servidor antes de exigir `--yes`, y dos prompts
+usaban sinónimos de los términos del contrato) se arreglaron en `master`; los 466 tests pasan.
+Gates finales: 466 passed con `--cov-fail-under=100`, 39 tools / 3 resources + 1 template /
+2 prompts, `hermes mcp test gns3` conectado y `examen verify --json` con salida real.
 
 
 ## Límites conocidos
