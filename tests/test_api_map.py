@@ -1,13 +1,14 @@
-"""`API_V2_MAP`: las once áreas que el núcleo dice cubrir."""
+"""`API_V2_MAP`: las doce áreas que el núcleo dice cubrir."""
 from gns3core import API_V2_MAP
 
 AREAS = {"server", "computes", "projects", "templates", "nodes",
-         "links", "drawings", "snapshots", "symbols", "gui_admin", "emulators"}
+         "links", "drawings", "snapshots", "symbols", "gui_admin", "emulators",
+         "nio_ports"}
 
 
-def test_api_v2_map_declara_las_once_areas():
+def test_api_v2_map_declara_las_doce_areas():
     assert set(API_V2_MAP) == AREAS
-    assert len(API_V2_MAP) == 11
+    assert len(API_V2_MAP) == 12
 
 
 def test_api_v2_map_no_tiene_areas_vacias():
