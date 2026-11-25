@@ -1,11 +1,12 @@
 # gns3-toolkit
 
 Operar un servidor **GNS3 2.2** desde la terminal o desde un agente MCP, sin GUI. Núcleo
-compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **34 tools** y CLI
-`gns3lab` con **37 subcomandos**.
+compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **39 tools** y CLI
+`gns3lab` con **42 subcomandos**.
 
-Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **34 tools**
-(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **37 subcomandos** (`gns3lab --help`). Las
+Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **39 tools**
+(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **42 subcomandos** (`handlers` en
+`cli/gns3lab`). Las
 acciones de la GUI operativa portadas al núcleo están en
 [docs/GUI-PORTADA.md](docs/GUI-PORTADA.md); las que aún no tienen comando o tool se marcan
 «en curso» en ese documento.
@@ -47,18 +48,19 @@ gns3lab -s clase port examen-kit --name "Pablo Rodriguez" --start
 
 ## Superficie
 
-**CLI** — 37 subcomandos: `servers compute stats symbols appliances project gns3vm notify
-symbol iou-license server emulator status up down test fix export import port images templates
-template snap console exec shot key type mon new node upload draw capture link doctor`.
-Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
+**CLI** — 42 subcomandos: `servers status up down test export import fix port compute stats
+symbols appliances images templates snap template console capture exec shot key type mon new
+node upload draw link doctor project notify symbol iou-license server emulator nio capture-port
+all disk vm watch`. Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
 
-**MCP** — 34 tools: `gns3_appliances gns3_capture gns3_command_line gns3_compute gns3_console
-gns3_console_control gns3_drawings gns3_emulator gns3_exec gns3_gns3vm gns3_images
-gns3_iou_license gns3_link_edit gns3_links gns3_monitor gns3_node_action gns3_node_edit
-gns3_node_files gns3_nodes gns3_notifications gns3_project_files gns3_project_io
-gns3_project_stats gns3_projects gns3_server gns3_server_paths gns3_snapshots gns3_statistics
-gns3_status gns3_symbols gns3_template gns3_templates gns3_topology gns3_upload`. Transporte
-stdio; credenciales leídas de `~/.config/GNS3/2.2/gns3_server.conf`.
+**MCP** — 39 tools: `gns3_appliances gns3_capture gns3_command_line gns3_compute gns3_console
+gns3_console_control gns3_drawings gns3_emulator gns3_events gns3_events_url gns3_exec
+gns3_gns3vm gns3_images gns3_iou_license gns3_link_edit gns3_links gns3_monitor gns3_nio
+gns3_node_action gns3_node_edit gns3_node_files gns3_nodes gns3_nodes_bulk gns3_notifications
+gns3_port_capture gns3_project_files gns3_project_io gns3_project_stats gns3_projects
+gns3_server gns3_server_paths gns3_snapshots gns3_statistics gns3_status gns3_symbols
+gns3_template gns3_templates gns3_topology gns3_upload`. Transporte stdio; credenciales leídas
+de `~/.config/GNS3/2.2/gns3_server.conf`.
 
 **Núcleo** — `Client` (REST `/v2`), `Console` (telnet por prompt, `--More--`, `[y/n]`,
 `Password:`), `QemuMonitor` (HMP: `sendkey`, `screendump`, `system_reset`), `ocr`. Sin

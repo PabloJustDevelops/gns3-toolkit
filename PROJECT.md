@@ -12,10 +12,11 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 - `gns3core.py`: **12 áreas** de la API v2 (`API_V2_MAP`): las 11 de la GUI operativa más
   `nio_ports` (NIO y captura por puerto, acciones masivas, `resume`/`pause`, qemu img, VMs
   invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
-  `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) en curso.
-- CLI: **36 comandos**; MCP: **34 tools** (`hermes mcp test gns3` → Connected, 34 discovered).
-- **Tests: 416 passed, cobertura 100 % de `gns3core.py`** (677 sentencias, 0 miss).
-- Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**.
+  `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
+- CLI: **42 comandos**; MCP: **39 tools** (`hermes mcp test gns3` → Connected, 39 discovered).
+- **Tests: 456 passed, cobertura 100 % de `gns3core.py`** (718 sentencias, 0 miss).
+- Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
+  del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
 - Documentación nueva: `docs/GUI-PORTADA.md` (50 filas), `API-COVERAGE.md` (97 filas),
   `COMPATIBILIDAD.md`, `PARIDAD.md` y el informe de REA
   `docs/research/ubridge-console-enganche.md` (23 KB). 0 enlaces rotos.
@@ -32,7 +33,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 | 6 | Documentación completa | hecho (`opencode/docs`, `opencode/covdocs`) |
 | 7 | Cobertura total de la API v2 operativa (8/8 áreas) | hecho (`bc75bc0` + carriles `gk2-*`) |
 | 8 | GUI operativa portada (11 áreas, 78 rutas inventariadas) | hecho (`a5993aa` + carriles `gk3-*`) |
-| 9 | NIO/captura por puerto, acciones masivas y eventos WS (12 áreas) | en curso (`7622e25` + carriles `gk4-*`) |
+| 9 | NIO/captura por puerto, acciones masivas y eventos WS (12 áreas) | hecho (`7622e25` + carriles `gk4-*`) |
 | 10 | REA de `ubridge` y vías de enganche documentadas | hecho (`opencode/rea`) |
 | 11 | Publicar el repo (privado) | propuesto |
 
@@ -99,6 +100,24 @@ Ningún agente pidió decisiones bloqueantes y los cinco mergearon sin conflicto
 Gates repetidos en `master`: 416 passed con `--cov-fail-under=100`, 34 tools conectadas,
 36 comandos y `doctor` sin hallazgos. Al reiniciar el servidor hubo que levantar
 `gns3-server` y `libvirtd` de nuevo; están activos y los cinco nodos del kit arrancados.
+
+### Cuarta tanda: NIO, capturas por puerto y evento WS (2026-11-25)
+
+Cuatro worktrees desde `fbac815`, agentes `gk4-*` con `hy4-flash-free` (CLI, docs) y
+`hungerg-free` (MCP, tests). El núcleo se amplió antes con `port_nio`, `port_capture`,
+`nodes_action`, `nodes_console_reset`, `resume|pause|unpause`, qemu img, VMs y WS.
+
+- `opencode/niocli` → 42 comandos; `nio`, `capture-port`, `all`, `disk`, `vm`, `watch`,
+  `version-v1` y acciones masivas con confirmación.
+- `opencode/niomcp` → 39 tools; `gns3_nio`, `gns3_port_capture`, `gns3_nodes_bulk`,
+  `gns3_events`, `gns3_events_url`, `gns3_nodes_bulk` con `confirm=True`.
+- `opencode/niotests` → 456 tests, 100 % de cobertura (718 sentencias).
+- `opencode/niodocs` → `NIO-Y-CAPTURAS.md`, `EVENTOS.md`, `LIMITES-CONTROLLER-COMPUTE.md`
+  y README corregido (los números se recuentan desde el código, no se copian).
+
+Gates en `master`: 456 passed con `--cov-fail-under=100`, 39 tools conectadas, 42 comandos y
+`doctor` sin hallazgos. El mismo día se importó el kit al servidor del aula (`192.168.71.251`)
+como proyecto nuevo, sin modificar `Pablo Rodriguez Garijo` (`db277172…5cf`).
 
 
 ## Límites conocidos
