@@ -13,6 +13,7 @@ import base64
 import configparser
 import fnmatch
 import html
+import inspect
 import json
 import os
 import re
@@ -2578,6 +2579,443 @@ def gns3_emulator(
         return {"error": str(e)}
     ok = st in (200, 201, 204)
     return (res if res is not None else {"ok": True}) if ok else _api_error(st, res, action)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Batch e informe: una llamada MCP para varias lecturas y evidencia reproducible.
+# ══════════════════════════════════════════════════════════════════════════════
+def _registered_tool_functions() -> dict[str, Any]:
+    """Funciones Python registradas como tools, sin pasar por el transporte MCP."""
+    tools: dict[str, Any] = {}
+    for name, fn in list(globals().items()):
+        meta = getattr(fn, "__fastmcp__", None)
+        if callable(fn) and getattr(meta, "type", None) == "tool":
+            tools[getattr(meta, "name", None) or name] = fn
+    return tools
+
+
+def _accepts_tool_arg(params: dict, name: str) -> bool:
+    return name in params or any(param.kind == inspect.Parameter.VAR_KEYWORD
+                                 for param in params.values())
+
+
+def _batch_block_reason(tool: str, args: dict) -> Optional[str]:
+    """Capa de seguridad del batch: la confirmación vive en la operación, no en args."""
+    action = str(args.get("action", "")).lower()
+    blocked = False
+    if tool == "gns3_server":
+        blocked = True
+    elif tool == "gns3_project_io":
+        blocked = action in ("delete", "import")
+    elif tool == "gns3_projects":
+        blocked = action == "delete"
+    elif tool == "gns3_node_edit":
+        blocked = action == "delete"
+    elif tool == "gns3_node_action":
+        blocked = action in ("stop", "reload")
+    elif tool == "gns3_nodes_bulk":
+        blocked = True
+    if not blocked:
+        return None
+    suffix = f" (action={action})" if action else ""
+    return f"{tool}{suffix} es destructiva y requiere confirm=True en la operación"
+
+
+def _batch_global_error(message: str, started: float) -> dict:
+    return {"ok": False, "error": message, "total_ms": int((time.perf_counter() - started) * 1000),
+            "results": []}
+
+
+@mcp.tool
+def gns3_batch(operations: list[dict], stop_on_error: bool = False,
+               project_name: Optional[str] = None) -> dict:
+    """Ejecuta hasta 20 tools registradas en una llamada, con errores aislados.
+
+    Cada operación es `{"tool": "gns3_exec", "args": {...}}`. `project_name` se
+    inyecta en las tools que lo admitan si la operación no fija proyecto. Las tools
+    destructivas exigen `"confirm": true` en la operación; sin eso se bloquean antes
+    de llamar a la función. `stop_on_error=True` detiene el lote tras el primer fallo.
+    """
+    started = time.perf_counter()
+    if not isinstance(operations, list):
+        return _batch_global_error("operations debe ser una lista de dicts", started)
+    if len(operations) > 20:
+        return _batch_global_error(
+            f"gns3_batch admite un máximo de 20 operaciones; recibidas {len(operations)}", started)
+
+    registered = _registered_tool_functions()
+    results: list[dict] = []
+    for index, operation in enumerate(operations):
+        op_started = time.perf_counter()
+        tool = operation.get("tool") if isinstance(operation, dict) else None
+        item: dict = {"index": index, "tool": tool, "ok": False, "ms": 0}
+        error = None
+        result = None
+
+        if not isinstance(operation, dict):
+            error = "la operación debe ser un dict con tool y args"
+        elif not isinstance(tool, str) or not tool.strip():
+            error = "la operación exige tool como cadena no vacía"
+        else:
+            tool = tool.strip()
+            item["tool"] = tool
+            args = operation.get("args", {})
+            if not isinstance(args, dict):
+                error = "args debe ser un dict"
+            else:
+                fn = registered.get(tool)
+                if tool == "gns3_batch":
+                    error = "gns3_batch no se puede anidar dentro de otro lote"
+                elif fn is None:
+                    error = f"tool no registrada: {tool}"
+                else:
+                    blocked = _batch_block_reason(tool, args)
+                    if blocked and operation.get("confirm") is not True:
+                        error = blocked
+                    else:
+                        call_args = dict(args)
+                        try:
+                            params = inspect.signature(fn).parameters
+                        except (TypeError, ValueError):
+                            params = {}
+                        if (project_name is not None and not call_args.get("project_id")
+                                and not call_args.get("project_name")
+                                and _accepts_tool_arg(params, "project_name")):
+                            call_args["project_name"] = project_name
+                        if (blocked and operation.get("confirm") is True
+                                and _accepts_tool_arg(params, "confirm")):
+                            call_args["confirm"] = True
+                        try:
+                            result = fn(**call_args)
+                        except Exception as e:
+                            detail = str(e) or type(e).__name__
+                            error = f"{type(e).__name__}: {detail}"
+                        else:
+                            if isinstance(result, dict) and result.get("error"):
+                                error = result["error"]
+                            elif isinstance(result, dict) and result.get("ok") is False:
+                                error = f"la tool devolvió ok=False: {_literal(result)}"
+                            else:
+                                item["ok"] = True
+                                item["result"] = result
+
+        if error is not None:
+            item["error"] = error
+        item["ms"] = int((time.perf_counter() - op_started) * 1000)
+        results.append(item)
+        if not item["ok"] and stop_on_error:
+            break
+
+    return {"ok": all(item["ok"] for item in results),
+            "total_ms": int((time.perf_counter() - started) * 1000), "results": results}
+
+
+def _literal(value: Any) -> str:
+    """Representación literal de un dato o error para el informe."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return str(value)
+
+
+def _redact_informe(text: str) -> str:
+    """Evita credenciales y rutas de usuarios en el Markdown generado."""
+    try:
+        conf = _conf()
+    except Exception:
+        conf = {}
+    for key in ("user", "password"):
+        value = str(conf.get(key) or "")
+        if value:
+            text = text.replace(value, "[redactado]")
+    text = re.sub(r"(?i)\b(?:https?|wss?)://[^/@\s]+@", lambda m: m.group(0).split("://", 1)[0] + "://", text)
+    text = re.sub(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}", "Basic [redactado]", text)
+    text = re.sub(r"(?i)/(?:home|users)/[^/\s]+", "~", text)
+    text = re.sub(r"(?i)[a-z]:[\\/]users[\\/][^\\/\s]+", "~", text)
+    text = re.sub(r"(?<!\w)/root(?=[\\/\s]|$)", "~", text)
+    return text
+
+
+def _md_cell(value: Any) -> str:
+    return str(value if value is not None else "—").replace("|", "\\|").replace("\n", " ")
+
+
+def _select_informe_project(project_name: Optional[str], projects: Any) -> tuple[Optional[dict], Optional[str]]:
+    """Selecciona por nombre/id exacto, o el único proyecto abierto; nunca adivina."""
+    if not isinstance(projects, list):
+        return None, f"no se pudieron listar los proyectos: {_literal(projects)}"
+    if project_name:
+        by_id = [p for p in projects if isinstance(p, dict) and p.get("project_id") == project_name]
+        if len(by_id) == 1:
+            return by_id[0], None
+        hits = [p for p in projects if isinstance(p, dict)
+                and str(p.get("name", "")).casefold() == project_name.casefold()]
+        if len(hits) == 1:
+            return hits[0], None
+        available = ", ".join(str(p.get("name") or p.get("project_id") or "?")
+                              for p in projects if isinstance(p, dict)) or "(ninguno)"
+        if len(hits) > 1:
+            return None, f"'{project_name}' es ambiguo: hay {len(hits)} proyectos con ese nombre. Disponibles: {available}"
+        return None, f"proyecto no encontrado: {project_name}. Disponibles: {available}"
+    opened = [p for p in projects if isinstance(p, dict) and p.get("status") == "opened"]
+    if len(opened) == 1:
+        return opened[0], None
+    if len(opened) > 1:
+        names = ", ".join(str(p.get("name") or p.get("project_id") or "?") for p in opened)
+        return None, f"hay {len(opened)} proyectos abiertos; indica project_name. Abiertos: {names}"
+    return None, "no hay proyectos abiertos; indica project_name"
+
+
+def _read_informe_topology(project: dict) -> dict:
+    """Lee nodos y enlaces sin abrir el proyecto ni cambiar el estado del servidor."""
+    pid = project.get("project_id")
+    name = project.get("name") or pid
+    topology: dict = {"nodes": None, "links": None, "nodes_error": None, "links_error": None}
+    try:
+        nodes = _api("GET", f"/v2/projects/{pid}/nodes")
+    except Exception as e:
+        nodes = {"error": f"{type(e).__name__}: {e}"}
+    if isinstance(nodes, list):
+        topology["nodes"] = nodes
+    else:
+        topology["nodes_error"] = f"no se pudieron leer los nodos de {name}: {_literal(nodes)}"
+    try:
+        links = _api("GET", f"/v2/projects/{pid}/links")
+    except Exception as e:
+        links = {"error": f"{type(e).__name__}: {e}"}
+    if isinstance(links, list):
+        topology["links"] = links
+    else:
+        topology["links_error"] = f"no se pudieron leer los enlaces de {name}: {_literal(links)}"
+    return topology
+
+
+def _informe_doctor(status: Any, project: Optional[dict], selection_error: Optional[str],
+                    topology: dict) -> tuple[list[str], list[str]]:
+    """Comprobaciones de doctor realizables con lectura de API y estado local."""
+    findings: list[str] = []
+    pending: list[str] = [
+        "Conectividad extremo a extremo: ping y porcentaje de pérdida de paquetes.",
+        "Rutas, VLAN y NAT efectivos dentro de los nodos.",
+        "Salida de comandos y prompts de consola: el informe no ejecuta comandos en los nodos.",
+        "Capturas OCR/HMP y pcaps, si forman parte de la verificación del laboratorio.",
+    ]
+
+    if not isinstance(status, dict):
+        findings.append(f"no se pudo leer el estado del servidor: {_literal(status)}")
+    elif not status.get("running"):
+        findings.append(f"servidor no disponible: {_literal(status.get('detail', status.get('error', 'sin detalle')))}")
+    else:
+        if not status.get("version"):
+            findings.append("versión del servidor no disponible")
+        computes = status.get("computes")
+        if isinstance(computes, list):
+            for compute in computes:
+                if isinstance(compute, dict) and not compute.get("connected"):
+                    findings.append(f"compute {compute.get('name') or compute.get('id') or '?'} desconectado")
+            if not computes:
+                pending.append("No se listaron computes; no se pudo comprobar su conexión.")
+        else:
+            findings.append(f"no se pudieron leer los computes: {_literal(computes)}")
+            pending.append("Comprobar los computes cuando la API devuelva una lista válida.")
+        if status.get("error"):
+            findings.append(f"error al leer computes: {_literal(status['error'])}")
+
+    if selection_error:
+        findings.append(selection_error)
+        pending.append(f"Seleccionar y leer la topología del proyecto: {selection_error}")
+    elif project and project.get("status") != "opened":
+        findings.append(f"proyecto {project.get('name') or project.get('project_id')} cerrado")
+
+    nodes = topology.get("nodes")
+    if not isinstance(nodes, list):
+        detail = topology.get("nodes_error") or "topología no disponible"
+        findings.append(detail)
+        pending.append(f"Comprobar estados, discos, NAT y monitor HMP de los nodos: {detail}")
+    else:
+        stopped = [str(n.get("name") or n.get("node_id") or "?") for n in nodes
+                   if isinstance(n, dict) and n.get("status") != "started"]
+        if stopped:
+            findings.append("nodos no arrancados: " + ", ".join(stopped))
+            pending.append("Arrancar y verificar los nodos detenidos: " + ", ".join(stopped))
+        if not any(isinstance(n, dict) and n.get("node_type") == "nat" for n in nodes):
+            findings.append("sin nodo NAT: la WAN se quedará sin IP")
+
+        disks: dict[str, list[str]] = {}
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            name = str(node.get("name") or node.get("node_id") or "?")
+            props = node.get("properties") or {}
+            disk = props.get("hda_disk_image") if isinstance(props, dict) else None
+            if disk:
+                disks.setdefault(str(disk), []).append(name)
+            if node.get("node_type") == "qemu" and node.get("status") == "started":
+                try:
+                    monitor = core.find_monitor_port(node.get("node_id"), disk)
+                except Exception as e:
+                    findings.append(f"{name}: no se pudo comprobar el monitor HMP: {type(e).__name__}: {e}")
+                else:
+                    if not monitor:
+                        findings.append(f"{name}: sin monitor HMP visible")
+        for disk, owners in disks.items():
+            if len(owners) > 1:
+                findings.append(f"disco compartido {disk} entre {', '.join(owners)}")
+        if disks:
+            try:
+                images = _api("GET", "/v2/computes/local/qemu/images")
+            except Exception as e:
+                images = {"error": f"{type(e).__name__}: {e}"}
+            if not isinstance(images, list):
+                detail = f"no se pudieron listar las imágenes QEMU: {_literal(images)}"
+                findings.append(detail)
+                pending.append(f"Comprobar las imágenes de disco: {detail}")
+            else:
+                available = {str(img.get("filename")) for img in images if isinstance(img, dict)}
+                for disk in disks:
+                    if disk not in available:
+                        findings.append(f"imagen ausente en el servidor: {disk}")
+
+    if topology.get("links_error"):
+        findings.append(topology["links_error"])
+        pending.append(f"Comprobar los enlaces: {topology['links_error']}")
+
+    if not shutil.which("tesseract"):
+        findings.append("sin tesseract: gns3lab shot no puede dar texto")
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        findings.append("sin Pillow: el screendump queda en PPM")
+    try:
+        proc = subprocess.run(["systemctl", "is-active", "libvirtd"],
+                              capture_output=True, text=True, timeout=5)
+        libvirtd = proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        pending.append(f"No se pudo comprobar libvirtd: {type(e).__name__}: {e}")
+    else:
+        if libvirtd != "active":
+            findings.append("libvirtd parado: los nodos NAT no arrancan")
+
+    return list(dict.fromkeys(findings)), list(dict.fromkeys(pending))
+
+
+@mcp.tool
+def gns3_informe(project_name: Optional[str] = None, dest: Optional[str] = None) -> dict:
+    """Genera un Markdown con estado, topología, hallazgos y verificaciones pendientes.
+
+    No abre proyectos, no ejecuta comandos en nodos y no incluye credenciales ni rutas
+    de usuarios. Si un dato no se puede leer, el informe recoge el error literal.
+    """
+    try:
+        status = gns3_status()
+    except Exception as e:
+        status = {"error": f"gns3_status falló: {type(e).__name__}: {e}"}
+    try:
+        projects = gns3_projects(action="list")
+    except Exception as e:
+        projects = {"error": f"gns3_projects falló: {type(e).__name__}: {e}"}
+
+    project, selection_error = _select_informe_project(project_name, projects)
+    topology = _read_informe_topology(project) if project else {
+        "nodes": None, "links": None, "nodes_error": selection_error, "links_error": None,
+    }
+    findings, pending = _informe_doctor(status, project, selection_error, topology)
+
+    lines = [f"# Informe GNS3 — {time.strftime('%Y-%m-%d %H:%M:%S')}", "", "## Servidor"]
+    if isinstance(status, dict):
+        lines.append(f"- Estado: {'respondiendo' if status.get('running') else 'no responde'}")
+        lines.append(f"- Versión: {_md_cell(status.get('version') or 'no disponible')}")
+        if status.get("url"):
+            lines.append(f"- URL: {_md_cell(status['url'])}")
+        if not status.get("running"):
+            lines.append(f"- Error literal: {_literal(status.get('detail', status.get('error', 'sin detalle')))}")
+        if status.get("error"):
+            lines.append(f"- Error de computes: {_literal(status['error'])}")
+        computes = status.get("computes")
+        if isinstance(computes, list):
+            if computes:
+                lines.append("- Computes:")
+                for compute in computes:
+                    if isinstance(compute, dict):
+                        lines.append(f"  - {_md_cell(compute.get('name') or compute.get('id') or '?')}: "
+                                     f"{'conectado' if compute.get('connected') else 'desconectado'}")
+            else:
+                lines.append("- Computes: no se listaron.")
+        else:
+            lines.append(f"- Computes: error literal: {_literal(computes)}")
+    else:
+        lines.append(f"- Error literal: {_literal(status)}")
+
+    lines.extend(["", "## Proyectos"])
+    if isinstance(projects, list):
+        if projects:
+            lines.extend(["| Proyecto | ID | Estado |", "|---|---|---|"])
+            for proj in projects:
+                if isinstance(proj, dict):
+                    lines.append(f"| {_md_cell(proj.get('name'))} | {_md_cell(proj.get('project_id'))} | "
+                                 f"{_md_cell(proj.get('status'))} |")
+        else:
+            lines.append("- No hay proyectos.")
+    else:
+        lines.append(f"- Error literal: {_literal(projects)}")
+
+    lines.extend(["", "## Topología"])
+    if selection_error:
+        lines.append(f"- Error literal: {selection_error}")
+    elif project:
+        lines.append(f"- Proyecto: {_md_cell(project.get('name'))} "
+                     f"({_md_cell(project.get('status'))})")
+        nodes = topology.get("nodes")
+        if isinstance(nodes, list):
+            lines.append(f"- Nodos: {len(nodes)}; arrancados: "
+                         f"{sum(1 for n in nodes if isinstance(n, dict) and n.get('status') == 'started')}")
+            if nodes:
+                lines.extend(["", "| Nodo | Tipo | Estado | Consola |", "|---|---|---|---|"])
+                for node in nodes:
+                    if isinstance(node, dict):
+                        console = node.get("console")
+                        if console is not None and node.get("console_type"):
+                            console = f"{console} ({node.get('console_type')})"
+                        lines.append(f"| {_md_cell(node.get('name'))} | {_md_cell(node.get('node_type'))} | "
+                                     f"{_md_cell(node.get('status'))} | {_md_cell(console)} |")
+        else:
+            lines.append(f"- Error literal: {topology.get('nodes_error')}")
+        links = topology.get("links")
+        if isinstance(links, list):
+            lines.append(f"- Enlaces: {len(links)}")
+            names = {n.get("node_id"): n.get("name") for n in (nodes or []) if isinstance(n, dict)}
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                ends = []
+                for end in link.get("nodes", []):
+                    if isinstance(end, dict):
+                        ends.append(f"{names.get(end.get('node_id'), end.get('node_id'))}:"
+                                    f"{end.get('adapter_number')}/{end.get('port_number')}")
+                lines.append(f"  - {' <-> '.join(ends) if ends else _md_cell(link.get('link_id'))}")
+        else:
+            lines.append(f"- Error literal: {topology.get('links_error')}")
+
+    lines.extend(["", "## Hallazgos de doctor"])
+    if findings:
+        lines.extend(f"- {finding}" for finding in findings)
+    else:
+        lines.append("- Sin hallazgos en las comprobaciones automáticas realizadas.")
+    lines.extend(["", "## Pendiente de verificar"])
+    lines.extend(f"- {item}" for item in pending)
+    lines.extend(["", "Este informe no ha ejecutado comandos en los nodos ni operaciones destructivas."])
+
+    content = _redact_informe("\n".join(lines).rstrip() + "\n")
+    data = content.encode("utf-8")
+    path = Path(dest).expanduser() if dest else Path.home() / "GNS3" / "informes" / f"informe-{time.strftime('%Y%m%d')}.md"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    except OSError as e:
+        return {"error": f"no se pudo escribir el informe: {type(e).__name__}: {e}"}
+    return {"path": str(path), "bytes": len(data), "content": content}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
