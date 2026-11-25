@@ -53,6 +53,19 @@ Sin VNC (lo que se usa de verdad en un examen):
     gns3lab examen informe [--server local|clase] [--name N] [--dest RUTA]
                                                  # informe Markdown en ~/GNS3/informes/
 
+pfSense por config.xml (sin VNC; credenciales solo del entorno):
+
+    gns3lab pf detect [-p proyecto] [--node NOMBRE] [--json]  # interfaces, sin SSH
+    gns3lab pf status [--json]                                # versión, interfaces, reglas
+    gns3lab pf config get > fw.xml                            # baja /conf/config.xml
+    gns3lab pf config put fw.xml [--yes] [--json]             # sube con backup
+    gns3lab pf assign --wan em0 --lan em1 [--opt1 vtnet2] [--json]
+    gns3lab pf ip em1 192.168.10.1 24 [--gw IP] [--json]
+    gns3lab pf dhcp em1 192.168.10.100 192.168.10.200 [--dns IP] [--json]
+    gns3lab pf rule pass --if lan --proto tcp --src any --dst any --port 80 [--json]
+    gns3lab pf nat --if wan [--target IP] [--json]
+    gns3lab pf ssh --port 22022 [--json]
+
 `--json` antes del subcomando da salida parseable para cualquier comando, sin tocar los
 handlers: si lo capturado ya es JSON se imprime tal cual; si no, se envuelve como
 {"cmd", "ok", "output"}. `stderr` no se captura y el exit code se conserva.
@@ -84,6 +97,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -3646,6 +3660,237 @@ def cmd_examen(args, conf) -> int:
     raise SystemExit(f"acción de examen desconocida: {args.action}")
 
 
+# --------------------------------------------------------------------------- #
+# pfSense: config.xml por SSH (detect no necesita SSH ni credenciales)
+# --------------------------------------------------------------------------- #
+PF_SESSION = CONF.parent / "pf_get_session.json"
+
+
+def _pf_out(args, ok: bool, data, texto: str | None = None) -> int:
+    """Salida local de `pf`: {"ok", "data"} con --json, texto en humanizado."""
+    if getattr(args, "json", False):
+        _json_out({"ok": ok, "data": data})
+    elif texto is not None:
+        print(texto)
+    else:
+        _print_data("pfSense", data)
+    return 0 if ok else 1
+
+
+def _pf_error(args, mensaje: str) -> int:
+    if getattr(args, "json", False):
+        _json_out({"ok": False, "data": {"error": mensaje}})
+    else:
+        print(mensaje, file=sys.stderr)
+    return 1
+
+
+def _pf_env_error() -> str | None:
+    """Credenciales solo del entorno; nombra la variable, nunca su valor."""
+    if not os.environ.get("PFSENSE_PASSWORD"):
+        return "falta PFSENSE_PASSWORD: defínela en el entorno (nunca en el repo)"
+    puerto = os.environ.get("PFSENSE_PORT", "22022")
+    try:
+        int(puerto)
+    except ValueError:
+        return "PFSENSE_PORT no es un número entero"
+    return None
+
+
+def _pf_module():
+    """Importa pfsense (módulo del carril pfcore) con error legible si falta."""
+    try:
+        import pfsense  # noqa: E402
+    except ImportError as e:
+        raise RuntimeError(f"falta el módulo pfsense.py en la raíz del repo ({e})")
+    return pfsense
+
+
+def _pf_detect_ifnames(node: dict) -> dict:
+    """Interfaces del nodo según su adaptador, sin SSH ni credenciales.
+
+    Delega en `pfsense.detect_ifnames`. Mientras el carril pfcore entrega ese
+    módulo, se aplica aquí la misma regla del contrato para que `pf detect`
+    siga funcionando: em0/em1 con e1000, vtnet0/1 con virtio.
+    """
+    try:
+        return _pf_module().detect_ifnames(node)
+    except (RuntimeError, AttributeError):
+        props = node.get("properties") or {}
+        adapter = str(props.get("adapter_type") or "")
+        if adapter == "e1000":
+            prefijo = "em"
+        elif "virtio" in adapter:
+            prefijo = "vtnet"
+        else:
+            return {}
+        return {"wan": prefijo + "0", "lan": prefijo + "1",
+                "adapter_type": adapter}
+
+
+def _pf_record_get(xml: str) -> None:
+    """Marca el último `config get` para reconocer su fichero en un `put`."""
+    try:
+        PF_SESSION.parent.mkdir(parents=True, exist_ok=True)
+        PF_SESSION.write_text(json.dumps({
+            "sha256": hashlib.sha256(xml.encode()).hexdigest(),
+            "ts": time.time(),
+        }))
+    except OSError:
+        pass       # una marca fallida no debe romper la lectura
+
+
+def _pf_from_session(xml: str) -> bool:
+    """¿Este XML salió de un `config get` reciente (misma sesión)?"""
+    try:
+        marca = json.loads(PF_SESSION.read_text())
+        return (marca.get("sha256") == hashlib.sha256(xml.encode()).hexdigest()
+                and time.time() - float(marca.get("ts", 0)) < 3600)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _pf_detect(args, conf) -> int:
+    """Lee el nodo del proyecto con gns3core y deduce wan/lan del adaptador."""
+    if core is None:
+        return _pf_error(args, "falta el núcleo gns3core para leer el nodo")
+    s = Server(getattr(args, "server", "local"), conf)
+    c = _core_client(s)
+    if not c.alive():
+        return _pf_error(args, f"servidor {s.name} ({s.url}) no responde")
+    try:
+        proj = c.resolve_project(getattr(args, "project", None))
+        nodes = c.nodes(proj["project_id"])
+    except SystemExit as e:
+        return _pf_error(args, str(e))
+    nombre = (getattr(args, "node", None) or "").lower()
+    if nombre:
+        hits = [n for n in nodes if str(n.get("name", "")).lower() == nombre]
+        if not hits:
+            hits = [n for n in nodes if nombre in str(n.get("name", "")).lower()]
+    else:
+        # El kit de examen lo llama PF1: se busca por nombre o por disco pfSense.
+        hits = [n for n in nodes if str(n.get("name", "")).lower() == "pfsense"]
+        if not hits:
+            hits = [n for n in nodes
+                    if "pfsense" in str(n.get("name", "")).lower()
+                    or "pfsense" in str((n.get("properties") or {})
+                                        .get("hda_disk_image") or "").lower()]
+    if not hits:
+        return _pf_error(args, f"nodo '{nombre or 'pfSense'}' no encontrado en "
+                               f"{proj['name']}. Hay: {', '.join(n['name'] for n in nodes)}")
+    if len(hits) > 1:
+        return _pf_error(args, f"'{nombre}' es ambiguo: "
+                               f"{', '.join(n['name'] for n in hits)}")
+    node = hits[0]
+    ifaces = _pf_detect_ifnames(node)
+    if not ifaces:
+        adapter = str((node.get("properties") or {}).get("adapter_type") or "")
+        return _pf_error(args, f"adapter_type desconocido en {node['name']}: "
+                               f"{adapter or '(vacío)'} (esperado e1000 o virtio-net-pci)")
+    data = {"project": proj["name"], "node": node["name"], **ifaces}
+    return _pf_out(args, True, data,
+                   f"{proj['name']} / {node['name']}: "
+                   f"wan={ifaces.get('wan')} lan={ifaces.get('lan')}")
+
+
+def _pf_config_put_guard(args) -> str:
+    """Validación de `config put` antes de importar pfsense o tocar SSH."""
+    ruta = Path(args.file).expanduser() if args.file else None
+    if not ruta or not ruta.is_file():
+        raise ValueError(f"config put exige un fichero XML existente: {ruta}")
+    try:
+        xml = ruta.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(f"{ruta} no es UTF-8")
+    if not args.yes and not _pf_from_session(xml):
+        raise ValueError("config put exige --yes salvo que el fichero venga de "
+                         "`pf config get` en la misma sesión")
+    return xml
+
+
+def _pf_config(args, pf, pfs, xml_put: str | None = None) -> int:
+    """get baja el XML; put lo sube con backup y exige --yes si no viene de get."""
+    if args.config_action == "get":
+        doc = pf.get_config()
+        xml = pfs.render_config(doc)
+        _pf_record_get(xml)
+        if getattr(args, "json", False):
+            return _pf_out(args, True, doc)
+        print(xml, end="" if xml.endswith("\n") else "\n")
+        return 0
+
+    xml = xml_put if xml_put is not None else _pf_config_put_guard(args)
+    doc = pfs.parse_config(xml)
+    data = pf.put_config(doc, backup=True)   # nunca sobrescribe sin backup
+    ok = data.get("ok", True) if isinstance(data, dict) else True
+    backup = data.get("backup") if isinstance(data, dict) else None
+    return _pf_out(args, ok, data,
+                   f"config.xml escrito; backup={backup or '-'}")
+
+
+def cmd_pf(args, conf) -> int:
+    """Comandos pfSense: detect lee GNS3; el resto habla config.xml por SSH."""
+    act = args.pf_action
+    if act == "detect":
+        return _pf_detect(args, conf)
+
+    falta = _pf_env_error()
+    if falta:
+        return _pf_error(args, falta)
+    xml_put = None
+    if act == "config" and args.config_action == "put":
+        try:
+            xml_put = _pf_config_put_guard(args)
+        except ValueError as e:
+            return _pf_error(args, str(e))
+    try:
+        pfs = _pf_module()
+        pf = pfs.PfSense.from_env()
+        if act == "status":
+            data = pf.status()
+            return _pf_out(args, True, data,
+                           f"pfSense {data.get('version', '?')} "
+                           f"({len(data.get('interfaces') or {})} interfaces)")
+        if act == "config":
+            return _pf_config(args, pf, pfs, xml_put)
+        if act == "assign":
+            mapping = {"wan": args.wan, "lan": args.lan, "opt1": args.opt1}
+            data = pf.assign(mapping)
+            return _pf_out(args, bool(data.get("ok", True)), data,
+                           f"interfaces asignadas: wan={args.wan} lan={args.lan}"
+                           + (f" opt1={args.opt1}" if args.opt1 else ""))
+        if act == "ip":
+            data = pf.set_ip(args.ifname, args.ip, args.mask, gateway=args.gw)
+            return _pf_out(args, bool(data.get("ok", True)), data,
+                           f"{args.ifname}: {args.ip}/{args.mask}"
+                           + (f" gw={args.gw}" if args.gw else ""))
+        if act == "dhcp":
+            dns = args.dns or None
+            if isinstance(dns, list):
+                dns = dns[0] if len(dns) == 1 else dns
+            data = pf.dhcp(args.ifname, args.start, args.end, dns=dns)
+            return _pf_out(args, bool(data.get("ok", True)), data,
+                           f"DHCP en {args.ifname}: {args.start}-{args.end}")
+        if act == "rule":
+            data = pf.rule(action=args.action, ifname=args.ifname, proto=args.proto,
+                           src=args.src, dst=args.dst, port=args.port)
+            return _pf_out(args, bool(data.get("ok", True)), data,
+                           f"regla {args.action} {args.proto} {args.src} -> "
+                           f"{args.dst}" + (f" :{args.port}" if args.port else ""))
+        if act == "nat":
+            data = pf.nat(args.ifname, target=args.target)
+            return _pf_out(args, bool(data.get("ok", True)), data,
+                           f"NAT en {args.ifname}")
+        if act == "ssh":
+            data = pf.enable_ssh(port=args.port)
+            return _pf_out(args, bool(data.get("ok", True)), data,
+                           f"SSH habilitado en el puerto {args.port}")
+        return _pf_error(args, f"acción pf desconocida: {act}")
+    except Exception as e:
+        return _pf_error(args, f"pf {act}: {e}")
+
+
 def _run_handler(args, handler, conf) -> int:
     """Ejecuta el handler; con --json global normaliza su stdout.
 
@@ -3692,6 +3937,12 @@ def main() -> int:
       topología, el estado, nodos, enlaces y comprobaciones reales de
       gns3core; devuelve la ruta por stdout (o {"path", "bytes", "ok"} con
       --json). No modifica ningún proyecto del servidor.
+    * `pf` configura pfSense por /conf/config.xml sobre SSH: `pf detect` sólo
+      lee el nodo GNS3 (sin SSH ni credenciales) y las demás acciones delegan
+      en `pfsense.PfSense.from_env()`. Con `--json` local devuelven
+      {"ok", "data"}. Las credenciales salen sólo de PFSENSE_HOST/USER/
+      PASSWORD/PORT; `pf config put` exige `--yes` si el XML no viene de un
+      `pf config get` reciente y siempre conserva backup.
     """
     conf = load_conf()
     if not CONF.exists():
@@ -4014,6 +4265,63 @@ def main() -> int:
                    help="verify: segundos de quietud para el ping (por defecto 4)")
     p.add_argument("--yes", action="store_true", help="reset: confirmar el reinicio")
 
+    # -- pfSense: config.xml por SSH, detect sin SSH ------------------------- #
+    p = sub.add_parser("pf", help="pfSense: detect|status|config|assign|ip|dhcp|rule|nat|ssh")
+    pfsub = p.add_subparsers(dest="pf_action", required=True)
+
+    q = pfsub.add_parser("detect", help="interfaces del nodo pfSense, sin SSH")
+    q.add_argument("-p", "--project", help="proyecto GNS3 (por defecto el abierto o único)")
+    q.add_argument("--node", help="nombre del nodo (por defecto pfSense o disco pfSense)")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("status", help="versión, interfaces, reglas y rutas por SSH")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("config", help="config.xml: get baja y put sube con backup")
+    q.add_argument("config_action", choices=["get", "put"])
+    q.add_argument("file", nargs="?", help="put: fichero XML a subir")
+    q.add_argument("--yes", action="store_true",
+                   help="put: confirmar si el fichero no viene de get en la misma sesión")
+    q.add_argument("--json", action="store_true", help="get: dict; put: {ok, data}")
+
+    q = pfsub.add_parser("assign", help="asignar wan/lan/opt1 a interfaces reales")
+    q.add_argument("--wan", required=True, help="interfaz física para wan")
+    q.add_argument("--lan", required=True, help="interfaz física para lan")
+    q.add_argument("--opt1", help="interfaz física para opt1 (opcional)")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("ip", help="fijar IP y máscara de una interfaz")
+    q.add_argument("ifname", help="interfaz (p. ej. em1)")
+    q.add_argument("ip", help="dirección IP")
+    q.add_argument("mask", help="máscara (24 o 255.255.255.0)")
+    q.add_argument("--gw", "--gateway", dest="gw", help="gateway opcional")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("dhcp", help="rango DHCP en una interfaz")
+    q.add_argument("ifname", help="interfaz (p. ej. em1)")
+    q.add_argument("start", help="primera IP del rango")
+    q.add_argument("end", help="última IP del rango")
+    q.add_argument("--dns", action="append", help="servidor DNS (repetible)")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("rule", help="regla del firewall (antes de cualquier reject)")
+    q.add_argument("action", choices=["pass", "block", "reject"], help="acción de la regla")
+    q.add_argument("--if", "--ifname", dest="ifname", default="lan", help="interfaz")
+    q.add_argument("--proto", default="any", help="protocolo (por defecto any)")
+    q.add_argument("--src", default="any", help="origen (por defecto any)")
+    q.add_argument("--dst", default="any", help="destino (por defecto any)")
+    q.add_argument("--port", type=int, help="puerto de destino")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("nat", help="NAT de salida en una interfaz")
+    q.add_argument("--if", "--ifname", dest="ifname", default="wan", help="interfaz")
+    q.add_argument("--target", help="IP destino de la redirección (opcional)")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("ssh", help="habilitar el servidor SSH de pfSense")
+    q.add_argument("--port", type=int, default=22022, help="puerto (por defecto 22022)")
+    q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
     args = ap.parse_args()
     if args.cmd == "import" and args.name and args.no_rename:
         args.name = args.name
@@ -4028,7 +4336,7 @@ def main() -> int:
         "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
         "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
         "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
-        "examen": cmd_examen,
+        "examen": cmd_examen, "pf": cmd_pf,
         "project": cmd_project, "gns3vm": cmd_gns3vm, "notify": cmd_notify,
         "symbol": cmd_symbol, "iou-license": cmd_iou_license,
         "server": cmd_server, "emulator": cmd_emulator,
