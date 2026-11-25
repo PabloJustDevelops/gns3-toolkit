@@ -116,7 +116,7 @@ PY
 grep -n 'def node_resize_disk\|def console_reset\|def gns3vm\|def symbols' gns3core.py
 ```
 
-Verificado en este árbol: `mcp.list_tools()` devuelve 41 tools y `gns3lab` registra 45
+Verificado en este árbol: `mcp.list_tools()` devuelve 42 tools y `gns3lab` registra 45
 subcomandos. Las operaciones de la última tabla (NIO, captura por puerto, acciones masivas,
 eventos WS y versión v1) figuran en ambas listas; los métodos del núcleo y los endpoints están
 en `gns3core.py` y en el inventario de rutas.

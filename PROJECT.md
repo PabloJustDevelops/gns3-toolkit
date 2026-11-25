@@ -3,7 +3,7 @@
 ## Qué es
 
 `gns3-toolkit` empaqueta la operación de un servidor GNS3 2.2 sin GUI: una librería
-(`gns3core`), un servidor MCP de 41 tools y una CLI de 45 comandos. El objetivo inmediato
+(`gns3core`), un servidor MCP de 42 tools y una CLI de 46 comandos. El objetivo inmediato
 es el examen del 1 de diciembre de 2026: montar un escenario (pfSense + VLANs + NAT +
 clientes) desde la terminal, con el VNC sólo como último recurso.
 
@@ -13,12 +13,12 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   `nio_ports` (NIO y captura por puerto, acciones masivas, `resume`/`pause`, qemu img, VMs
   invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
-- CLI: **45 comandos**; MCP: **41 tools** (`hermes mcp test gns3` → Connected, 41 discovered).
+- CLI: **46 comandos**; MCP: **42 tools** (`hermes mcp test gns3` → Connected, 41 discovered).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
 - **Tests: 466 passed, cobertura 100 % de `gns3core.py`** (718 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
-- MCP: 41 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
+- MCP: 42 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
   **2 prompts** (`gns3-diagnostico`, `gns3-examen`).
 - Skill `gns3-lab-automation` reescrita como envoltorio del repo público, con backup en
   `/tmp/gns3-skill-backup-20261125-1909.tar.gz`.
@@ -126,6 +126,25 @@ Gates en `master`: 456 passed con `--cov-fail-under=100`, 39 tools conectadas, 4
 `doctor` sin hallazgos. El mismo día se importó el kit al servidor del aula (`192.168.71.251`)
 como proyecto nuevo, sin modificar `Pablo Rodriguez Garijo` (`db277172…5cf`).
 
+### Séptima tanda: pfSense nativo y MCP más rápido (2026-11-25)
+
+Cinco worktrees desde `2d216fb`, agentes `gk7-*` con `hungerg-free` (núcleo pfSense, MCP, tests)
+y `hy4-flash-free` (CLI, skill).
+
+- `opencode/pfcore` → `pfsense.py` (434 sentencias): `config.xml` parse/render sin perder
+  secciones, `assign`, `set_ip`, `dhcp`, `rule`, `nat`, `enable_ssh`, `detect_ifnames` y
+  `PfSense.from_env()`. Ninguna credencial en el repo; `run()` las enmascara.
+- `opencode/pfmcp` → tool `gns3_pfsense` y `gns3_batch` paralelo con cache. Medido: 5 operaciones
+  de solo lectura de **52 ms a 38-42 ms**, `parallel=True`, `cache_hits=4`.
+- `opencode/pfcli` → `gns3lab pf detect|status|config|assign|ip|dhcp|rule|nat|ssh`. `pf detect`
+  funciona sin credenciales y devuelve `wan=em0, lan=em1` en `examen-kit`.
+- `opencode/pfskill` → `docs/PFSENSE-NATIVO.md` y `skill-sync/references/pfsense-nativo.md`,
+  aplicados a la skill real con backup.
+- `opencode/pftests` → tests sin host pfSense: 551 passed, 98 % de cobertura conjunta.
+
+Verificación en `master`: 42 tools conectadas, 2 prompts, `pf detect --json` real, error claro
+sin `PFSENSE_PASSWORD`, `scripts/verify.py` sin deriva y `hermes mcp test gns3` en 1,76 s.
+
 ### Sexta tanda: batch, JSON uniforme y guard de deriva (2026-11-25)
 
 Cuatro worktrees desde `34bbf66`, agentes `gk6-*` con `hungerg-free` (MCP, tests) y
@@ -138,7 +157,7 @@ Cuatro worktrees desde `34bbf66`, agentes `gk6-*` con `hungerg-free` (MCP, tests
   de cifras obsoletas en README, PROJECT y docs; corregidos en `master` hasta `OK: sin deriva`.
 - `opencode/extests2` → tests de batch, informe y JSON uniforme sin servidor.
 
-Gates en `master`: 483 passed con `--cov-fail-under=100`, 41 tools, 3 resources + 1 template +
+Gates en `master`: 483 passed con `--cov-fail-under=100`, 42 tools, 3 resources + 1 template +
 2 prompts, `hermes mcp test gns3` conectado, `--json status` parseable y guard sin deriva.
 
 ### Quinta tanda: repo público, resources/prompts y skill delgada (2026-11-25)

@@ -6,7 +6,7 @@
                  gns3lab (CLI)                 gns3_mcp_server.py (FastMCP, stdio)
                  cli/gns3lab                   agente / Hermes
                       |                                  |
-            argparse + 45 subcomandos           41 tools (@mcp.tool)
+            argparse + 46 subcomandos           42 tools (@mcp.tool)
                       |                                  |
         +-------------+------------------+---------------+
         |                                |
@@ -102,7 +102,7 @@ Utilidades sueltas: `match_nodes`, `node_file_read/write` (el body va **en crudo
 
 `gns3_mcp_server.py` es un `FastMCP("gns3")` por stdio. Las credenciales salen de
 `~/.config/GNS3/2.2/gns3_server.conf` (`GNS3_URL`, `GNS3_USER`, `GNS3_PASSWORD` como override),
-así que no viajan en el prompt. Las 41 tools, verificadas con `hermes mcp test gns3`:
+así que no viajan en el prompt. Las 42 tools, verificadas con `hermes mcp test gns3`:
 
 | Grupo | Tools |
 |---|---|
