@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import configparser
 import fnmatch
+import html
 import json
 import os
 import re
@@ -111,6 +112,19 @@ def _unexpected_keys(body: Any) -> list[str]:
         return []
     m = re.search(r"\(([^)]*)\) were unexpected", msg)
     return re.findall(r"'([^']+)'", m.group(1)) if m else []
+
+
+def _verified_list(client, path: str, items: list[dict], what: str) -> tuple[list[dict], Optional[dict]]:
+    """Distinguue una lista vacía real de un fallo que el wrapper del núcleo convirtió en []."""
+    if items:
+        return items, None
+    try:
+        st, body = client.get(path)
+    except ConnectionError as e:
+        return [], {"error": str(e)}
+    if st == 200 and isinstance(body, list):
+        return body, None
+    return [], _err_msg(st, body, what)
 
 
 # ────────────────────────────── helpers ──────────────────────────────
@@ -247,7 +261,12 @@ def gns3_status() -> dict:
     up, info = _server_up()
     if not up:
         return {"running": False, "detail": info}
-    computes = _api("GET", "/v2/computes") or []
+    compute_error = None
+    try:
+        computes = _client().computes()
+    except ConnectionError as e:
+        computes = []
+        compute_error = str(e)
     projs = _projects()
     opened = [p["name"] for p in projs if p.get("status") == "opened"] if isinstance(projs, list) else []
     c = _conf()
@@ -260,13 +279,17 @@ def gns3_status() -> dict:
         "projects": len(projs) if isinstance(projs, list) else 0,
         "opened_projects": opened,
         "paths": {k: c.get(k) for k in ("images_path", "projects_path", "appliances_path", "configs_path", "ubridge_path")},
+        **({"error": compute_error} if compute_error else {}),
     }
 
 
 @mcp.tool
 def gns3_projects(action: str = "list", name: Optional[str] = None, project_id: Optional[str] = None,
-                  project_name: Optional[str] = None) -> Any:
-    """Proyectos: action=list|create|open|close|delete|info. Identifica por project_id, name o project_name."""
+                  project_name: Optional[str] = None, new_name: Optional[str] = None) -> Any:
+    """Proyectos: action=list|create|open|close|update|delete|info.
+
+    Identifica por project_id, name o project_name. `update` renombra con `new_name`.
+    """
     action = action.lower()
     name = name or project_name
     if action == "list":
@@ -276,25 +299,58 @@ def gns3_projects(action: str = "list", name: Optional[str] = None, project_id: 
              "path": p.get("path"), "filename": p.get("filename")}
             for p in projs
         ] if isinstance(projs, list) else projs
+    client = _client()
     if action == "create":
         if not name:
             return {"error": "name es obligatorio para create"}
         path = os.path.join(_conf().get("projects_path") or os.path.expanduser("~/GNS3/projects"), name)
-        return _api("POST", "/v2/projects", {"name": name, "path": path})
+        try:
+            st, res = client.post("/v2/projects", {"name": name, "path": path}, timeout=120)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        return res if st in (200, 201) else _err_msg(st, res, "crear proyecto")
     pid, proj = _resolve_project(project_id, name)
     if not pid:
         return {"error": "proyecto no encontrado", "project_id": project_id, "name": name}
     if action == "open":
-        _api("POST", f"/v2/projects/{pid}/open", timeout=180)
+        try:
+            st, res = client.post(f"/v2/projects/{pid}/open", timeout=180)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st not in (200, 201):
+            return _err_msg(st, res, "abrir proyecto")
     elif action == "close":
-        _api("POST", f"/v2/projects/{pid}/close", timeout=180)
+        try:
+            st, res = client.project_close(pid)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st not in (200, 201):
+            return _err_msg(st, res, "cerrar proyecto")
+    elif action == "update":
+        if not new_name:
+            return {"error": "update exige new_name"}
+        try:
+            st, res = client.put(f"/v2/projects/{pid}", {"name": new_name}, timeout=120)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st not in (200, 201):
+            return _err_msg(st, res, "actualizar proyecto")
+        return {"updated": True, "project_id": pid, "name": (res or {}).get("name", new_name)}
     elif action == "delete":
-        _api("DELETE", f"/v2/projects/{pid}")
-        return {"deleted": True, "project_id": pid}
+        try:
+            st, res = client.project_delete(pid)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        out = {"deleted": st in (200, 204), "project_id": pid}
+        if not out["deleted"]:
+            out.update(_err_msg(st, res, "borrar proyecto"))
+        return out
     elif action != "info":
         return {"error": f"acción desconocida: {action}"}
-    info = _api("GET", f"/v2/projects/{pid}")
-    return info if isinstance(info, dict) else {"project_id": pid, "detail": info}
+    try:
+        return client.project_get(pid)
+    except (ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
 
 
 @mcp.tool
@@ -332,13 +388,15 @@ def gns3_template(
     x: int = 0,
     y: int = 0,
 ) -> Any:
-    """Plantillas del servidor: action=list|create|delete|apply.
+    """Plantillas del servidor: action=list|create|update|delete|apply.
 
     list   — nombre, tipo y template_id de cada plantilla.
     create — desde un nodo existente (`from_node`, nombre o id, copia `node_type` y
              `properties`) o desde cero (`node_type` + `properties`). `name` es el nombre
              de la plantilla. Con `console` (puerto VNC) se fija **en la plantilla** y se
              verifica releyéndola: el `PUT` sobre un nodo ignora `console` y devuelve 200.
+    update — por `name` o `template_id`; aplica `properties` (claves planas de la
+             plantilla) y/o `console`, y verifica los valores releyendo la plantilla.
     delete — por `name` o `template_id`; devuelve `{"deleted": bool}`.
     apply  — instancia la plantilla (`name` o `template_id`) en un proyecto, en (`x`, `y`);
              delega en `gns3_node_edit(action="create", template=...)`.
@@ -405,11 +463,35 @@ def gns3_template(
                                  f"(quedó {real}): {detail}")
         return out
 
+    if action == "update":
+        tpl, err = _resolve_template(client, template_id, name)
+        if err:
+            return err
+        body: dict = {k: v for k, v in (properties or {}).items() if not k.endswith("_md5sum")}
+        if console is not None:
+            body["console"] = int(console)
+        if not body:
+            return {"error": "update sin cambios: pasa properties o console"}
+        st, res = client.template_update(tpl["template_id"], body)
+        if st not in (200, 201):
+            return _err_msg(st, res, "actualizar plantilla")
+        st2, got = client.template_get(tpl["template_id"])
+        if st2 != 200 or not isinstance(got, dict):
+            return {"updated": True, "name": tpl.get("name"),
+                    "template_id": tpl["template_id"], "applied": body,
+                    "detail": _err_msg(st2, got, "releer plantilla")["error"]}
+        return {"updated": True, "name": got.get("name", tpl.get("name")),
+                "template_id": tpl["template_id"], "applied": body,
+                "verified": {k: got.get(k) for k in body}}
+
     if action == "delete":
         tpl, err = _resolve_template(client, template_id, name)
         if err:
             return err
-        st, res = client.delete(f"/v2/templates/{tpl['template_id']}", timeout=120)
+        try:
+            st, res = client.template_delete(tpl["template_id"])
+        except ConnectionError as e:
+            return {"error": str(e)}
         ok = st in (200, 204)
         out = {"deleted": ok, "name": tpl.get("name"), "template_id": tpl["template_id"]}
         if not ok:
@@ -427,7 +509,7 @@ def gns3_template(
             return res
         return {"template": tpl.get("name"), "template_id": tpl["template_id"], "node": res}
 
-    return {"error": f"acción desconocida: {action}", "valid": ["list", "create", "delete", "apply"]}
+    return {"error": f"acción desconocida: {action}", "valid": ["list", "create", "update", "delete", "apply"]}
 
 
 @mcp.tool
@@ -474,21 +556,33 @@ def gns3_nodes(
         return {"error": f"sin coincidencias para {node!r}", "available": [n["name"] for n in nodes]}
 
     results = []
+    client = _client()
     for t in targets:
         nid = t["node_id"]
-        if action in ("start", "stop", "reload", "suspend"):
-            res = _api("POST", f"/v2/projects/{pid}/nodes/{nid}/{action}", timeout=180)
-        elif action == "delete":
-            res = _api("DELETE", f"/v2/projects/{pid}/nodes/{nid}", timeout=180)
+        try:
+            if action in ("start", "stop", "reload", "suspend"):
+                st, res = client.node_action(pid, nid, action)
+                request_ok = st in (200, 201)
+            elif action == "delete":
+                st, res = client.delete(f"/v2/projects/{pid}/nodes/{nid}", timeout=180)
+                request_ok = st in (200, 204)
+            else:
+                return {"error": f"acción desconocida: {action}"}
+            time.sleep(0.8)
+            state = client.node_detail(pid, nid)
+        except ConnectionError as e:
+            return {"error": str(e), "results": results}
+        except RuntimeError as e:
+            state = {"error": str(e)}
+        if not request_ok:
+            detail = _err_msg(st, res, f"{action} de {t['name']}")["error"]
         else:
-            return {"error": f"acción desconocida: {action}"}
-        time.sleep(0.8)
-        state = _api("GET", f"/v2/projects/{pid}/nodes/{nid}")
+            detail = state.get("error") if isinstance(state, dict) else None
         results.append({
             "name": t["name"],
-            "request_ok": not (isinstance(res, dict) and res.get("error")),
+            "request_ok": request_ok,
             "status": state.get("status") if isinstance(state, dict) else None,
-            "detail": res if isinstance(res, dict) and res.get("error") else None,
+            "detail": detail,
         })
     return results
 
@@ -505,8 +599,14 @@ def gns3_links(
     port_a: int = 0,
     adapter_b: int = 0,
     port_b: int = 0,
+    filters: Optional[dict] = None,
 ) -> Any:
-    """Enlaces: action=list|add|delete. add exige node_a y node_b (adaptadores/ puertos por defecto 0)."""
+    """Enlaces: action=list|add|update|delete.
+
+    add    — exige node_a y node_b (adaptadores/puertos por defecto 0).
+    update — exige link_id y `filters` (p. ej. {"latency": 50, "packet_loss": 5,
+             "corrupt": 0, "frequency_drop": 0, "jitter": 0}).
+    """
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
         return {"error": "proyecto no encontrado"}
@@ -545,13 +645,35 @@ def gns3_links(
         link = _api("POST", f"/v2/projects/{pid}/links", body)
         return link if not isinstance(link, dict) or not link.get("error") else link
 
+    if action == "update":
+        if not link_id:
+            return {"error": "update exige link_id"}
+        if filters is None:
+            return {"error": "update exige filters (latency, packet_loss, corrupt, "
+                             "frequency_drop, jitter)"}
+        try:
+            st, res = _client().link_update(pid, link_id, {"filters": filters})
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st not in (200, 201):
+            return _err_msg(st, res, "actualizar enlace")
+        out = {"updated": True, "link_id": link_id}
+        out["filters"] = (res or {}).get("filters", filters) if isinstance(res, dict) else filters
+        return out
+
     if action == "delete":
         if not link_id:
             return {"error": "link_id es obligatorio"}
-        _api("DELETE", f"/v2/projects/{pid}/links/{link_id}")
-        return {"deleted": True, "link_id": link_id}
+        try:
+            st, res = _client().link_delete(pid, link_id)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        out = {"deleted": st in (200, 204), "link_id": link_id}
+        if not out["deleted"]:
+            out.update(_err_msg(st, res, "borrar enlace"))
+        return out
 
-    return {"error": f"acción desconocida: {action}"}
+    return {"error": f"acción desconocida: {action}", "valid": ["list", "add", "update", "delete"]}
 
 
 @mcp.tool
@@ -756,9 +878,14 @@ def gns3_capture(
     node_a: Optional[str] = None,
     node_b: Optional[str] = None,
     summary_lines: int = 40,
+    file_name: Optional[str] = None,
 ) -> Any:
     """Captura de un enlace: action=start|stop|read.
-    start/stop/read exigen link_id o (node_a y node_b) para localizarlo; read resume el pcap con tshark."""
+
+    start/stop/read exigen link_id o (node_a y node_b) para localizarlo. `file_name` fija
+    el nombre del pcap en el proyecto (por defecto `capture-<link_id>.pcap`); `read` resume
+    el pcap con tshark.
+    """
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
         return {"error": "proyecto no encontrado"}
@@ -779,19 +906,40 @@ def gns3_capture(
             return {"error": "no se encontró el enlace entre esos nodos"}
 
     action = action.lower()
+    client = _client()
     if action == "start":
-        res = _api("POST", f"/v2/projects/{pid}/links/{link_id}/start_capture",
-                   {"data_link_type": "DLT_EN10MB", "capture_file_name": f"capture-{link_id[:8]}.pcap"})
-        return {"started": not (isinstance(res, dict) and res.get("error")), "link_id": link_id, "detail": res}
+        try:
+            st, res = client.link_capture(pid, link_id, "start", file_name)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        out = {"started": st in (200, 201), "link_id": link_id,
+               "file_name": file_name or f"capture-{link_id[:8]}.pcap", "detail": res}
+        if st not in (200, 201):
+            out.update(_err_msg(st, res, "iniciar captura"))
+        return out
     if action == "stop":
-        _api("POST", f"/v2/projects/{pid}/links/{link_id}/stop_capture")
-        return {"stopped": True, "link_id": link_id}
+        try:
+            st, res = client.link_capture(pid, link_id, "stop")
+        except ConnectionError as e:
+            return {"error": str(e)}
+        out = {"stopped": st in (200, 201), "link_id": link_id, "detail": res}
+        if st not in (200, 201):
+            out.update(_err_msg(st, res, "parar captura"))
+        return out
 
     if action == "read":
-        pcap = _api("GET", f"/v2/projects/{pid}/links/{link_id}/pcap", raw=True, timeout=180)
-        if isinstance(pcap, dict):
+        try:
+            st, pcap = client.link_capture(pid, link_id, "pcap")
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st != 200 or not isinstance(pcap, bytes):
             # 409 cuando la captura ya se paró: el fichero sigue en disco dentro del proyecto
-            proj = _api("GET", f"/v2/projects/{pid}")
+            download_error = _err_msg(st, pcap, "leer pcap")
+            try:
+                proj = client.project_get(pid)
+            except (ConnectionError, RuntimeError) as e:
+                return {"error": "no se pudo descargar el pcap", "detail": download_error,
+                        "project_error": str(e)}
             base = Path(proj.get("path", "")) if isinstance(proj, dict) else None
             cands = sorted(
                 (base / "project-files" / "captures").glob("*.pcap"),
@@ -799,7 +947,7 @@ def gns3_capture(
             ) if base and base.exists() else []
             if not cands:
                 return {"error": "no se pudo descargar el pcap y no hay ficheros en project-files/captures",
-                        "detail": pcap}
+                        "detail": download_error}
             pcap = cands[0].read_bytes()
         out_dir = Path(os.path.expanduser("~/GNS3/captures"))
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -836,48 +984,121 @@ def gns3_snapshots(
     if err:
         return {"error": "no se pudo abrir el proyecto", "detail": err}
     action = action.lower()
+    client = _client()
 
     restart: list[str] = []
+    restart_failed: list[dict] = []
+    stop_failed: list[dict] = []
     if stop_nodes and action in ("create", "restore"):
         for n in _nodes(pid):
             if n.get("status") == "started":
-                restart.append(n["node_id"])
-                _api("POST", f"/v2/projects/{pid}/nodes/{n['node_id']}/stop", timeout=180)
-        time.sleep(1)
+                nid = n["node_id"]
+                restart.append(nid)
+                try:
+                    st, res = client.node_action(pid, nid, "stop")
+                except ConnectionError as e:
+                    stop_failed.append({"node_id": nid, "error": str(e)})
+                    continue
+                if st not in (200, 201):
+                    stop_failed.append({"node_id": nid,
+                                        "error": _err_msg(st, res, "parar nodo")["error"]})
+        if restart:
+            time.sleep(1)
+
+    def restart_nodes() -> None:
+        for nid in restart:
+            try:
+                st, res = client.node_action(pid, nid, "start")
+            except ConnectionError as e:
+                restart_failed.append({"node_id": nid, "error": str(e)})
+                continue
+            if st not in (200, 201):
+                restart_failed.append({"node_id": nid,
+                                       "error": _err_msg(st, res, "arrancar nodo")["error"]})
+
+    def with_restart(out: dict) -> dict:
+        if restart_failed:
+            out["restart_failed"] = restart_failed
+        return out
+
+    if stop_failed:
+        restart_nodes()
+        return with_restart({"error": stop_failed[0]["error"], "stop_failed": stop_failed})
 
     if action == "list":
-        snaps = _api("GET", f"/v2/projects/{pid}/snapshots") or []
+        try:
+            snaps = client.snapshots(pid)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        snaps, list_error = _verified_list(client, f"/v2/projects/{pid}/snapshots",
+                                           snaps, "listar snapshots")
+        if list_error:
+            return list_error
         return [{"name": s.get("name"), "snapshot_id": s.get("snapshot_id"), "created_at": s.get("created_at")}
-                for s in snaps] if isinstance(snaps, list) else snaps
+                for s in snaps]
     if action == "create":
-        res = _api("POST", f"/v2/projects/{pid}/snapshots", {"name": name or f"snap-{int(time.time())}"}, timeout=300)
-        for nid in restart:
-            _api("POST", f"/v2/projects/{pid}/nodes/{nid}/start", timeout=180)
-        return res
+        try:
+            st, res = client.snapshot_create(pid, name or f"snap-{int(time.time())}")
+        except ConnectionError as e:
+            out = {"error": str(e)}
+        else:
+            out = ((res if isinstance(res, dict) else {"detail": res})
+                   if st in (200, 201) else _err_msg(st, res, "crear snapshot"))
+        finally:
+            restart_nodes()
+        return with_restart(out)
     if action in ("restore", "delete"):
         if not snapshot_id:
-            snaps = _api("GET", f"/v2/projects/{pid}/snapshots") or []
+            try:
+                snaps = client.snapshots(pid)
+            except ConnectionError as e:
+                restart_nodes()
+                return with_restart({"error": str(e)})
+            snaps, list_error = _verified_list(client, f"/v2/projects/{pid}/snapshots",
+                                               snaps, "listar snapshots")
+            if list_error:
+                restart_nodes()
+                return with_restart(list_error)
             match = next((s for s in snaps if str(s.get("name", "")).lower() == (name or "").lower()), None)
             if not match:
-                return {"error": "snapshot no encontrado", "available": [s.get("name") for s in snaps]}
+                restart_nodes()
+                return with_restart({"error": "snapshot no encontrado",
+                                     "available": [s.get("name") for s in snaps]})
             snapshot_id = match["snapshot_id"]
-        if action == "restore":
-            res = _api("POST", f"/v2/projects/{pid}/snapshots/{snapshot_id}/restore", timeout=300)
+        try:
+            if action == "restore":
+                st, res = client.snapshot_restore(pid, snapshot_id)
+            else:
+                st, res = client.snapshot_delete(pid, snapshot_id)
+        except ConnectionError as e:
+            out = {"error": str(e)}
         else:
-            _api("DELETE", f"/v2/projects/{pid}/snapshots/{snapshot_id}")
-            res = {"deleted": True, "snapshot_id": snapshot_id}
-        for nid in restart:
-            _api("POST", f"/v2/projects/{pid}/nodes/{nid}/start", timeout=180)
-        return res
+            if action == "delete":
+                out = {"deleted": st in (200, 204), "snapshot_id": snapshot_id}
+                if not out["deleted"]:
+                    out.update(_err_msg(st, res, "borrar snapshot"))
+            else:
+                out = ((res if isinstance(res, dict) else {"detail": res})
+                       if st in (200, 201) else _err_msg(st, res, "restaurar snapshot"))
+        finally:
+            restart_nodes()
+        return with_restart(out)
     return {"error": f"acción desconocida: {action}"}
 
 
 @mcp.tool
 def gns3_images(emulator: str = "qemu") -> Any:
     """Imágenes disponibles en el compute local para un emulador (qemu por defecto)."""
-    imgs = _api("GET", f"/v2/computes/local/{emulator}/images", timeout=180)
-    if not isinstance(imgs, list):
-        return imgs
+    client = _client()
+    try:
+        imgs = client.images(emulator)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    emulator = emulator.removesuffix("/images")
+    imgs, list_error = _verified_list(client, f"/v2/computes/local/{emulator}/images",
+                                      imgs, "listar imágenes")
+    if list_error:
+        return list_error
     return [{"filename": i.get("filename"), "size_mb": round(i.get("filesize", 0) / 1048576, 1), "md5": i.get("md5sum")}
             for i in imgs if not i.get("filename", "").endswith(".md5sum")]
 
@@ -941,9 +1162,9 @@ def _client():
 def _pid_or_error(client, project_id, project_name):
     try:
         proj = client.resolve_project(project_id or project_name)
-    except SystemExit as e:
+        client.ensure_open(proj["project_id"])
+    except (SystemExit, ConnectionError, RuntimeError) as e:
         return None, {"error": str(e)}
-    client.ensure_open(proj["project_id"])
     return proj, None
 
 
@@ -1252,10 +1473,13 @@ def gns3_upload(path: str, name: Optional[str] = None, compress: bool = True,
                 tmp = None
     client = _client()
     data = payload.read_bytes()
-    st, res = client.req("POST", f"/v2/computes/local/{emulator}/images/{target_name}",
-                         data=data, ctype="application/octet-stream", timeout=1800)
-    if tmp:
-        tmp.unlink(missing_ok=True)
+    try:
+        st, res = client.compute_write_file("local", emulator, target_name, data)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    finally:
+        if tmp:
+            tmp.unlink(missing_ok=True)
     if st not in (200, 201, 204):
         msg = res.get("message") if isinstance(res, dict) else res
         return {"error": f"subida falló: [{st}] {msg}"}
@@ -1265,24 +1489,40 @@ def gns3_upload(path: str, name: Optional[str] = None, compress: bool = True,
             "images": listed if not listed or target_name in listed else listed[:30]}
 
 
+def _note_svg(text: Optional[str], width: int, height: int, color: str) -> str:
+    """SVG de la nota del canvas (2.2.61 rechaza width/height como campos aparte)."""
+    esc = (text or "").replace("&", "&amp;").replace("<", "&lt;")
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        f'<rect width="{width}" height="{height}" fill="none" stroke="{color}" '
+        f'stroke-width="2" rx="6"/>'
+        f'<text x="8" y="{min(22, height-8)}" font-size="14" fill="{color}">'
+        f'{esc}</text></svg>'
+    )
+
+
 @mcp.tool
 def gns3_drawings(
     action: str = "list",
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
-    x: int = 0,
-    y: int = 0,
+    x: Optional[int] = None,
+    y: Optional[int] = None,
     text: Optional[str] = None,
     width: int = 220,
     height: int = 60,
-    color: str = "#ffffff",
+    color: Optional[str] = None,
     rotation: int = 0,
     drawing_id: Optional[str] = None,
 ) -> Any:
-    """Anotaciones del canvas: action=list|text|rect|clear|delete.
+    """Anotaciones del canvas: action=list|text|rect|update|clear|delete.
 
     Sirve para dejar el direccionamiento del enunciado escrito en el proyecto (el
     profesor lo ve al corregir) sin añadir nodos que ocupan consola.
+
+    update — por `drawing_id`: mueve (`x`, `y`) y/o reescribe `text` y `color`. Conserva
+             el tamaño y el texto que ya tenía la nota si no se pasan.
     """
     client = _client()
     proj, err = _pid_or_error(client, project_id, project_name)
@@ -1292,47 +1532,101 @@ def gns3_drawings(
     action = action.lower()
 
     if action == "list":
-        st, res = client.get(f"/v2/projects/{pid}/drawings")
-        return res if st == 200 else {"error": f"HTTP {st}", "detail": res}
+        try:
+            res = client.drawings(pid)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        res, list_error = _verified_list(client, f"/v2/projects/{pid}/drawings",
+                                         res, "listar drawings")
+        return list_error if list_error else res
 
     if action == "clear":
-        st, res = client.get(f"/v2/projects/{pid}/drawings")
-        if st != 200 or not isinstance(res, list):
-            return {"error": f"no puedo listar drawings: [{st}]"}
+        try:
+            res = client.drawings(pid)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        res, list_error = _verified_list(client, f"/v2/projects/{pid}/drawings",
+                                         res, "listar drawings")
+        if list_error:
+            return list_error
         borrados = 0
         for d in res:
-            s2, _ = client.delete(f"/v2/projects/{pid}/drawings/{d['drawing_id']}")
+            try:
+                s2, _ = client.drawing_delete(pid, d["drawing_id"])
+            except ConnectionError as e:
+                return {"error": str(e), "deleted": borrados, "of": len(res)}
             borrados += 1 if s2 in (200, 204) else 0
         return {"deleted": borrados, "of": len(res)}
 
     if action == "delete":
         if not drawing_id:
             return {"error": "action=delete exige drawing_id"}
-        st, _ = client.delete(f"/v2/projects/{pid}/drawings/{drawing_id}")
-        return {"deleted": st in (200, 204), "drawing_id": drawing_id}
+        try:
+            st, res = client.drawing_delete(pid, drawing_id)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        out = {"deleted": st in (200, 204), "drawing_id": drawing_id}
+        if not out["deleted"]:
+            out.update(_err_msg(st, res, "borrar drawing"))
+        return out
+
+    if action == "update":
+        if not drawing_id:
+            return {"error": "action=update exige drawing_id"}
+        try:
+            st, cur = client.get(f"/v2/projects/{pid}/drawings/{drawing_id}")
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st != 200 or not isinstance(cur, dict):
+            return {"error": f"drawing no encontrado: {drawing_id}", "detail": cur}
+        body: dict = {}
+        if x is not None:
+            body["x"] = x
+        if y is not None:
+            body["y"] = y
+        if text is not None or color is not None:
+            svg = str(cur.get("svg") or "")
+            mw = re.search(r'width="(\d+)"', svg)
+            mh = re.search(r'height="(\d+)"', svg)
+            mt = re.search(r"<text[^>]*>(.*?)</text>", svg, re.S)
+            mc = re.search(r'stroke="([^"]+)"', svg)
+            old_text = html.unescape(mt.group(1)) if mt else ""
+            new_text = text if text is not None else old_text
+            body["svg"] = _note_svg(new_text,
+                                    int(mw.group(1)) if mw else width,
+                                    int(mh.group(1)) if mh else height,
+                                    color or (mc.group(1) if mc else "#ffffff"))
+        if not body:
+            return {"error": "update sin cambios: pasa x, y, text o color"}
+        try:
+            st, res = client.drawing_update(pid, drawing_id, body)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st not in (200, 201):
+            return _err_msg(st, res, "actualizar drawing")
+        got = res if isinstance(res, dict) else {}
+        return {"updated": True, "drawing_id": drawing_id,
+                "x": got.get("x", body.get("x")), "y": got.get("y", body.get("y")),
+                "text": new_text if "svg" in body else None, "drawing": res}
 
     if action in ("text", "rect"):
         if action == "text" and text is None:
             return {"error": "action=text exige text"}
         body = {
-            "x": x, "y": y, "z": 0,
+            "x": x if x is not None else 0, "y": y if y is not None else 0, "z": 0,
             "rotation": rotation,          # 2.2.61 rechaza width/height aquí
-            "svg": (
-                f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-                f'xmlns="http://www.w3.org/2000/svg">'
-                f'<rect width="{width}" height="{height}" fill="none" stroke="{color}" '
-                f'stroke-width="2" rx="6"/>'
-                f'<text x="8" y="{min(22, height-8)}" font-size="14" fill="{color}">'
-                f'{(text or "").replace("&", "&amp;").replace("<", "&lt;")}</text></svg>'
-            ),
+            "svg": _note_svg(text, width, height, color or "#ffffff"),
         }
-        st, res = client.post(f"/v2/projects/{pid}/drawings", body)
+        try:
+            st, res = client.drawing_create(pid, body)
+        except ConnectionError as e:
+            return {"error": str(e)}
         if st not in (200, 201):
-            msg = res.get("message") if isinstance(res, dict) else res
-            return {"error": f"no se pudo crear: [{st}] {msg}"}
+            return _err_msg(st, res, "crear drawing")
         return {"created": True, "drawing_id": (res or {}).get("drawing_id"), "text": text}
 
-    return {"error": f"acción desconocida: {action}", "valid": ["list", "text", "rect", "clear", "delete"]}
+    return {"error": f"acción desconocida: {action}",
+            "valid": ["list", "text", "rect", "update", "clear", "delete"]}
 
 
 @mcp.tool
@@ -1422,6 +1716,173 @@ def gns3_project_io(
                 "nodes": len(client.nodes(nuevo)) if opened else None}
 
     return {"error": f"acción desconocida: {action}", "valid": ["export", "import", "duplicate"]}
+
+
+def _pat_match(value: Any, pattern: Optional[str]) -> bool:
+    """Coincidencia por glob si el patrón lo parece, por subcadena si no."""
+    if not pattern:
+        return True
+    val, pat = str(value or "").lower(), pattern.lower()
+    if any(ch in pat for ch in "*?["):
+        return fnmatch.fnmatch(val, pat)
+    return pat in val
+
+
+@mcp.tool
+def gns3_compute(cid: str = "local") -> Any:
+    """Compute del servidor (por defecto `local`): capabilities, host, uso de CPU/RAM.
+
+    Es el `GET /v2/computes/{id}` de la API: sirve para saber qué node_types acepta el
+    servidor y si está conectado antes de crear nodos.
+    """
+    client = _client()
+    try:
+        info = client.compute(cid)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    if not info:
+        try:
+            st, body = client.get(f"/v2/computes/{cid}")
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st != 200:
+            return _err_msg(st, body, "obtener compute")
+        return {"error": f"compute no encontrado: {cid}"}
+    return info
+
+
+@mcp.tool
+def gns3_statistics() -> Any:
+    """Estadísticas de uso de cada compute: CPU, disco, RAM y swap."""
+    client = _client()
+    try:
+        stats = client.statistics()
+    except ConnectionError as e:
+        return {"error": str(e)}
+    stats, list_error = _verified_list(client, "/v2/statistics", stats, "listar estadísticas")
+    return list_error if list_error else stats
+
+
+@mcp.tool
+def gns3_symbols(pattern: Optional[str] = None) -> Any:
+    """Símbolos del servidor (`GET /v2/symbols`), filtrables por nombre o symbol_id.
+
+    `pattern` acepta glob (`router*`, `*switch*`) o subcadena; sin él devuelve todos.
+    """
+    client = _client()
+    try:
+        syms = client.symbols()
+    except ConnectionError as e:
+        return {"error": str(e)}
+    syms, list_error = _verified_list(client, "/v2/symbols", syms, "listar símbolos")
+    if list_error:
+        return list_error
+    return [
+        {"filename": s.get("filename"), "symbol_id": s.get("symbol_id"),
+         "theme": s.get("theme"), "builtin": s.get("builtin")}
+        for s in syms
+        if _pat_match(s.get("filename"), pattern) or _pat_match(s.get("symbol_id"), pattern)
+    ]
+
+
+@mcp.tool
+def gns3_appliances(pattern: Optional[str] = None) -> Any:
+    """Appliances del servidor (`GET /v2/appliances`), filtrables por nombre, fabricante
+    o categoría. Sin `pattern` devuelve todas; la descripción va recortada a 300 caracteres.
+    """
+    client = _client()
+    try:
+        apps = client.appliances()
+    except ConnectionError as e:
+        return {"error": str(e)}
+    apps, list_error = _verified_list(client, "/v2/appliances", apps, "listar appliances")
+    if list_error:
+        return list_error
+    out = []
+    for a in apps:
+        if not any(_pat_match(a.get(k), pattern)
+                   for k in ("name", "product_name", "vendor_name", "category")):
+            continue
+        out.append({
+            "name": a.get("name"),
+            "product_name": a.get("product_name"),
+            "category": a.get("category"),
+            "vendor_name": a.get("vendor_name"),
+            "status": a.get("status"),
+            "symbol": a.get("symbol"),
+            "description": str(a.get("description") or "")[:300],
+        })
+    return out
+
+
+@mcp.tool
+def gns3_node_action(
+    node: str,
+    action: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Arranca, para, reinicia o suspende **un** nodo: action=start|stop|reload|suspend.
+
+    `node` acepta nombre, patrón o node_id. Devuelve el estado real releído del nodo, no
+    sólo el 200 del POST. Para varios nodos a la vez, `gns3_nodes(action=...)`.
+    """
+    action = action.lower()
+    if action not in ("start", "stop", "reload", "suspend"):
+        return {"error": f"acción de nodo desconocida: {action}",
+                "valid": ["start", "stop", "reload", "suspend"]}
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        target = client.find_node(proj["project_id"], node)
+    except (SystemExit, ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    try:
+        st, res = client.node_action(proj["project_id"], target["node_id"], action)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    if st not in (200, 201):
+        return _err_msg(st, res, f"{action} de {target['name']}")
+    time.sleep(0.8)
+    try:
+        detail = client.node_detail(proj["project_id"], target["node_id"])
+    except (ConnectionError, RuntimeError) as e:
+        return {"node": target["name"], "action": action, "request_ok": True,
+                "status": None, "error": str(e)}
+    return {"node": target["name"], "node_id": target["node_id"], "action": action,
+            "request_ok": True, "status": detail.get("status")}
+
+
+@mcp.tool
+def gns3_command_line(
+    node: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Línea de comandos con la que el servidor arranca el nodo (QEMU/dynamips/IOU).
+
+    Es `command_line` del detalle del nodo: dice qué binario y qué flags usa, útil para
+    depurar un arranque que no llega a consola.
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        target = client.find_node(proj["project_id"], node)
+    except (SystemExit, ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    try:
+        line = client.node_command_line(proj["project_id"], target["node_id"])
+    except (ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    out: dict = {"node": target["name"], "node_id": target["node_id"], "command_line": line}
+    if not line:
+        out["detail"] = ("el nodo no expone command_line (sólo qemu, dynamips e iou lo "
+                         "tienen; docker, vpcs y los switches no)")
+    return out
 
 
 if __name__ == "__main__":
