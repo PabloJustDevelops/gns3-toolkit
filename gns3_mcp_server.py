@@ -8,6 +8,7 @@ Transporte: stdio. Uso: gns3-mcp  (o python -m gns3_mcp_server)
 """
 from __future__ import annotations
 
+import base64
 import configparser
 import fnmatch
 import html
@@ -100,6 +101,10 @@ def _err_msg(status: int, body: Any, what: str) -> dict:
             m = re.search(r'"message"\s*:\s*"([^"]+)"', msg[msg.find("{"):])
             if m:
                 msg = m.group(1)
+            else:
+                m = re.search(r"['\"]([^'\"]+)['\"]\]", msg[msg.find("{"):])
+                if m:
+                    msg = m.group(1)
     if msg is None:
         msg = "sin detalle"
     return {"error": f"{what} falló: [{status}] {str(msg)[:400]}"}
@@ -387,8 +392,12 @@ def gns3_template(
     project_name: Optional[str] = None,
     x: int = 0,
     y: int = 0,
+    new_name: Optional[str] = None,
+    filename: Optional[str] = None,
+    content: Optional[str] = None,
+    confirm: bool = False,
 ) -> Any:
-    """Plantillas del servidor: action=list|create|update|delete|apply.
+    """Plantillas del servidor: action=list|create|update|delete|apply|duplicate|base-config.
 
     list   — nombre, tipo y template_id de cada plantilla.
     create — desde un nodo existente (`from_node`, nombre o id, copia `node_type` y
@@ -400,6 +409,10 @@ def gns3_template(
     delete — por `name` o `template_id`; devuelve `{"deleted": bool}`.
     apply  — instancia la plantilla (`name` o `template_id`) en un proyecto, en (`x`, `y`);
              delega en `gns3_node_edit(action="create", template=...)`.
+    duplicate — duplica la plantilla; `new_name` nombra la copia.
+    base-config — sin `filename`, lista las configuraciones base disponibles. Con
+              `template_id`/`name` y `filename`, lee la configuración; con `content`
+              la sobrescribe y exige `confirm=True`.
     """
     action = action.lower()
     client = _client()
@@ -509,7 +522,43 @@ def gns3_template(
             return res
         return {"template": tpl.get("name"), "template_id": tpl["template_id"], "node": res}
 
-    return {"error": f"acción desconocida: {action}", "valid": ["list", "create", "update", "delete", "apply"]}
+    if action == "duplicate":
+        tpl, err = _resolve_template(client, template_id, name)
+        if err:
+            return err
+        try:
+            st, res = client.template_duplicate(tpl["template_id"], new_name)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        return res if st in (200, 201) else _err_msg(st, res, "duplicar plantilla")
+
+    if action == "base-config":
+        if filename is None:
+            try:
+                st, res = client.template_base_configs()
+            except ConnectionError as e:
+                return {"error": str(e)}
+            return res if st == 200 else _err_msg(st, res, "listar configuraciones base")
+        if content is not None and not confirm:
+            return {"error": "sobrescribir una configuración base exige confirm=True"}
+        tpl, err = _resolve_template(client, template_id, name)
+        if err:
+            return err
+        try:
+            got = client.template_base_config(tpl["template_id"], filename, content)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if content is None:
+            if isinstance(got, dict) and got.get("error"):
+                return got
+            return {"template": tpl.get("name"), "filename": filename, "content": got}
+        st, res = got
+        if st not in (200, 201):
+            return _err_msg(st, res, "escribir configuración base")
+        return {"updated": True, "template": tpl.get("name"), "filename": filename}
+
+    return {"error": f"acción desconocida: {action}",
+            "valid": ["list", "create", "update", "delete", "apply", "duplicate", "base-config"]}
 
 
 @mcp.tool
@@ -601,7 +650,7 @@ def gns3_links(
     port_b: int = 0,
     filters: Optional[dict] = None,
 ) -> Any:
-    """Enlaces: action=list|add|update|delete.
+    """Enlaces: action=list|add|update|delete|filters.
 
     add    — exige node_a y node_b (adaptadores/puertos por defecto 0).
     update — exige link_id y `filters` (p. ej. {"latency": 50, "packet_loss": 5,
@@ -673,7 +722,16 @@ def gns3_links(
             out.update(_err_msg(st, res, "borrar enlace"))
         return out
 
-    return {"error": f"acción desconocida: {action}", "valid": ["list", "add", "update", "delete"]}
+    if action == "filters":
+        if not link_id:
+            return {"error": "filters exige link_id"}
+        try:
+            st, res = _client().link_available_filters(pid, link_id)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        return res if st == 200 else _err_msg(st, res, "obtener filtros del enlace")
+
+    return {"error": f"acción desconocida: {action}", "valid": ["list", "add", "update", "delete", "filters"]}
 
 
 @mcp.tool
@@ -867,6 +925,50 @@ def gns3_console(
         "commands": commands,
         "output": output,
     }
+
+
+@mcp.tool
+def gns3_console_control(
+    node: str,
+    action: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    confirm: bool = False,
+) -> Any:
+    """Consola de un nodo: action=reset|url.
+
+    reset reinicia la consola y exige `confirm=True`; url devuelve la URL WebSocket
+    expuesta por el nodo sin abrir VNC.
+    """
+    action = action.lower()
+    if action not in ("reset", "url"):
+        return {"error": f"acción desconocida: {action}", "valid": ["reset", "url"]}
+    if action == "reset" and not confirm:
+        return {"error": "reset de la consola exige confirm=True"}
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        target = client.find_node(proj["project_id"], node)
+    except (SystemExit, ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    nid = target["node_id"]
+    if action == "url":
+        try:
+            url = client.console_ws_url(proj["project_id"], nid)
+        except (ConnectionError, RuntimeError) as e:
+            return {"error": str(e)}
+        if not url:
+            return {"error": f"{target['name']} no expone URL de consola WebSocket"}
+        return {"node": target["name"], "url": url}
+    try:
+        st, res = client.console_reset(proj["project_id"], nid)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    if st not in (200, 201, 204):
+        return _err_msg(st, res, "resetear consola")
+    return {"reset": True, "node": target["name"], "detail": res}
 
 
 @mcp.tool
@@ -1321,8 +1423,11 @@ def gns3_node_edit(
     disk_image: Optional[str] = None,
     new_disk: Optional[str] = None,
     build_from: Optional[str] = None,
+    size: Optional[int] = None,
+    proposals: bool = False,
+    confirm: bool = False,
 ) -> Any:
-    """Crear, modificar, duplicar o borrar nodos; y clonar el disco de un nodo QEMU.
+    """Crear, modificar, duplicar o borrar nodos; y operar sus discos y consola.
 
     action:
       create      — con `template` (nombre/id) o sin él: `node_type` + `properties`
@@ -1333,13 +1438,21 @@ def gns3_node_edit(
       clone_disk  — copia `disk_image` (o el del nodo) a `new_disk` en images/QEMU y
                     repunta el nodo para no compartir disco entre nodos.
       switch      — atajo: `ports_mapping` como lista de dicts {name,type,vlan}.
+      disk-resize — amplía el disco del nodo QEMU a `size` MiB; exige `confirm=True`.
+      links       — enlaces conectados al nodo.
+      idlepc      — valor idlepc automático; con `proposals=True`, las propuestas.
     """
+    action = action.lower()
+    if action == "disk-resize":
+        if not confirm:
+            return {"error": "disk-resize exige confirm=True"}
+        if size is None or size <= 0:
+            return {"error": "disk-resize exige size entero positivo (MiB)"}
     client = _client()
     proj, err = _pid_or_error(client, project_id, project_name)
     if err:
         return err
     pid = proj["project_id"]
-    action = action.lower()
 
     if action == "create":
         if template:
@@ -1385,6 +1498,33 @@ def gns3_node_edit(
             msg = res.get("message") if isinstance(res, dict) else res
             return {"error": f"duplicate falló: [{st}] {msg}"}
         return core.node_summary(res)
+
+    if action == "disk-resize":
+        try:
+            st, res = client.node_resize_disk(pid, nid, int(size))
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st not in (200, 201, 204):
+            return _err_msg(st, res, "redimensionar disco")
+        return {"resized": True, "node": target["name"], "size_mb": size, "detail": res}
+
+    if action == "links":
+        try:
+            links = client.node_links(pid, nid)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        links, list_error = _verified_list(client, f"/v2/projects/{pid}/nodes/{nid}/links",
+                                           links, "listar enlaces del nodo")
+        return list_error if list_error else links
+
+    if action == "idlepc":
+        try:
+            st, res = client.node_idlepc(pid, nid, proposals)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        if st != 200:
+            return _err_msg(st, res, "obtener idlepc")
+        return {"node": target["name"], "proposals": proposals, "idlepc": res}
 
     if action in ("update", "switch"):
         NODE_LEVEL = {"name", "console", "console_type", "x", "y", "z", "symbol", "locked"}
@@ -1443,7 +1583,8 @@ def gns3_node_edit(
                 "repointed": st in (200, 201), "disk": dst_name}
 
     return {"error": f"acción desconocida: {action}",
-            "valid": ["create", "update", "switch", "delete", "duplicate", "clone_disk"]}
+            "valid": ["create", "update", "switch", "delete", "duplicate", "clone_disk",
+                      "disk-resize", "links", "idlepc"]}
 
 
 @mcp.tool
@@ -1638,19 +1779,28 @@ def gns3_project_io(
     name: Optional[str] = None,
     open_after: bool = True,
 ) -> Any:
-    """Export/import/duplicate de un proyecto (.gns3p).
+    """Export/import/duplicate/load de un proyecto (.gns3p).
 
     export    — descarga a `path` o ~/GNS3/exports/<nombre>-<fecha>.gns3p (para el examen:
                 un proyecto esqueleto que se restaura en el servidor del aula).
     import    — sube un .gns3p; con `name` lo renombra y `open_after` lo abre.
-    duplicate — export + import en el mismo servidor con `name` nuevo ("from-<nombre>").
+    duplicate — duplica el proyecto mediante la API con `name` nuevo.
+    load      — carga un proyecto desde una ruta del servidor (`path`).
     """
+    action = action.lower()
     client = _client()
+    if action == "load":
+        if not path:
+            return {"error": "action=load exige path"}
+        try:
+            st, res = client.project_load(path)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        return res if st in (200, 201) else _err_msg(st, res, "cargar proyecto")
     proj, err = _pid_or_error(client, project_id, project_name)
     if err:
         return err
     pid = proj["project_id"]
-    action = action.lower()
 
     def _export_bytes(stop_nodes: bool = True):
         """Exporta el proyecto, parando los nodos si hace falta.
@@ -1687,18 +1837,21 @@ def gns3_project_io(
         dest.write_bytes(body)
         return {"path": str(dest), "kb": round(len(body) / 1024), "project": proj["name"]}
 
-    if action in ("import", "duplicate"):
-        if action == "duplicate":
-            body = _export_bytes()
-            new_name = name or f"from-{proj['name']}"
-        else:
-            if not path:
-                return {"error": "action=import exige path"}
-            src = Path(path).expanduser()
-            if not src.is_file():
-                return {"error": f"no existe {src}"}
-            body = src.read_bytes()
-            new_name = name
+    if action == "duplicate":
+        try:
+            st, res = client.project_duplicate(pid, name)
+        except ConnectionError as e:
+            return {"error": str(e)}
+        return res if st in (200, 201) else _err_msg(st, res, "duplicar proyecto")
+
+    if action == "import":
+        if not path:
+            return {"error": "action=import exige path"}
+        src = Path(path).expanduser()
+        if not src.is_file():
+            return {"error": f"no existe {src}"}
+        body = src.read_bytes()
+        new_name = name
         nuevo = str(uuid.uuid4())
         st, res = client.req("POST", f"/v2/projects/{nuevo}/import", data=body,
                              ctype="application/gns3project", timeout=600)
@@ -1715,7 +1868,62 @@ def gns3_project_io(
                 "kb": round(len(body) / 1024), "opened": opened,
                 "nodes": len(client.nodes(nuevo)) if opened else None}
 
-    return {"error": f"acción desconocida: {action}", "valid": ["export", "import", "duplicate"]}
+    return {"error": f"acción desconocida: {action}", "valid": ["export", "import", "duplicate", "load"]}
+
+
+@mcp.tool
+def gns3_project_stats(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Estadísticas reales de un proyecto: nodos, enlaces y estado de sus recursos."""
+    pid, _ = _resolve_project(project_id, project_name)
+    if not pid:
+        return {"error": "proyecto no encontrado", "project_id": project_id,
+                "project_name": project_name}
+    try:
+        st, res = _client().project_stats(pid)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    return res if st == 200 else _err_msg(st, res, "obtener estadísticas del proyecto")
+
+
+@mcp.tool
+def gns3_project_files(
+    action: str,
+    path: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    content: Optional[str] = None,
+) -> Any:
+    """Ficheros del proyecto: action=get|put sobre `path`.
+
+    get devuelve el contenido; put escribe `content` en crudo dentro del proyecto.
+    """
+    action = action.lower()
+    if action not in ("get", "put"):
+        return {"error": f"acción desconocida: {action}", "valid": ["get", "put"]}
+    if not path:
+        return {"error": "path es obligatorio"}
+    if action == "put" and content is None:
+        return {"error": "action=put exige content"}
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    pid = proj["project_id"]
+    try:
+        if action == "get":
+            got = client.project_file_read(pid, path)
+            if isinstance(got, dict) and got.get("error"):
+                return {"path": path, **got}
+            return {"project": proj["name"], "path": path, "content": got}
+        st, res = client.project_file_write(pid, path, content)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    if st not in (200, 201, 204):
+        return _err_msg(st, res, "escribir fichero del proyecto")
+    return {"written": True, "project": proj["name"], "path": path, "detail": res}
 
 
 def _pat_match(value: Any, pattern: Optional[str]) -> bool:
@@ -1729,26 +1937,70 @@ def _pat_match(value: Any, pattern: Optional[str]) -> bool:
 
 
 @mcp.tool
-def gns3_compute(cid: str = "local") -> Any:
-    """Compute del servidor (por defecto `local`): capabilities, host, uso de CPU/RAM.
+def gns3_compute(
+    cid: str = "local",
+    action: str = "info",
+    body: Optional[dict] = None,
+    emulator: Optional[str] = None,
+    operation: Optional[str] = None,
+    confirm: bool = False,
+) -> Any:
+    """Computes: action=info|list|add|update|delete|ports|idlepc|call.
 
-    Es el `GET /v2/computes/{id}` de la API: sirve para saber qué node_types acepta el
-    servidor y si está conectado antes de crear nodos.
+    info es el comportamiento original. add/update reciben `body`; update y delete
+    exigen `confirm=True`. call invoca `/computes/{cid}/{emulator}/{operation}`;
+    si lleva `body` (POST) también exige confirmación.
     """
+    action = action.lower()
+    valid = ["info", "list", "add", "update", "delete", "ports", "idlepc", "call"]
+    if action not in valid:
+        return {"error": f"acción desconocida: {action}", "valid": valid}
+    if action in ("update", "delete") and not confirm:
+        return {"error": f"{action} de compute exige confirm=True"}
+    if action in ("add", "update") and not isinstance(body, dict):
+        return {"error": f"{action} exige body (dict)"}
+    if action == "call":
+        if not (emulator and operation):
+            return {"error": "call exige emulator y operation"}
+        if body is not None and not confirm:
+            return {"error": "call con body exige confirm=True"}
     client = _client()
     try:
-        info = client.compute(cid)
+        if action == "list":
+            computes = client.computes()
+            computes, list_error = _verified_list(client, "/v2/computes", computes, "listar computes")
+            return list_error if list_error else computes
+        if action == "info":
+            info = client.compute(cid)
+            if info:
+                return info
+            st, body = client.get(f"/v2/computes/{cid}")
+            if st != 200:
+                return _err_msg(st, body, "obtener compute")
+            return {"error": f"compute no encontrado: {cid}"}
+        if action == "add":
+            st, res = client.compute_create(body)
+            what = "crear compute"
+        elif action == "update":
+            st, res = client.compute_update(cid, body)
+            what = "actualizar compute"
+        elif action == "delete":
+            st, res = client.compute_delete(cid)
+            return {"deleted": st in (200, 204), "compute_id": cid,
+                    **({} if st in (200, 204) else _err_msg(st, res, "borrar compute"))}
+        elif action == "ports":
+            st, res = client.compute_ports(cid)
+            what = "obtener puertos del compute"
+        elif action == "idlepc":
+            st, res = client.compute_auto_idlepc(cid)
+            what = "calcular idlepc del compute"
+        else:
+            st, res = client.compute_action(cid, emulator, operation, body)
+            what = f"invocar {emulator}/{operation}"
     except ConnectionError as e:
         return {"error": str(e)}
-    if not info:
-        try:
-            st, body = client.get(f"/v2/computes/{cid}")
-        except ConnectionError as e:
-            return {"error": str(e)}
-        if st != 200:
-            return _err_msg(st, body, "obtener compute")
-        return {"error": f"compute no encontrado: {cid}"}
-    return info
+    ok = st in (200, 201, 204)
+    return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, what)
 
 
 @mcp.tool
@@ -1764,25 +2016,72 @@ def gns3_statistics() -> Any:
 
 
 @mcp.tool
-def gns3_symbols(pattern: Optional[str] = None) -> Any:
-    """Símbolos del servidor (`GET /v2/symbols`), filtrables por nombre o symbol_id.
+def gns3_symbols(
+    pattern: Optional[str] = None,
+    action: str = "list",
+    symbol_id: Optional[str] = None,
+    path: Optional[str] = None,
+    content: Optional[str] = None,
+    confirm: bool = False,
+) -> Any:
+    """Símbolos: action=list|dimensions|raw|default|upload.
 
-    `pattern` acepta glob (`router*`, `*switch*`) o subcadena; sin él devuelve todos.
+    list acepta `pattern` (glob o subcadena). dimensions/raw/upload exigen `symbol_id`.
+    upload lee `path` o codifica `content`; al sobrescribir exige `confirm=True`.
     """
+    action = action.lower()
+    if action not in ("list", "dimensions", "raw", "default", "upload"):
+        return {"error": f"acción desconocida: {action}",
+                "valid": ["list", "dimensions", "raw", "default", "upload"]}
     client = _client()
     try:
-        syms = client.symbols()
-    except ConnectionError as e:
+        if action == "list":
+            syms = client.symbols()
+            syms, list_error = _verified_list(client, "/v2/symbols", syms, "listar símbolos")
+            if list_error:
+                return list_error
+            return [
+                {"filename": sym.get("filename"), "symbol_id": sym.get("symbol_id"),
+                 "theme": sym.get("theme"), "builtin": sym.get("builtin")}
+                for sym in syms
+                if _pat_match(sym.get("filename"), pattern) or _pat_match(sym.get("symbol_id"), pattern)
+            ]
+        if action == "default":
+            st, res = client.default_symbols()
+            return res if st == 200 else _err_msg(st, res, "obtener símbolos por defecto")
+        if not symbol_id:
+            return {"error": f"{action} exige symbol_id"}
+        if action == "dimensions":
+            st, res = client.symbol_dimensions(symbol_id)
+            return res if st == 200 else _err_msg(st, res, "obtener dimensiones del símbolo")
+        if action == "raw":
+            st, raw = client.symbol_raw(symbol_id)
+            if st != 200 or not isinstance(raw, bytes):
+                return _err_msg(st, raw, "obtener símbolo crudo")
+            try:
+                return {"symbol_id": symbol_id, "content": raw.decode("utf-8"), "bytes": len(raw)}
+            except UnicodeDecodeError:
+                return {"symbol_id": symbol_id, "content_base64": base64.b64encode(raw).decode("ascii"),
+                        "bytes": len(raw)}
+        if path and content is not None:
+            return {"error": "upload acepta path o content, no ambos"}
+        if not path and content is None:
+            return {"error": "upload exige path o content"}
+        if not confirm:
+            return {"error": "subir un símbolo exige confirm=True"}
+        if path:
+            src = Path(path).expanduser()
+            if not src.is_file():
+                return {"error": f"no existe {src}"}
+            data = src.read_bytes()
+        else:
+            data = content.encode("utf-8")
+        st, res = client.symbol_raw_upload(symbol_id, data)
+    except (ConnectionError, OSError) as e:
         return {"error": str(e)}
-    syms, list_error = _verified_list(client, "/v2/symbols", syms, "listar símbolos")
-    if list_error:
-        return list_error
-    return [
-        {"filename": s.get("filename"), "symbol_id": s.get("symbol_id"),
-         "theme": s.get("theme"), "builtin": s.get("builtin")}
-        for s in syms
-        if _pat_match(s.get("filename"), pattern) or _pat_match(s.get("symbol_id"), pattern)
-    ]
+    if st not in (200, 201, 204):
+        return _err_msg(st, res, "subir símbolo")
+    return {"uploaded": True, "symbol_id": symbol_id, "bytes": len(data), "detail": res}
 
 
 @mcp.tool
@@ -1883,6 +2182,137 @@ def gns3_command_line(
         out["detail"] = ("el nodo no expone command_line (sólo qemu, dynamips e iou lo "
                          "tienen; docker, vpcs y los switches no)")
     return out
+
+
+@mcp.tool
+def gns3_gns3vm(
+    action: str = "show",
+    engine: Optional[str] = None,
+    body: Optional[dict] = None,
+) -> Any:
+    """GNS3 VM: action=show|set|engines|vms.
+
+    set aplica `body`; vms lista las máquinas virtuales de `engine`.
+    """
+    action = action.lower()
+    if action not in ("show", "set", "engines", "vms"):
+        return {"error": f"acción desconocida: {action}", "valid": ["show", "set", "engines", "vms"]}
+    if action == "set" and not isinstance(body, dict):
+        return {"error": "set exige body (dict)"}
+    if action == "vms" and not engine:
+        return {"error": "vms exige engine"}
+    client = _client()
+    try:
+        if action == "show":
+            st, res = client.gns3vm()
+            what = "obtener GNS3 VM"
+        elif action == "set":
+            st, res = client.gns3vm_update(body)
+            what = "actualizar GNS3 VM"
+        elif action == "engines":
+            st, res = client.gns3vm_engines()
+            what = "listar motores de GNS3 VM"
+        else:
+            st, res = client.gns3vm_vms(engine)
+            what = "listar máquinas virtuales"
+    except ConnectionError as e:
+        return {"error": str(e)}
+    ok = st in (200, 201, 204)
+    return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, what)
+
+
+@mcp.tool
+def gns3_notifications(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Notificaciones del servidor o de un proyecto concreto."""
+    pid = None
+    if project_id or project_name:
+        pid, _ = _resolve_project(project_id, project_name)
+        if not pid:
+            return {"error": "proyecto no encontrado", "project_id": project_id,
+                    "project_name": project_name}
+    try:
+        st, res = _client().notifications(pid)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    return res if st == 200 else _err_msg(st, res, "obtener notificaciones")
+
+
+@mcp.tool
+def gns3_iou_license(
+    action: str = "get",
+    body: Optional[dict] = None,
+    confirm: bool = False,
+) -> Any:
+    """Licencia IOU: action=get|set. Cambiarla exige `body` y `confirm=True`."""
+    action = action.lower()
+    if action not in ("get", "set"):
+        return {"error": f"acción desconocida: {action}", "valid": ["get", "set"]}
+    if action == "set":
+        if not isinstance(body, dict):
+            return {"error": "set exige body (dict)"}
+        if not confirm:
+            return {"error": "actualizar la licencia IOU exige confirm=True"}
+    client = _client()
+    try:
+        st, res = client.iou_license() if action == "get" else client.iou_license_update(body)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    what = "obtener licencia IOU" if action == "get" else "actualizar licencia IOU"
+    ok = st in (200, 201, 204)
+    return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, what)
+
+
+@mcp.tool
+def gns3_server(action: str = "version", confirm: bool = False) -> Any:
+    """Servidor: action=version|shutdown|reload|debug.
+
+    shutdown, reload y debug exigen `confirm=True` porque cambian el estado del servidor.
+    """
+    action = action.lower()
+    if action not in ("version", "shutdown", "reload", "debug"):
+        return {"error": f"acción desconocida: {action}",
+                "valid": ["version", "shutdown", "reload", "debug"]}
+    if action != "version" and not confirm:
+        return {"error": f"{action} del servidor exige confirm=True"}
+    client = _client()
+    try:
+        if action == "version":
+            return client.version()
+        methods = {"shutdown": client.server_shutdown, "reload": client.server_reload,
+                   "debug": client.server_debug}
+        st, res = methods[action]()
+    except (ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
+    ok = st in (200, 201, 204)
+    return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, action)
+
+
+@mcp.tool
+def gns3_emulator(action: str = "qemu-capabilities", port: Optional[int] = None) -> Any:
+    """Emuladores y red local: action=qemu-binaries|qemu-capabilities|docker-images|interfaces|ports|udp.
+
+    udp reserva un puerto UDP y exige `port`.
+    """
+    methods = {
+        "qemu-binaries": "qemu_binaries", "qemu-capabilities": "qemu_capabilities",
+        "docker-images": "docker_images", "interfaces": "network_interfaces",
+        "ports": "network_ports", "udp": "udp_port",
+    }
+    action = action.lower()
+    if action not in methods:
+        return {"error": f"acción desconocida: {action}", "valid": list(methods)}
+    if action == "udp" and (port is None or not 1 <= port <= 65535):
+        return {"error": "udp exige port entre 1 y 65535"}
+    client = _client()
+    try:
+        st, res = client.udp_port(port) if action == "udp" else getattr(client, methods[action])()
+    except ConnectionError as e:
+        return {"error": str(e)}
+    ok = st in (200, 201, 204)
+    return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, action)
 
 
 if __name__ == "__main__":
