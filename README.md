@@ -1,11 +1,11 @@
 # gns3-toolkit
 
 Operar un servidor **GNS3 2.2** desde la terminal o desde un agente MCP, sin GUI. Núcleo
-compartido (`gns3core`, **11 áreas** en `API_V2_MAP`), servidor MCP de **26 tools** y CLI
-`gns3lab` con **30 subcomandos**.
+compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **34 tools** y CLI
+`gns3lab` con **37 subcomandos**.
 
-Estado real (2026-11-25), leído del código: **11 áreas** (`gns3core.API_V2_MAP`), **26 tools**
-(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **30 subcomandos** (`gns3lab --help`). Las
+Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **34 tools**
+(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **37 subcomandos** (`gns3lab --help`). Las
 acciones de la GUI operativa portadas al núcleo están en
 [docs/GUI-PORTADA.md](docs/GUI-PORTADA.md); las que aún no tienen comando o tool se marcan
 «en curso» en ese documento.
@@ -47,16 +47,18 @@ gns3lab -s clase port examen-kit --name "Pablo Rodriguez" --start
 
 ## Superficie
 
-**CLI** — 30 subcomandos: `servers compute stats symbols appliances status up down test fix
-export import port images templates template snap console exec shot key type mon new node upload
-draw capture link doctor`. Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
+**CLI** — 37 subcomandos: `servers compute stats symbols appliances project gns3vm notify
+symbol iou-license server emulator status up down test fix export import port images templates
+template snap console exec shot key type mon new node upload draw capture link doctor`.
+Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
 
-**MCP** — 26 tools: `gns3_status gns3_projects gns3_templates gns3_template gns3_nodes
-gns3_links gns3_link_edit gns3_topology gns3_console gns3_capture gns3_snapshots gns3_images
-gns3_node_files gns3_server_paths gns3_exec gns3_monitor gns3_node_edit gns3_upload
-gns3_drawings gns3_project_io gns3_compute gns3_statistics gns3_symbols gns3_appliances
-gns3_node_action gns3_command_line`. Transporte stdio; credenciales leídas de
-`~/.config/GNS3/2.2/gns3_server.conf`.
+**MCP** — 34 tools: `gns3_appliances gns3_capture gns3_command_line gns3_compute gns3_console
+gns3_console_control gns3_drawings gns3_emulator gns3_exec gns3_gns3vm gns3_images
+gns3_iou_license gns3_link_edit gns3_links gns3_monitor gns3_node_action gns3_node_edit
+gns3_node_files gns3_nodes gns3_notifications gns3_project_files gns3_project_io
+gns3_project_stats gns3_projects gns3_server gns3_server_paths gns3_snapshots gns3_statistics
+gns3_status gns3_symbols gns3_template gns3_templates gns3_topology gns3_upload`. Transporte
+stdio; credenciales leídas de `~/.config/GNS3/2.2/gns3_server.conf`.
 
 **Núcleo** — `Client` (REST `/v2`), `Console` (telnet por prompt, `--More--`, `[y/n]`,
 `Password:`), `QemuMonitor` (HMP: `sendkey`, `screendump`, `system_reset`), `ocr`. Sin
@@ -64,11 +66,18 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 
 ## Documentación
 
-- [docs/API-COVERAGE.md](docs/API-COVERAGE.md) — las 11 áreas de la API v2, endpoint a endpoint:
+- [docs/API-COVERAGE.md](docs/API-COVERAGE.md) — las 12 áreas de la API v2, endpoint a endpoint:
   método del núcleo, verbo CLI, tool MCP, test, rutas sin puente agrupadas por handler y lo que
   GNS3 2.2.61 expone y no se cubre.
 - [docs/GUI-PORTADA.md](docs/GUI-PORTADA.md) — lo que hacías en la GUI → comando → tool MCP →
   método del núcleo → endpoint, con las acciones aún «en curso».
+- [docs/NIO-Y-CAPTURAS.md](docs/NIO-Y-CAPTURAS.md) — captura de enlace frente a captura por
+  puerto, body del NIO y qué significa un `500` del compute.
+- [docs/EVENTOS.md](docs/EVENTOS.md) — URLs WebSocket, eventos según los handlers y estado real
+  del cliente (stream HTTP sí, WS en curso).
+- [docs/LIMITES-CONTROLLER-COMPUTE.md](docs/LIMITES-CONTROLLER-COMPUTE.md) — qué rutas son del
+  controller, cuáles se reenvían al compute, por qué hay `409` sin VirtualBox/VMware y por qué
+  existe `/v1/version` pero no `/v2/controller`.
 - [docs/COMPATIBILIDAD.md](docs/COMPATIBILIDAD.md) — qué significa «compatibilidad total», por
   qué GNS3 3.x no se declara soportado y los límites reales.
 - [docs/PARIDAD.md](docs/PARIDAD.md) — operación a operación, qué hay en CLI y qué en MCP.
@@ -85,9 +94,10 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
   compute **local**. En un servidor remoto, el disco tiene que estar ya allí.
 - El puerto de consola no se puede fijar por `PUT` en un nodo: se fija en la plantilla.
 - El OCR lee bien 720x400 con fuente VGA; no espera texto pequeño.
-- Tests: 307 recogidos, 306 pasan y 1 falla: `test_api_map.py::test_api_v2_map_declara_las_ocho_areas`
-  sigue esperando 8 áreas mientras `API_V2_MAP` declara 11 (test no actualizado por el carril del
-  núcleo; este brief no puede tocar `tests/`). Sin servidor: dobles de HTTP, telnet y HMP. La
-  matriz de lo que cubre cada endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).
+- Tests: 416 recogidos, 415 pasan y 1 falla:
+  `test_api_map.py::test_api_v2_map_declara_las_once_areas` sigue esperando 11 áreas mientras
+  `API_V2_MAP` declara 12 (test no actualizado por el carril del núcleo; este brief no puede
+  tocar `tests/`). Sin servidor: dobles de HTTP, telnet y HMP. La matriz de lo que cubre cada
+  endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).
 
 Proyecto y estado: [PROJECT.md](PROJECT.md). Reglas para agentes: [AGENTS.md](AGENTS.md).

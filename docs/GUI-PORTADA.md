@@ -3,8 +3,9 @@
 Tabla de las operaciones de la GUI operativa portadas a `gns3lab`, al MCP y a `gns3core`.
 Los nombres de comando y tool vienen de los contratos de `orchestration/BRIEF-guicli.md` y
 `orchestration/BRIEF-guimcp.md`; los métodos y los endpoints se han verificado en
-`gns3core.py` (`API_V2_MAP` declara 11 áreas) y el inventario de rutas en
-`orchestration/inventario-rutas-gns3.txt`.
+`gns3core.py` (`API_V2_MAP` declara 12 áreas) y el inventario de rutas en
+`orchestration/inventario-rutas-gns3.txt`. Las operaciones NIO/eventos siguen los contratos de
+`BRIEF-niocli.md` y `BRIEF-niomcp.md`.
 
 **Leyenda**
 
@@ -84,12 +85,31 @@ Los nombres de comando y tool vienen de los contratos de `orchestration/BRIEF-gu
 La última ruta (`idlepc_proposals`) está en el handler `dynamips_vm_handler.py`, pero no en
 `API_V2_MAP`; `node_idlepc(proposals=True)` la llama igualmente.
 
+## NIO, capturas por puerto, acciones masivas y eventos
+
+| Lo que hacías en la GUI | Comando CLI | Tool MCP | Método del núcleo | Endpoint |
+|---|---|---|---|---|
+| Ver el NIO de un puerto | `gns3lab nio get <nodo> --adapter N --port N` (en curso) | `gns3_nio(action="get", …)` (en curso) | `port_nio()` † | `GET /v2/computes/local/projects/{id}/{emu}/nodes/{nid}/adapters/{a}/ports/{p}/nio` |
+| Fijar/borrar el NIO | `gns3lab nio add\|rm <nodo> --adapter N --port N [--nio JSON]` (en curso) | `gns3_nio(action="set\|delete", …)` (en curso) | `port_nio()` † | `PUT/DELETE /computes/local/projects/{id}/{emu}/nodes/{nid}/adapters/{a}/ports/{p}/nio` |
+| Capturar un puerto | `gns3lab capture-port <nodo> start\|stop\|pcap --adapter N --port N` (en curso) | `gns3_port_capture(action="start\|stop\|pcap", …)` (en curso) | `port_capture()` † | `POST /computes/local/…/ports/{p}/{start_capture\|stop_capture}`, `GET …/pcap` |
+| Arrancar/parar toda la topología | `gns3lab all start\|stop\|suspend\|reload --yes` (en curso) | `gns3_nodes_bulk(…, confirm=True)` (en curso) | `nodes_action()` † | `POST /v2/projects/{id}/nodes/{start\|stop\|suspend\|reload}` |
+| Reanudar/pausar un nodo | `gns3lab node resume\|pause\|unpause <nodo>` (en curso) | `gns3_node_action(action="resume\|pause\|unpause")` (en curso) | `node_action()` † | `POST /v2/projects/{id}/nodes/{nid}/{resume\|pause\|unpause}` |
+| Reset de todas las consolas | `gns3lab console reset-all --yes` (en curso) | `gns3_console_control(action="reset-all", confirm=True)` (en curso) | `nodes_console_reset()` † | `POST /v2/projects/{id}/nodes/console/reset` |
+| Binarios y configuración qemu-img | `gns3lab disk binaries\|config [--set clave=valor]` (en curso) | `gns3_emulator(action="img-binaries\|img-config")` (en curso) | `qemu_img_binaries()`, `qemu_img_config()` † | `GET /v2/computes/local/qemu/img-binaries`, `POST/PUT …/qemu/img` |
+| VMs invitadas (VirtualBox/VMware) | `gns3lab vm vms\|vmnet [--set clave=valor]` (en curso) | `gns3_emulator(action="virtualbox-vms\|vmware-vms\|vmware-vmnet")` (en curso) | `virtualbox_vms()`, `vmware_vms()`, `vmware_vmnet()` † | `GET /v2/computes/local/{virtualbox\|vmware}/vms`, `POST …/vmware/nodes/interfaces/vmnet` |
+| Ver eventos en vivo | `gns3lab watch [--project] [--seconds N]` (en curso) | `gns3_events_url(...)`, `gns3_events(action="url\|listen")` (en curso) | `notifications_ws_url()` † | `GET /v2/notifications/ws`, `GET /v2/projects/{id}/notifications/ws` |
+| Versión v1 | `gns3lab version-v1` (en curso) | `gns3_status` con `version_v1` (en curso) | `v1_version()` † | `GET /v1/version` |
+
+`nio` y `capture-port` pasan por el compute local; un `500` se muestra con su mensaje literal,
+sin disfrazarlo. Los verbos reales, el body del NIO y el significado del `500` están en
+[NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md); los eventos y su formato en [EVENTOS.md](EVENTOS.md).
+
 ## Cómo se ha verificado
 
 ```bash
-grep -c '^@mcp.tool' gns3_mcp_server.py                 # 26
-./cli/gns3lab --help | head -1 | tr ',' '\n' | wc -l   # 30
-python3 - <<'PY'                                          # 11 áreas en API_V2_MAP
+grep -c '^@mcp.tool' gns3_mcp_server.py                          # 34
+./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l  # 37
+python3 - <<'PY'                                                  # 12 áreas en API_V2_MAP
 import ast, re
 s = open('gns3core.py').read()
 d = ast.literal_eval(re.search(r'API_V2_MAP[^=]*= (\{.*?\n\})', s, re.S).group(1))
@@ -98,9 +118,11 @@ PY
 grep -n 'def node_resize_disk\|def console_reset\|def gns3vm\|def symbols' gns3core.py
 ```
 
-Ejecutados en este árbol: `mcp.list_tools()` devuelve 26 tools y `gns3lab --help` lista 30
-subcomandos; las acciones de los dos briefs aún no figuran en ninguna de las dos listas. Los
-métodos del núcleo y los endpoints sí figuran en `gns3core.py`.
+Ejecutados en este árbol: `mcp.list_tools()` devuelve 34 tools y `gns3lab --help` lista 37
+subcomandos. Las operaciones de esta última tabla (NIO, captura por puerto, acciones masivas,
+eventos WS y versión v1) aún no figuran en ninguna de las dos listas; los métodos del núcleo y
+los endpoints sí figuran en `gns3core.py`. Las marcas «en curso» de las tablas anteriores
+reflejan el estado del carril GUI cuando se escribieron y no se han revisado en este brief.
 
 Matriz endpoint a endpoint en [API-COVERAGE.md](API-COVERAGE.md); límites de versión en
 [COMPATIBILIDAD.md](COMPATIBILIDAD.md); referencia de comandos existentes en
