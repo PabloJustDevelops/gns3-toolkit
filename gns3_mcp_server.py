@@ -399,7 +399,8 @@ def gns3_template(
             out["console"] = real
             out["console_verified"] = real == int(console)
             if not out["console_verified"]:
-                detail = _err_msg(st2, put_res, "fijar console")["error"]
+                detail = (_err_msg(st2, put_res, "fijar console")["error"] if st2 >= 400
+                          else _err_msg(st3, got, "releer plantilla")["error"])
                 out["detail"] = (f"la plantilla no conserva console={console} "
                                  f"(quedó {real}): {detail}")
         return out

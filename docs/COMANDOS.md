@@ -529,7 +529,7 @@ gns3lab doctor examen
 Confirma: bloque final `resumen` con `sin hallazgos` y código 0. Cualquier línea `- ...` es un
 problema y el código es 1; si el servidor no responde, 2.
 
-Salida real de un proyecto cerrado (los nodos aún sin arrancar):
+Ejemplo de salida con un proyecto cerrado (los nodos aún sin arrancar):
 
 ```text
 servidor local (http://127.0.0.1:3080)
