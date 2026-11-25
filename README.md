@@ -2,7 +2,8 @@
 
 Operar un servidor **GNS3 2.2** desde la terminal o desde un agente MCP, sin GUI. Núcleo
 compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **39 tools** y CLI
-`gns3lab` con **42 subcomandos**.
+`gns3lab` con **42 subcomandos**. Repo público:
+https://github.com/PabloJustDevelops/gns3-toolkit
 
 Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **39 tools**
 (`mcp.list_tools()` sobre `gns3_mcp_server.py`), **42 subcomandos** (`handlers` en

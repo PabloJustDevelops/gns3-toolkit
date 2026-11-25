@@ -35,7 +35,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 | 8 | GUI operativa portada (11 áreas, 78 rutas inventariadas) | hecho (`a5993aa` + carriles `gk3-*`) |
 | 9 | NIO/captura por puerto, acciones masivas y eventos WS (12 áreas) | hecho (`7622e25` + carriles `gk4-*`) |
 | 10 | REA de `ubridge` y vías de enganche documentadas | hecho (`opencode/rea`) |
-| 11 | Publicar el repo (privado) | propuesto |
+| 11 | Publicar el repo (público) | hecho (`PabloJustDevelops/gns3-toolkit`) |
 
 ## Bitácora de los carriles paralelos (2026-11-25)
 
