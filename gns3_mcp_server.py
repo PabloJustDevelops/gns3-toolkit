@@ -1470,6 +1470,7 @@ def gns3_nio(
     action: str = "get",
     nio: Optional[dict] = None,
     emulator: Optional[str] = None,
+    compute_id: str = "local",
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
@@ -1503,6 +1504,7 @@ def gns3_nio(
             body=nio if action == "set" else None,
             emulator=emulator,
             delete=action == "delete",
+            compute_id=compute_id,
         )
     except (ConnectionError, RuntimeError) as e:
         return {"error": str(e)}
@@ -1523,6 +1525,7 @@ def gns3_port_capture(
     action: str = "start",
     file_name: Optional[str] = None,
     emulator: Optional[str] = None,
+    compute_id: str = "local",
     project_id: Optional[str] = None,
     project_name: Optional[str] = None,
 ) -> Any:
@@ -1553,7 +1556,7 @@ def gns3_port_capture(
     try:
         st, res = client.port_capture(
             proj["project_id"], target["node_id"], adapter, port, actions[action],
-            file_name=file_name, emulator=emulator,
+            file_name=file_name, emulator=emulator, compute_id=compute_id,
         )
     except (ConnectionError, RuntimeError) as e:
         return {"error": str(e)}
@@ -1692,17 +1695,17 @@ def gns3_snapshots(
 
 
 @mcp.tool
-def gns3_images(emulator: str = "qemu") -> Any:
-    """Imágenes del compute local para un emulador (qemu por defecto): Úsala para saber qué
+def gns3_images(emulator: str = "qemu", compute_id: str = "local") -> Any:
+    """Imágenes del compute para un emulador (qemu por defecto): Úsala para saber qué
     discos hay antes de crear un nodo; las plantillas ya creadas salen en
     `gns3_templates`. **Lectura**."""
     client = _client()
     try:
-        imgs = client.images(emulator)
+        imgs = client.images(emulator, compute_id=compute_id)
     except ConnectionError as e:
         return {"error": str(e)}
     emulator = emulator.removesuffix("/images")
-    imgs, list_error = _verified_list(client, f"/v2/computes/local/{emulator}/images",
+    imgs, list_error = _verified_list(client, f"/v2/computes/{compute_id}/{emulator}/images",
                                       imgs, "listar imágenes")
     if list_error:
         return list_error
@@ -2472,6 +2475,30 @@ def gns3_project_files(
     return {"written": True, "project": proj["name"], "path": path, "detail": res}
 
 
+@mcp.tool
+def gns3_project_file_list(
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+    prefix: Optional[str] = None,
+    compute_id: str = "local",
+) -> Any:
+    """Lista los ficheros del proyecto sin adivinar rutas: Úsala antes de
+    `gns3_project_files`, que lee o escribe una ruta concreta. **Lectura**.
+
+    Devuelve `path`, `type`, `size` (si el servidor lo incluye) y `md5sum`; `prefix`
+    filtra por prefijo de ruta.
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    try:
+        return client.project_file_list(proj["project_id"], compute_id=compute_id,
+                                        prefix=prefix)
+    except ConnectionError as e:
+        return {"error": str(e)}
+
+
 def _pat_match(value: Any, pattern: Optional[str]) -> bool:
     """Coincidencia por glob si el patrón lo parece, por subcadena si no."""
     if not pattern:
@@ -2550,6 +2577,32 @@ def gns3_compute(
         return {"error": str(e)}
     ok = st in (200, 201, 204)
     return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, what)
+
+
+@mcp.tool
+def gns3_compute_endpoint(
+    compute_id: str = "local",
+    emulator: str = "qemu",
+    action: str = "binaries",
+) -> Any:
+    """Resuelve la URL directa de una acción del compute sin descargarla: Úsala para
+    obtener el endpoint de un compute remoto; para invocar la ruta usa `gns3_compute`.
+    **Lectura** (no llama a la URL resuelta; el handler es experimental y puede cambiar).
+    """
+    if not compute_id or not emulator or not action:
+        return {"error": "compute_id, emulator y action son obligatorios"}
+    client = _client()
+    try:
+        st, res = client.compute_endpoint(compute_id, emulator, action)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    if st != 200:
+        return _api_error(st, res, "resolver endpoint del compute")
+    url = res.get("endpoint") if isinstance(res, dict) else None
+    if not url:
+        return {"error": "la API no devolvió endpoint", "detail": res}
+    return {"compute_id": compute_id, "emulator": emulator, "action": action,
+            "endpoint": url}
 
 
 @mcp.tool
@@ -2934,6 +2987,7 @@ def gns3_emulator(
     action: str = "qemu-capabilities",
     port: Optional[int] = None,
     body: Optional[dict] = None,
+    compute_id: str = "local",
     confirm: bool = False,
 ) -> Any:
     """Emuladores y red local. Úsala para binarios, capacidades, interfaces o imágenes del
@@ -2973,6 +3027,8 @@ def gns3_emulator(
             st, res = client.qemu_img_config(body)
         elif action == "vmware-vmnet":
             st, res = client.vmware_vmnet(body)
+        elif action == "qemu-binaries":
+            st, res = client.qemu_binaries(compute_id=compute_id)
         else:
             st, res = getattr(client, methods[action])()
     except ConnectionError as e:

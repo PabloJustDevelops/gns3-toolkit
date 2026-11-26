@@ -179,8 +179,8 @@ class Client:
         st, body = self.get("/v2/templates")
         return body if st == 200 and isinstance(body, list) else []
 
-    def qemu_images(self) -> list[dict]:
-        st, body = self.get("/v2/computes/local/qemu/images")
+    def qemu_images(self, compute_id: str = "local") -> list[dict]:
+        st, body = self.get(f"/v2/computes/{compute_id}/qemu/images")
         return body if st == 200 and isinstance(body, list) else []
 
     def resolve_project(self, needle: Optional[str]) -> dict:
@@ -260,9 +260,9 @@ class Client:
         st, body = self.get("/v2/appliances")
         return body if st == 200 and isinstance(body, list) else []
 
-    def images(self, emulator: str = "qemu") -> list[dict]:
+    def images(self, emulator: str = "qemu", compute_id: str = "local") -> list[dict]:
         emulator = emulator.removesuffix("/images")
-        st, body = self.get(f"/v2/computes/local/{emulator}/images")
+        st, body = self.get(f"/v2/computes/{compute_id}/{emulator}/images")
         return body if st == 200 and isinstance(body, list) else []
 
     def project_get(self, pid: str) -> dict:
@@ -305,14 +305,14 @@ class Client:
 
     def port_nio(self, pid: str, nid: str, adapter: int, port: int,
                  body: Optional[dict] = None, emulator: Optional[str] = None,
-                 delete: bool = False) -> tuple[int, Any]:
+                 delete: bool = False, compute_id: str = "local") -> tuple[int, Any]:
         """NIO de un puerto: la vía de enganche que señaló el REA de ubridge.
 
         Estas rutas seSirven en el compute, no en el controller; el proxy las reenvía.
         Un `500` del compute se devuelve tal cual: es información real, no se disfraza.
         """
         emu = emulator or self._emulator_for(pid, nid)
-        path = (f"/v2/computes/local/projects/{pid}/{emu}/nodes/{nid}"
+        path = (f"/v2/computes/{compute_id}/projects/{pid}/{emu}/nodes/{nid}"
                 f"/adapters/{adapter}/ports/{port}/nio")
         if delete:
             return self.delete(path, timeout=120)
@@ -320,12 +320,13 @@ class Client:
 
     def port_capture(self, pid: str, nid: str, adapter: int, port: int, action: str,
                      file_name: Optional[str] = None,
-                     emulator: Optional[str] = None) -> tuple[int, Any]:
+                     emulator: Optional[str] = None,
+                     compute_id: str = "local") -> tuple[int, Any]:
         """Captura por puerto (`start_capture|stop_capture|pcap`), distinta de la de enlace."""
         if action not in ("start_capture", "stop_capture", "pcap"):
             raise ValueError(f"acción de captura de puerto desconocida: {action}")
         emu = emulator or self._emulator_for(pid, nid)
-        base = (f"/v2/computes/local/projects/{pid}/{emu}/nodes/{nid}"
+        base = (f"/v2/computes/{compute_id}/projects/{pid}/{emu}/nodes/{nid}"
                 f"/adapters/{adapter}/ports/{port}")
         if action == "pcap":
             return self.get(f"{base}/pcap", raw=True, timeout=180)
@@ -478,6 +479,32 @@ class Client:
             return {"error": f"HTTP {st}"}
         return body.decode(errors="replace")
 
+    def project_file_list(self, pid: str, compute_id: str = "local",
+                          prefix: Optional[str] = None) -> list[dict]:
+        """Lista los ficheros del proyecto en el compute (ruta, tipo, tamaño y md5).
+
+        La ruta vive en el compute (`api/compute/project_handler.py:216-233`); el
+        controller la proxya en `GET /v2/computes/{cid}/projects/{pid}/files`.
+        La API sólo devuelve `path` y `md5sum`: `type` se deriva de la extensión y
+        `size` queda en `None` si el servidor no lo incluye.
+        """
+        st, body = self.get(f"/v2/computes/{compute_id}/projects/{pid}/files")
+        if st != 200 or not isinstance(body, list):
+            return []
+        pref = (prefix or "").lstrip("/")
+        files = []
+        for item in body:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").lstrip("/")
+            if pref and not path.startswith(pref):
+                continue
+            ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+            files.append({"path": path, "type": ext or "file",
+                          "size": item.get("size", item.get("filesize")),
+                          "md5sum": item.get("md5sum")})
+        return files
+
     def project_file_write(self, pid: str, path: str, content: str) -> tuple[int, Any]:
         return self.req("POST", f"/v2/projects/{pid}/files/{path.lstrip('/')}",
                         data=content.encode(), ctype="text/plain", timeout=60)
@@ -502,6 +529,16 @@ class Client:
         """Ruta genérica `/computes/{id}/{emulator}/{action}` (GUI: img, binaries…)."""
         path = f"/v2/computes/{cid}/{emulator}/{action}"
         return self.post(path, body, timeout=300) if body is not None else self.get(path)
+
+    def compute_endpoint(self, cid: str, emulator: str, action: str) -> tuple[int, Any]:
+        """Resuelve la URL directa del compute para una acción.
+
+        `GET /v2/computes/endpoint/{cid}/{emulator}/{action}` devuelve JSON
+        `{"endpoint": "<url>"}` (handler experimental, puede cambiar). Este método
+        **no** llama a esa URL: sólo la devuelve para que decida el usuario.
+        """
+        return self.get(f"/v2/computes/endpoint/{cid}/{emulator}/{action.lstrip('/')}",
+                        timeout=60)
 
     def gns3vm(self) -> tuple[int, Any]:
         return self.get("/v2/gns3vm")
@@ -562,8 +599,8 @@ class Client:
     def server_debug(self) -> tuple[int, Any]:
         return self.post("/v2/debug", timeout=60)
 
-    def qemu_binaries(self) -> tuple[int, Any]:
-        return self.get("/v2/computes/local/qemu/binaries")
+    def qemu_binaries(self, compute_id: str = "local") -> tuple[int, Any]:
+        return self.get(f"/v2/computes/{compute_id}/qemu/binaries")
 
     def qemu_capabilities(self) -> tuple[int, Any]:
         return self.get("/v2/computes/local/qemu/capabilities")
@@ -587,7 +624,9 @@ API_V2_MAP: dict[str, tuple[str, ...]] = {
     "server": ("GET /v2/version",),
     "computes": ("GET /v2/computes", "GET /v2/computes/{id}", "GET /v2/statistics",
                  "GET /v2/computes/{id}/{emulator}/images",
-                 "POST /v2/computes/{id}/{emulator}/images/{filename}"),
+                 "POST /v2/computes/{id}/{emulator}/images/{filename}",
+                 "GET /v2/computes/endpoint/{id}/{emulator}/{action}",
+                 "GET /v2/computes/{id}/projects/{pid}/files"),
     "projects": ("GET/POST /v2/projects", "GET/PUT/DELETE /v2/projects/{id}",
                  "POST /v2/projects/{id}/open", "POST /v2/projects/{id}/close",
                  "GET /v2/projects/{id}/export", "POST /v2/projects/{id}/import"),

@@ -683,11 +683,11 @@ def _compute_row(comp: dict) -> dict:
     return {k: comp.get(k) for k in COMPUTE_FIELDS}
 
 
-COMPUTE_ACTIONS = ("add", "update", "rm", "ports", "idlepc", "action")
+COMPUTE_ACTIONS = ("add", "update", "rm", "ports", "idlepc", "action", "endpoint")
 
 
 def _cmd_compute_action(s: Server, c, args, act: str) -> int:
-    """Administración de computes: add, update, rm, ports, idlepc y action."""
+    """Administración de computes: add, update, rm, ports, idlepc, action y endpoint."""
     if act == "add":
         body = _set_body(args.set)
         if not body:
@@ -703,7 +703,7 @@ def _cmd_compute_action(s: Server, c, args, act: str) -> int:
               f"{'verificado' if isinstance(checked, dict) else 'sin verificación'}")
         return 0 if isinstance(checked, dict) else 1
 
-    if act in ("update", "rm", "ports", "idlepc", "action") and not args.cid:
+    if act in ("update", "rm", "ports", "idlepc", "action", "endpoint") and not args.cid:
         raise SystemExit(f"compute {act} exige el compute_id o nombre")
 
     if act == "update":
@@ -764,6 +764,21 @@ def _cmd_compute_action(s: Server, c, args, act: str) -> int:
     if not emulator or not remote:
         raise SystemExit("compute action exige <emulador> <acción> "
                          "(o --emulator y --remote-action)")
+    if act == "endpoint":
+        st, res = _core_call(c.compute_endpoint, args.cid, emulator, remote)
+        if st != 200:
+            print(f"endpoint de {args.cid} {emulator}/{remote} -> "
+                  f"[{st}] {_err(res)}", file=sys.stderr)
+            return 1
+        url = res.get("endpoint") if isinstance(res, dict) else None
+        if args.json:
+            _json_out(res)
+        elif url:
+            print(url)
+        else:
+            print(f"endpoint de {args.cid} {emulator}/{remote}: {res}", file=sys.stderr)
+            return 1
+        return 0
     body = _set_body(args.set) or None
     st, res = _core_call(c.compute_action, args.cid, emulator, remote, body)
     if not _ok(st) and st != 200:
@@ -1505,9 +1520,11 @@ def cmd_images(args, conf):
     s = Server(args.server, conf)
     c = _core_client(s)
     emulador = args.emulator
-    imagenes = _core_call(c.images, emulador)
+    compute_id = getattr(args, "compute", None) or "local"
+    imagenes = _core_call(c.images, emulador, compute_id=compute_id)
     if args.json:
-        _json_out({"emulator": emulador, "count": len(imagenes),
+        _json_out({"emulator": emulador, "compute_id": compute_id,
+                   "count": len(imagenes),
                    "images": [i.get("filename") for i in imagenes]})
         return 0
     for i in imagenes:
@@ -2581,7 +2598,7 @@ def cmd_nio(args, conf):
             raise SystemExit("--nio debe ser un objeto JSON")
     st, res = _core_call(c.port_nio, pid, nid, args.adapter, args.port,
                          body=body, emulator=args.emulator,
-                         delete=args.action == "rm")
+                         delete=args.action == "rm", compute_id=args.compute)
     if st not in ((200,) if args.action == "get" else (200, 201, 204)):
         print(f"nio {args.action} en {node['name']} {args.adapter}/{args.port} -> "
               f"[{st}] {_err_literal(res)}", file=sys.stderr)
@@ -2603,7 +2620,8 @@ def cmd_capture_port(args, conf):
     pid, nid = proj["project_id"], node["node_id"]
     accion = {"start": "start_capture", "stop": "stop_capture", "pcap": "pcap"}[args.action]
     st, res = _core_call(c.port_capture, pid, nid, args.adapter, args.port, accion,
-                         file_name=args.file, emulator=args.emulator)
+                         file_name=args.file, emulator=args.emulator,
+                         compute_id=args.compute)
     if args.action == "pcap":
         if st != 200 or not isinstance(res, bytes) or not res:
             detalle = res.decode(errors="replace")[:300] \
@@ -2995,10 +3013,23 @@ def cmd_doctor(args, conf):
 # GUI operativa portada a la CLI: delegan en los métodos de gns3core
 # --------------------------------------------------------------------------- #
 def cmd_project(args, conf):
-    """Proyectos: duplicate, load, stats y ficheros (get|put)."""
+    """Proyectos: duplicate, load, stats, ls y ficheros (get|put)."""
     s = Server(args.server, conf)
     c = _core_client(s)
     act = args.action
+
+    if act == "ls":
+        proj = c.resolve_project(args.project)
+        files = _core_call(c.project_file_list, proj["project_id"],
+                           compute_id=args.compute, prefix=args.prefix)
+        if args.json:
+            _json_out({"project": proj["name"], "project_id": proj["project_id"],
+                       "compute_id": args.compute, "count": len(files), "files": files})
+            return 0
+        for f in files:
+            tam = f["size"] if f["size"] is not None else "-"
+            print(f"  {f['path']:<48} {f['type']:<16} {tam}")
+        return 0
 
     if act == "duplicate":
         if not args.target:
@@ -3284,7 +3315,10 @@ def cmd_emulator(args, conf):
     }
     if act in simple:
         fn, titulo = simple[act]
-        st, res = _core_call(fn)
+        if act == "qemu-binaries":
+            st, res = _core_call(fn, compute_id=args.compute or "local")
+        else:
+            st, res = _core_call(fn)
         return _report(st, res, titulo, args)
     if act == "udp":
         if args.port is None:
@@ -4253,9 +4287,9 @@ def main() -> int:
 
     sub.add_parser("servers", help="lista los servidores configurados y si responden")
 
-    p = sub.add_parser("compute", help="lista computes o ejecuta add|update|rm|ports|idlepc|action")
+    p = sub.add_parser("compute", help="lista computes o ejecuta add|update|rm|ports|idlepc|action|endpoint")
     p.add_argument("action", nargs="?",
-                   help="acción (add|update|rm|ports|idlepc|action) o compute_id/nombre")
+                   help="acción (add|update|rm|ports|idlepc|action|endpoint) o compute_id/nombre")
     p.add_argument("cid", nargs="?", help="compute_id o nombre para la acción")
     p.add_argument("emulator_arg", nargs="?", help="action: emulador (qemu, docker...)")
     p.add_argument("remote_arg", nargs="?", help="action: acción remota (binaries, img...)")
@@ -4279,12 +4313,14 @@ def main() -> int:
     p.add_argument("--json", action="store_true", help="salida JSON")
 
     # -- GUI operativa portada a la CLI --------------------------------------- #
-    p = sub.add_parser("project", help="duplica, carga, mide o lee ficheros de un proyecto")
-    p.add_argument("action", choices=["duplicate", "load", "stats", "file"])
+    p = sub.add_parser("project", help="duplica, carga, mide, lista o lee ficheros de un proyecto")
+    p.add_argument("action", choices=["duplicate", "load", "stats", "file", "ls"])
     p.add_argument("target", nargs="?",
                    help="duplicate: nombre nuevo; load: ruta; file: get|put")
     p.add_argument("path", nargs="?", help="file: ruta dentro del proyecto")
     p.add_argument("-p", "--project", help="proyecto de origen")
+    p.add_argument("--prefix", help="ls: prefijo de ruta a listar")
+    p.add_argument("--compute", default="local", help="ls: compute_id (por defecto local)")
     p.add_argument("--content", help="file put: contenido a escribir")
     p.add_argument("--json", action="store_true", help="salida JSON")
     p.add_argument("--yes", action="store_true", help="duplicate: no pedir confirmación")
@@ -4321,6 +4357,7 @@ def main() -> int:
     p.add_argument("action", choices=["qemu-binaries", "qemu-capabilities",
                                       "docker-images", "interfaces", "ports", "udp"])
     p.add_argument("--port", type=int, help="udp: puerto a reservar")
+    p.add_argument("--compute", default="local", help="compute_id (por defecto local)")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
     # -- NIO, capturas por puerto, acciones masivas y eventos ------------------ #
@@ -4331,6 +4368,7 @@ def main() -> int:
     p.add_argument("--port", type=int, required=True, help="número de puerto")
     p.add_argument("--nio", help="add: NIO como JSON (p. ej. '{\"type\": \"nio_udp\", ...}')")
     p.add_argument("--emulator", help="forzar emulador del compute (qemu, vpcs...)")
+    p.add_argument("--compute", default="local", help="compute_id (por defecto local)")
     p.add_argument("-p", "--project")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
@@ -4341,6 +4379,7 @@ def main() -> int:
     p.add_argument("--port", type=int, required=True, help="número de puerto")
     p.add_argument("--file", help="start: nombre del fichero de captura")
     p.add_argument("--emulator", help="forzar emulador del compute (qemu, vpcs...)")
+    p.add_argument("--compute", default="local", help="compute_id (por defecto local)")
     p.add_argument("-p", "--project")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
@@ -4406,6 +4445,7 @@ def main() -> int:
 
     p = sub.add_parser("images", help="lista las imágenes QEMU del compute local")
     p.add_argument("--emulator", default="qemu", help="qemu, docker, iou... (por defecto qemu)")
+    p.add_argument("--compute", default="local", help="compute_id (por defecto local)")
     p.add_argument("--json", action="store_true", help="salida JSON")
 
     sub.add_parser("templates", help="lista las plantillas del servidor")
