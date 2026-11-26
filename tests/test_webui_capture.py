@@ -5,6 +5,7 @@ import builtins
 import importlib.util
 import json
 import sys
+from contextlib import contextmanager
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,19 +78,24 @@ class FakePlaywright:
         self.chromium = FakeChromium(FakeContext(page))
         self.stopped = False
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.stopped = True
-
 
 @pytest.fixture
 def fake_playwright(monkeypatch):
     def install(page=None):
         page = page or FakePage()
         playwright = FakePlaywright(page)
-        monkeypatch.setattr(webui, "_sync_playwright", lambda: playwright)
+
+        @contextmanager
+        def fake_sync_playwright():
+            try:
+                yield playwright
+            finally:
+                playwright.stopped = True
+
+        # La API real exporta una fábrica: sincrónicamente devuelve un context
+        # manager al invocarse. El doble no debe sustituir esa fábrica por el
+        # manager directamente, porque ocultaría un `with sync_playwright` roto.
+        monkeypatch.setattr(webui, "_sync_playwright", lambda: fake_sync_playwright)
         monkeypatch.setattr(webui.WebUICapture, "available", lambda self: (True, ""))
         return playwright, page
 
@@ -189,12 +195,12 @@ def test_capture_por_defecto_hace_login_una_vez_y_cierra_perfil(
 
     fills = [call for call in page.calls if call[0] == "fill"]
     assert fills == [
-        ("fill", 'input[name="username"]', "admin"),
-        ("fill", 'input[name="password"]', "clave-ficticia"),
+        ("fill", "#usernamefld", "admin"),
+        ("fill", "#passwordfld", "clave-ficticia"),
     ]
     clicks = [call[1] for call in page.calls if call[0] == "click"]
     assert len(clicks) == 1
-    assert "password" in clicks[0]
+    assert "passwordfld" in clicks[0]
     assert "save" not in clicks[0].lower()
     assert "apply" not in clicks[0].lower()
     assert [call[1] for call in page.calls if call[0] == "goto"] == [

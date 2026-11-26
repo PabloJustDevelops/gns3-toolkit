@@ -141,7 +141,8 @@ class WebUICapture:
         try:
             outdir.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="gns3-webui-", dir="/tmp") as profile:
-                with _sync_playwright() as playwright:
+                sync_playwright = _sync_playwright()
+                with sync_playwright() as playwright:
                     context = None
                     try:
                         context = playwright.chromium.launch_persistent_context(
@@ -153,11 +154,11 @@ class WebUICapture:
                         page = context.pages[0] if context.pages else context.new_page()
                         page.goto(self._base_url() + "/", wait_until="domcontentloaded",
                                   timeout=timeout_ms)
-                        page.fill('input[name="username"]', self.user)
-                        page.fill('input[name="password"]', self.password)
+                        page.fill("#usernamefld", self.user)
+                        page.fill("#passwordfld", self.password)
                         page.click(
-                            'form:has(input[name="password"]) input[type="submit"], '
-                            'form:has(input[name="password"]) button[type="submit"]'
+                            'form:has(#passwordfld) input[type="submit"], '
+                            'form:has(#passwordfld) button[type="submit"]'
                         )
                         page.wait_for_load_state("domcontentloaded")
 
