@@ -520,6 +520,28 @@ def _pfsense_module():
     return pfsense
 
 
+def _capture_module(filename: str):
+    """Carga un módulo opcional de capturas desde la raíz, una sola vez."""
+    name = Path(filename).stem
+    cached = sys.modules.get(name)
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().parent / filename
+    if not path.is_file():
+        raise RuntimeError(f"{filename} no está disponible en esta rama")
+    module_spec = importlib.util.spec_from_file_location(name, path)
+    if module_spec is None or module_spec.loader is None:
+        raise RuntimeError(f"no se pudo cargar {filename}: {path}")
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[name] = module
+    try:
+        module_spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(name, None)
+        raise RuntimeError(f"no se pudo cargar {filename}: {exc}") from exc
+    return module
+
+
 _LABSPEC_MODULE_NAME = "_gns3_toolkit_labspec"
 
 
@@ -907,6 +929,153 @@ def _gns3_pfsense_mcp(
     }.items() if value is not None}
     return gns3_pfsense(action=action, project_id=project_id,
                         project_name=project_name, node=node, **kwargs)
+
+
+def _capture_spec_data(value: Optional[str | dict]) -> tuple[Optional[dict], Optional[dict]]:
+    """Lee una spec explícita o la ruta de GNS3_LAB_SPEC sin validar el lab entero."""
+    if isinstance(value, dict):
+        return value, None
+    if value is None:
+        route = os.environ.get("GNS3_LAB_SPEC")
+        if not route or not route.strip():
+            return None, {"error": "GNS3_LAB_SPEC no está definida",
+                          "hint": "define GNS3_LAB_SPEC"}
+    elif isinstance(value, str) and value.strip():
+        route = value
+    else:
+        return None, {"error": "spec debe ser una ruta YAML o un dict"}
+    try:
+        return _labspec_module().leer(str(Path(route).expanduser())), None
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+
+
+def _capture_webui_fallback(reason: Any) -> dict:
+    detail = _lab_redact(str(reason) or "WebUI no disponible")
+    return {"ok": False, "action": "webui", "error": detail,
+            "reason": detail, "fallback": "consola"}
+
+
+@mcp.tool
+def gns3_capturas(action: str = "phases", project: Optional[str] = None,
+                  spec: Optional[str | dict | list[dict]] = None,
+                  node: Optional[str] = None, outdir: Optional[str] = None,
+                  phase: Optional[str] = None) -> dict:
+    """Capturas de fase y WebUI como evidencia: Úsala para leer fases, capturar HMP,
+    fotografiar la WebUI en modo lectura o escribir `indice.md`; no configura el lab.
+    **Mixta**: phases lee; console/webui/index escriben imágenes o el índice en `outdir`.
+
+    ``spec`` admite un dict, una ruta YAML o, para index, una lista de entradas. Si se
+    omite en phases, se usa ``GNS3_LAB_SPEC``. La WebUI toma ``PFSENSE_HOST``,
+    ``PFSENSE_USER`` y ``PFSENSE_PASSWORD`` del entorno; si no está disponible devuelve
+    ``reason`` y ``fallback='consola'``. La consola usa el monitor HMP, nunca VNC.
+    """
+    action = str(action).lower()
+    valid = ["phases", "console", "webui", "index"]
+    if action not in valid:
+        result = _unknown_action(action, valid)
+        result["hint"] = "usa gns3_capturas(action='phases|console|webui|index')"
+        return result
+
+    if action == "phases":
+        try:
+            captures = _capture_module("captures.py")
+        except Exception as exc:
+            return _lab_error(action, exc)
+        data, error = _capture_spec_data(spec)
+        if error:
+            return {"ok": False, "action": action, **_lab_redact_any(error)}
+        try:
+            phases = captures.phases_from_spec(data)
+        except Exception as exc:
+            return _lab_error(action, exc)
+        return {"ok": True, "action": action, "phases": _lab_redact_any(phases)}
+
+    if action == "console":
+        missing = [name for name, value in (("node", node), ("phase", phase),
+                                            ("outdir", outdir)) if not value]
+        if missing:
+            return _lab_error(action, "console exige " + ", ".join(missing))
+        try:
+            captures = _capture_module("captures.py")
+        except Exception as exc:
+            return _lab_error(action, exc)
+        try:
+            client = _client()
+            proj = client.resolve_project(project)
+            target = client.find_node(proj["project_id"], node)
+        except SystemExit as exc:
+            return _lab_error(action, exc)
+        except (ConnectionError, RuntimeError, OSError) as exc:
+            return _lab_error(action, exc)
+        if target.get("node_type") != "qemu":
+            return _lab_error(action, f"{target.get('name') or node} no es un nodo QEMU")
+        disk = (target.get("properties") or {}).get("hda_disk_image")
+        try:
+            monitor = core.QemuMonitor.for_node(node_id=target["node_id"], disk=disk)
+        except (RuntimeError, OSError) as exc:
+            return _lab_error(action, exc, node=target.get("name") or node)
+        try:
+            result = captures.capture_phase(monitor, phase, outdir, node=node)
+        except Exception as exc:
+            return _lab_error(action, exc, node=target.get("name") or node)
+        finally:
+            try:
+                monitor.close()
+            except OSError:
+                pass
+        if not isinstance(result, dict):
+            result = {"data": result}
+        return {**_lab_redact_any(result), "action": action}
+
+    if action == "webui":
+        if not outdir:
+            return _lab_error(action, "webui exige outdir")
+        try:
+            webui = _capture_module("webui_capture.py")
+        except Exception as exc:
+            return _capture_webui_fallback(exc)
+        if not os.environ.get("PFSENSE_PASSWORD"):
+            return _capture_webui_fallback("falta la variable de entorno PFSENSE_PASSWORD")
+        try:
+            client = webui.WebUICapture.from_env(outdir)
+            available, reason = client.available()
+            if not available:
+                return _capture_webui_fallback(reason)
+            result = client.capture()
+        except Exception as exc:
+            return _capture_webui_fallback(exc)
+        if not isinstance(result, dict):
+            result = {"data": result}
+        else:
+            result = dict(result)
+            if result.get("ok") is False:
+                result.setdefault("fallback", "consola")
+        return {**_lab_redact_any(result), "action": action}
+
+    if not outdir:
+        return _lab_error(action, "index exige outdir")
+    try:
+        captures = _capture_module("captures.py")
+    except Exception as exc:
+        return _lab_error(action, exc)
+    entries = None
+    if isinstance(spec, list):
+        entries = spec
+    elif isinstance(spec, dict) and isinstance(spec.get("entries"), list):
+        entries = spec["entries"]
+    elif spec is not None:
+        return _lab_error(action, "spec para index debe ser una lista de entradas")
+    if entries is None:
+        path = Path(outdir).expanduser() / "indice.md"
+        if path.is_file():
+            return {"ok": True, "action": action, "path": str(path), "existing": True}
+        return _lab_error(action, "index exige spec=[...] o un indice.md existente en outdir")
+    try:
+        path = captures.write_index(entries, outdir)
+    except Exception as exc:
+        return _lab_error(action, exc)
+    return {"ok": True, "action": action, "path": _lab_redact(path)}
 
 
 @mcp.tool
