@@ -79,7 +79,7 @@ GUI operativa portada a la CLI (llama a los métodos de gns3core, no los reimple
     gns3lab node disk-resize|links|idlepc <nodo> --size GB [-p proyecto]
     gns3lab console reset|url <nodo>             # reiniciar consola / URL WebSocket
     gns3lab project duplicate|load|stats|file ... # clonar, cargar, estadísticas y ficheros
-    gns3lab compute add|update|rm|ports|idlepc|action ...
+    gns3lab compute add|update|rm|ports|idlepc|action|endpoint|download ...
     gns3lab gns3vm show|set|engines|vms ...
     gns3lab notify [proyecto] [--json]
     gns3lab template duplicate|base-config ...
@@ -683,7 +683,8 @@ def _compute_row(comp: dict) -> dict:
     return {k: comp.get(k) for k in COMPUTE_FIELDS}
 
 
-COMPUTE_ACTIONS = ("add", "update", "rm", "ports", "idlepc", "action", "endpoint")
+COMPUTE_ACTIONS = ("add", "update", "rm", "ports", "idlepc", "action", "endpoint",
+                   "download")
 
 
 def _cmd_compute_action(s: Server, c, args, act: str) -> int:
@@ -703,7 +704,8 @@ def _cmd_compute_action(s: Server, c, args, act: str) -> int:
               f"{'verificado' if isinstance(checked, dict) else 'sin verificación'}")
         return 0 if isinstance(checked, dict) else 1
 
-    if act in ("update", "rm", "ports", "idlepc", "action", "endpoint") and not args.cid:
+    if act in ("update", "rm", "ports", "idlepc", "action", "endpoint", "download") \
+            and not args.cid:
         raise SystemExit(f"compute {act} exige el compute_id o nombre")
 
     if act == "update":
@@ -778,6 +780,21 @@ def _cmd_compute_action(s: Server, c, args, act: str) -> int:
         else:
             print(f"endpoint de {args.cid} {emulator}/{remote}: {res}", file=sys.stderr)
             return 1
+        return 0
+    if act == "download":
+        out = getattr(args, "out", None)
+        if not out:
+            raise SystemExit("compute download exige --out RUTA")
+        try:
+            res = c.compute_download(args.cid, emulator, remote, out,
+                                     force=getattr(args, "force", False))
+        except (core.ComputeDownloadError, OSError, ValueError) as e:
+            print(f"compute download de {args.cid}: {e}", file=sys.stderr)
+            return 1
+        if args.json:
+            _json_out(res)
+        else:
+            print(f"{res['path']}  {res['bytes']} bytes  sha256 {res['sha256']}")
         return 0
     body = _set_body(args.set) or None
     st, res = _core_call(c.compute_action, args.cid, emulator, remote, body)
@@ -4287,9 +4304,11 @@ def main() -> int:
 
     sub.add_parser("servers", help="lista los servidores configurados y si responden")
 
-    p = sub.add_parser("compute", help="lista computes o ejecuta add|update|rm|ports|idlepc|action|endpoint")
+    p = sub.add_parser("compute", help="lista computes o ejecuta "
+                       "add|update|rm|ports|idlepc|action|endpoint|download")
     p.add_argument("action", nargs="?",
-                   help="acción (add|update|rm|ports|idlepc|action|endpoint) o compute_id/nombre")
+                   help="acción (add|update|rm|ports|idlepc|action|endpoint|download) "
+                        "o compute_id/nombre")
     p.add_argument("cid", nargs="?", help="compute_id o nombre para la acción")
     p.add_argument("emulator_arg", nargs="?", help="action: emulador (qemu, docker...)")
     p.add_argument("remote_arg", nargs="?", help="action: acción remota (binaries, img...)")
@@ -4299,6 +4318,8 @@ def main() -> int:
     p.add_argument("--emulator", help="action: emulador (qemu, docker...)")
     p.add_argument("--remote-action", dest="remote_action",
                    help="action: nombre de la acción remota (img, binaries...)")
+    p.add_argument("--out", help="download: fichero de destino")
+    p.add_argument("--force", action="store_true", help="download: sobrescribir el destino")
     p.add_argument("--yes", action="store_true", help="rm: no pedir confirmación")
 
     p = sub.add_parser("stats", help="muestra CPU, memoria y versiones del servidor")

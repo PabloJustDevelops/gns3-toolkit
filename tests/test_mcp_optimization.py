@@ -27,6 +27,7 @@ TOOLS_CONTRATO = {
     "gns3_events", "gns3_notifications", "gns3_iou_license", "gns3_server",
     "gns3_emulator", "gns3_batch", "gns3_informe", "gns3_link_get", "gns3_drawing_get",
     "gns3_verify", "gns3_project_file_list", "gns3_compute_endpoint",
+    "gns3_compute_download",
 }
 
 # Pares que un LLM confunde al elegir: cada descripción debe remitir a la otra.

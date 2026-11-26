@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import hashlib
 import ipaddress
 import json
 import os
@@ -25,8 +26,10 @@ import re
 import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -35,6 +38,30 @@ GNS3_CONF = Path.home() / ".config/GNS3/2.2/gns3_server.conf"
 LAB_CONF = Path.home() / ".config/gns3lab/config.json"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]")
+
+
+class ComputeDownloadError(RuntimeError):
+    """Fallo accionable al bajar un binario del compute (endpoint o HTTP)."""
+
+
+def _open_url(request: urllib.request.Request, timeout: float):
+    """Transporte de la descarga (`urllib`, stdlib).
+
+    Es un punto de sustitución en los tests: `gns3core` no puede depender de
+    `httpx` porque la CLI debe funcionar con la stdlib.
+    """
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _redact(url: str) -> str:
+    """URL sin usuario/contraseña, para mensajes de error y logs."""
+    parts = urllib.parse.urlsplit(url)
+    if not (parts.username or parts.password):
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host += f":{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
 
 
 # ─────────────────────────── configuración de servidores ───────────────────────────
@@ -539,6 +566,79 @@ class Client:
         """
         return self.get(f"/v2/computes/endpoint/{cid}/{emulator}/{action.lstrip('/')}",
                         timeout=60)
+
+    def compute_download(self, compute_id: str, emulator: str, action: str,
+                         out: str, force: bool = False, timeout: float = 60) -> dict:
+        """Baja el binario de una acción del compute por su URL directa.
+
+        El proxy del controller (`/v2/computes/{cid}/{emu}/{action}`) responde JSON y
+        devuelve 500 con cuerpos binarios; `compute_endpoint` da la URL del propio
+        compute. Se escribe en un temporal del directorio de destino y se hace
+        `os.replace` al final, para que un corte no deje un fichero a medias.
+        """
+        destino = Path(out).expanduser()
+        if not destino.name or str(out).endswith(("/", os.sep)) or destino.is_dir():
+            raise ValueError(f"ruta de destino inválida: {out!r} "
+                             "(falta el nombre del fichero)")
+        if not destino.parent.is_dir():
+            raise ValueError(f"ruta de destino inválida: no existe el directorio "
+                             f"{destino.parent}")
+        if destino.exists() and not force:
+            raise FileExistsError(f"{destino} ya existe; usa force=True para sobrescribir")
+
+        st, res = self.compute_endpoint(compute_id, emulator, action)
+        if st != 200:
+            msg = res.get("message") if isinstance(res, dict) else res
+            raise ComputeDownloadError(
+                f"la API no resolvió el endpoint de {compute_id} {emulator}/{action}: "
+                f"[{st}] {msg}")
+        url = res.get("endpoint") if isinstance(res, dict) else None
+        if not url or not str(url).lower().startswith(("http://", "https://")):
+            raise ComputeDownloadError(
+                f"la API no devolvió un endpoint http(s) de {compute_id} "
+                f"{emulator}/{action}: {url!r}")
+
+        request = urllib.request.Request(str(url))
+        if self.auth and "@" not in urllib.parse.urlsplit(str(url)).netloc:
+            tok = base64.b64encode(f"{self.auth[0]}:{self.auth[1]}".encode()).decode()
+            request.add_header("Authorization", "Basic " + tok)
+
+        fd, tmp_name = tempfile.mkstemp(dir=str(destino.parent),
+                                        prefix=f".{destino.name}.", suffix=".part")
+        tmp = Path(tmp_name)
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with os.fdopen(fd, "wb") as fh, _open_url(request, timeout) as r:
+                ctype = r.headers.get_content_type()
+                while True:
+                    chunk = r.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    digest.update(chunk)
+                    total += len(chunk)
+            os.replace(tmp, destino)
+        except urllib.error.HTTPError as e:
+            raise ComputeDownloadError(
+                f"el compute devolvió HTTP {e.code} al descargar "
+                f"{_redact(str(url))}") from e
+        except (urllib.error.URLError, ConnectionError) as e:
+            reason = getattr(e, "reason", e)
+            if isinstance(reason, TimeoutError):
+                raise TimeoutError(
+                    f"se agotó el tiempo ({timeout:g}s) descargando "
+                    f"{_redact(str(url))}") from e
+            raise ComputeDownloadError(
+                f"no se pudo conectar con el compute para {_redact(str(url))}: "
+                f"{reason}") from e
+        except TimeoutError:
+            raise
+        finally:
+            # Tras el rename no existe; en cualquier fallo, no se deja basura.
+            tmp.unlink(missing_ok=True)
+        return {"path": str(destino), "bytes": total, "sha256": digest.hexdigest(),
+                "content_type": ctype, "compute_id": compute_id}
 
     def gns3vm(self) -> tuple[int, Any]:
         return self.get("/v2/gns3vm")

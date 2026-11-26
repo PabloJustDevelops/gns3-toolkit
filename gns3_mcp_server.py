@@ -2606,6 +2606,30 @@ def gns3_compute_endpoint(
 
 
 @mcp.tool
+def gns3_compute_download(
+    compute_id: str = "local",
+    emulator: str = "qemu",
+    action: str = "binaries",
+    out: str = "",
+    force: bool = False,
+) -> Any:
+    """Baja un pcap o una imagen del compute por su URL directa: Úsala cuando el proxy
+    de `gns3_compute` devuelve 500 con cuerpo binario; para sólo resolver la URL usa
+    `gns3_compute_endpoint`. **Lectura** del compute y **escritura** en `out`
+    (no sobrescribe sin `force=True`).
+    """
+    if not compute_id or not emulator or not action:
+        return {"error": "compute_id, emulator y action son obligatorios"}
+    if not out:
+        return {"error": "out es obligatorio (fichero de destino)"}
+    client = _client()
+    try:
+        return client.compute_download(compute_id, emulator, action, out, force=force)
+    except (core.ComputeDownloadError, OSError, ValueError) as e:
+        return {"error": str(e), "compute_id": compute_id}
+
+
+@mcp.tool
 def gns3_statistics() -> Any:
     """Estadísticas de uso de cada compute (CPU, disco, RAM y swap): Úsala para ver carga
     antes de arrancar nodos; versión y computes conectados están en `gns3_status`.
