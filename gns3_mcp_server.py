@@ -340,10 +340,18 @@ def _node_summary(n: dict) -> dict:
     }
 
 
+def _mcp_templates(client) -> list[dict]:
+    """Plantillas del servidor; un fallo HTTP no es «no hay plantillas»."""
+    tpls = client.json_or_die("/v2/templates", "plantillas")
+    if not isinstance(tpls, list):
+        raise RuntimeError(f"plantillas: respuesta no válida ({type(tpls).__name__})")
+    return tpls
+
+
 def _resolve_template(client, template_id: Optional[str] = None,
                       name: Optional[str] = None) -> tuple[Optional[dict], Optional[dict]]:
     """Plantilla por id (admite prefijo) o nombre (exacto, luego parcial único)."""
-    tpls = client.templates()
+    tpls = _mcp_templates(client)
     names = [t.get("name") for t in tpls]
     if not tpls:
         return None, {"error": "el servidor no tiene plantillas"}
@@ -1333,7 +1341,18 @@ def gns3_nodes(
     if action == "add":
         if not template:
             return {"error": "template es obligatorio para add"}
-        tpls = _api("GET", "/v2/templates") or []
+        res = _api("GET", "/v2/templates")
+        if not isinstance(res, list):
+            if isinstance(res, dict):
+                status = re.search(r"HTTP\s+(\d{3})", str(res.get("error", "")))
+                if status:
+                    return _api_error(int(status.group(1)),
+                                      {"message": res.get("detail") or res.get("error")},
+                                      "listar plantillas")
+                return {"error": "listar plantillas falló", **res}
+            return {"error": "listar plantillas falló: respuesta no válida",
+                    "detail": res}
+        tpls = res
         tpl = next((t for t in tpls if t.get("template_id") == template), None) or next(
             (t for t in tpls if str(t.get("name", "")).lower() == template.lower()), None)
         if not tpl:
@@ -2415,12 +2434,13 @@ def gns3_node_edit(
 
     if action == "create":
         if template:
-            tpl = next((t for t in client.templates()
+            tpls = _mcp_templates(client)
+            tpl = next((t for t in tpls
                         if t.get("template_id") == template
                         or str(t.get("name", "")).lower() == template.lower()), None)
             if not tpl:
                 return {"error": f"plantilla no encontrada: {template}",
-                        "available": [t.get("name") for t in client.templates()]}
+                        "available": [t.get("name") for t in tpls]}
             st, res = client.post(f"/v2/projects/{pid}/templates/{tpl['template_id']}",
                                   {"x": x, "y": y, "compute_id": "local"})
         else:
