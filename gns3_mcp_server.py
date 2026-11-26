@@ -13,18 +13,22 @@ import base64
 import configparser
 import fnmatch
 import html
+import importlib.util
 import inspect
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from typing import Any, Optional
 
@@ -508,6 +512,254 @@ def _pfsense_module():
     return pfsense
 
 
+_LABSPEC_MODULE_NAME = "_gns3_toolkit_labspec"
+
+
+def _labspec_module():
+    """Carga scripts/labspec.py una vez, sin añadir scripts/ al sys.path."""
+    cached = sys.modules.get(_LABSPEC_MODULE_NAME)
+    if cached is not None:
+        return cached
+    path = Path(__file__).resolve().parent / "scripts" / "labspec.py"
+    if not path.is_file():
+        raise RuntimeError(f"no se encontró el módulo de laboratorio: {path}")
+    module_spec = importlib.util.spec_from_file_location(_LABSPEC_MODULE_NAME, path)
+    if module_spec is None or module_spec.loader is None:
+        raise RuntimeError(f"no se pudo cargar el módulo de laboratorio: {path}")
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[_LABSPEC_MODULE_NAME] = module
+    try:
+        module_spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(_LABSPEC_MODULE_NAME, None)
+        raise
+    return module
+
+
+def _lab_redact(text: Any) -> str:
+    """Quita credenciales de errores y salidas sin alterar el resto del literal."""
+    value = str(text)
+    for key in ("GNS3_USER", "GNS3_PASSWORD", "PFSENSE_USER", "PFSENSE_PASSWORD"):
+        secret = os.environ.get(key)
+        if secret:
+            value = value.replace(secret, "[redactado]")
+    try:
+        conf = _conf()
+    except Exception:
+        conf = {}
+    for key in ("user", "password"):
+        secret = str(conf.get(key) or "")
+        if secret:
+            value = value.replace(secret, "[redactado]")
+    value = re.sub(r"(?i)\b(?:https?|wss?)://[^/@\s]+@",
+                   lambda match: match.group(0).split("://", 1)[0] + "://", value)
+    return re.sub(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}", "Basic [redactado]", value)
+
+
+def _lab_error(action: str, error: Any, **extra) -> dict:
+    detail = _lab_redact(str(error) or "error desconocido")
+    return {"ok": False, "action": action, "error": detail, **extra}
+
+
+def _lab_action_error(action: str, error: Optional[dict]) -> dict:
+    extra = {key: (_lab_redact(value) if isinstance(value, str) else value)
+             for key, value in (error or {}).items() if key != "error"}
+    return _lab_error(action, (error or {}).get("error", "error desconocido"), **extra)
+
+
+def _lab_resource_error(error: Any, **extra) -> dict:
+    return {"error": _lab_redact(str(error) or "error desconocido"), **extra}
+
+
+def _lab_normalize_spec(labspec, data: Any, source: str = "spec"):
+    if not isinstance(data, dict):
+        return None, {"error": f"{source}: la raíz debe ser un mapa"}
+    try:
+        errors = labspec.validar(data)
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+    if errors:
+        detail = "; ".join(str(error) for error in errors)
+        return None, {"error": f"{source}: spec inválida: {detail}", "errors": errors}
+    try:
+        return labspec.normalizar(data), None
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+
+
+def _lab_desired_spec(labspec):
+    route = os.environ.get("GNS3_LAB_SPEC")
+    if not route or not route.strip():
+        return None, {"error": "GNS3_LAB_SPEC no está definida",
+                      "hint": "define GNS3_LAB_SPEC"}
+    try:
+        exists = Path(route).expanduser().is_file()
+    except OSError:
+        exists = False
+    if not exists:
+        return None, {"error": f"GNS3_LAB_SPEC no existe: {route}",
+                      "hint": "define GNS3_LAB_SPEC"}
+    return _lab_spec_from_input(labspec, route)
+
+
+def _lab_spec_from_input(labspec, value: Optional[str | dict]):
+    if value is None:
+        return _lab_desired_spec(labspec)
+    if isinstance(value, dict):
+        return _lab_normalize_spec(labspec, value)
+    if not isinstance(value, str) or not value.strip():
+        return None, {"error": "spec debe ser una ruta YAML o un dict"}
+    try:
+        data = labspec.leer(value)
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+    return _lab_normalize_spec(labspec, data, value)
+
+
+def _lab_topology_from_input(value: str | dict) -> tuple[Optional[dict], Optional[dict]]:
+    if isinstance(value, dict):
+        return value, None
+    if not isinstance(value, str) or not value.strip():
+        return None, {"error": "topology debe ser un dict o una ruta JSON"}
+    try:
+        path = Path(value).expanduser()
+        if not path.is_file():
+            return None, {"error": f"no existe el fichero de topología: {value}"}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+    if not isinstance(data, dict):
+        return None, {"error": f"{value}: la topología JSON debe ser un objeto"}
+    return data, None
+
+
+def _lab_project_name(topology: dict, fallback: Optional[str] = None) -> Optional[str]:
+    project = topology.get("project")
+    if isinstance(project, dict):
+        project = project.get("name") or project.get("project_id")
+    if isinstance(project, str) and project.strip():
+        return project
+    return fallback
+
+
+def _lab_export(labspec, topology: dict,
+                project: str) -> tuple[Optional[dict], Optional[dict]]:
+    """Adapta el resumen público del resource y delega la exportación en labspec."""
+    exporter = getattr(labspec, "export", None)
+    if not callable(exporter):
+        return None, {"error": "scripts/labspec.py no proporciona export; falta integrar dclcore"}
+    prepared = dict(topology)
+    nodes = prepared.get("nodes")
+    if isinstance(nodes, list):
+        mapped = []
+        for node in nodes:
+            if (isinstance(node, dict) and not node.get("node_type")
+                    and not node.get("template") and node.get("type")):
+                node = {**node, "node_type": node["type"]}
+            mapped.append(node)
+        prepared["nodes"] = mapped
+    try:
+        exported = exporter(prepared, project)
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+    if not isinstance(exported, dict):
+        return None, {"error": "labspec.export no devolvió un dict"}
+    return exported, None
+
+
+def _lab_empty_actual(labspec, project: str) -> tuple[Optional[dict], Optional[dict]]:
+    """Actual vacío interno: valida todo con labspec salvo la lista de nodos."""
+    candidate = {"version": getattr(labspec, "VERSION", 1), "project": project,
+                 "nodes": [], "links": [], "expect": {}}
+    try:
+        errors = [str(error) for error in labspec.validar(candidate)
+                  if not str(error).startswith("nodes:")]
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+    if errors:
+        return None, {"error": "topología vacía inválida: " + "; ".join(errors),
+                      "errors": errors}
+    try:
+        return labspec.normalizar(candidate), None
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+
+
+def _lab_topology_to_spec(labspec, topology: dict,
+                          project: Optional[str] = None) -> tuple[Optional[dict], Optional[dict]]:
+    """Convierte topología cruda con labspec.export; acepta también una spec normalizada."""
+    project_name = _lab_project_name(topology, project)
+    if not project_name:
+        return None, {"error": "la topología no declara project"}
+    nodes = topology.get("nodes")
+    links = topology.get("links")
+    if not nodes and not links:
+        return _lab_empty_actual(labspec, project_name)
+    raw = False
+    if isinstance(nodes, list):
+        raw = any(isinstance(node, dict) and
+                  any(key in node for key in ("node_type", "type", "properties"))
+                  for node in nodes)
+    if isinstance(links, list):
+        raw = raw or any(isinstance(link, dict) and "ends" in link for link in links)
+    if not raw:
+        return _lab_normalize_spec(labspec, topology, "topology")
+    return _lab_export(labspec, topology, project_name)
+
+
+def _lab_plan(labspec, desired: dict, actual: dict,
+              server: Optional[str]) -> tuple[Optional[list[list[str]]], Optional[dict]]:
+    planner = getattr(labspec, "plan", None)
+    try:
+        if callable(planner):
+            return planner(desired, actual, server), None
+        if actual:
+            return None, {"error": "scripts/labspec.py no proporciona plan; falta integrar dclcore"}
+        return labspec.ordenes(desired), None
+    except Exception as exc:
+        return None, {"error": _lab_redact(str(exc) or type(exc).__name__)}
+
+
+def _lab_readable_plan(labspec, commands: list[list[str]], server: Optional[str]) -> list[str]:
+    try:
+        show = getattr(labspec, "_mostrar")
+        return [_lab_redact(show(command, server)) for command in commands]
+    except Exception as exc:
+        raise RuntimeError(_lab_redact(str(exc) or type(exc).__name__)) from exc
+
+
+_lab_capture_lock = threading.Lock()
+
+
+def _lab_capture_call(labspec, function, *args, **kwargs) -> tuple[int, str]:
+    """Captura también stdout de la CLI para no romper el transporte stdio del MCP."""
+    stdout = StringIO()
+    stderr = StringIO()
+    with _lab_capture_lock:
+        original = getattr(labspec, "ejecutar", None)
+        order_real = getattr(labspec, "_orden_real", None)
+        capture_child = (callable(original) and callable(order_real)
+                         and getattr(original, "__module__", None) == getattr(labspec, "__name__", None)
+                         and getattr(original, "__name__", None) == "ejecutar")
+
+        def captured_execute(argv, server=None):
+            process = subprocess.run(order_real(argv, server), text=True,
+                                     capture_output=True, check=False)
+            stdout.write(process.stdout or "")
+            stderr.write(process.stderr or "")
+            return process.returncode
+
+        if capture_child:
+            labspec.ejecutar = captured_execute
+        try:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = function(*args, **kwargs)
+        finally:
+            if capture_child:
+                labspec.ejecutar = original
+    return int(exit_code), _lab_redact(stdout.getvalue() + stderr.getvalue())
+
+
 def _pfsense_node(project_id: Optional[str], project_name: Optional[str],
                   node: Optional[str]) -> tuple[Optional[dict], Optional[dict]]:
     """Localiza un único pfSense sin abrir el proyecto ni usar SSH."""
@@ -656,6 +908,174 @@ def gns3_verify(component: str, project: Optional[str] = None,
     except (ConnectionError, RuntimeError) as e:
         return {"component": component, "project": needle or "", "ok": False,
                 "checks": [], "problems": [str(e)]}
+
+
+def _lab_actual_for_action(labspec, topology: Optional[str | dict],
+                           project: Optional[str], desired_project: Optional[str] = None,
+                           missing_ok: bool = False) -> tuple[Optional[dict], Optional[dict]]:
+    if topology is not None:
+        raw, error = _lab_topology_from_input(topology)
+        if error:
+            return None, error
+        return _lab_topology_to_spec(labspec, raw, project)
+    project_name = project or desired_project
+    if not project_name:
+        return None, {"error": "indica topology o project"}
+    raw, error = _resource_project_topology_data(project_name, for_lab=True)
+    if error:
+        if missing_ok and error.get("code") == "project_not_found":
+            return {}, None
+        return None, error
+    return _lab_topology_to_spec(labspec, raw, project_name)
+
+
+def _gns3_lab_action(labspec, action: str, spec: Optional[str | dict],
+                    topology: Optional[str | dict], project: Optional[str],
+                    out: Optional[str], yes: bool, server: Optional[str]) -> dict:
+    if action == "export":
+        if topology is None:
+            if not project:
+                return _lab_error(action, "export exige topology o project")
+            raw, error = _resource_project_topology_data(project, for_lab=True)
+            if error:
+                return _lab_action_error(action, error)
+        else:
+            raw, error = _lab_topology_from_input(topology)
+            if error:
+                return _lab_action_error(action, error)
+        project_name = _lab_project_name(raw, project)
+        if not project_name:
+            return _lab_error(action, "export exige project o una topología con project")
+        exported, error = _lab_export(labspec, raw, project_name)
+        if error:
+            return _lab_action_error(action, error)
+        result = {"ok": True, "action": action, "spec": exported}
+        if out:
+            path = Path(out).expanduser()
+            if path.suffix.lower() == ".json":
+                text = json.dumps(exported, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+            else:
+                yaml = getattr(labspec, "yaml", None)
+                if yaml is None:
+                    return _lab_error(action, "labspec no puede escribir YAML")
+                text = yaml.safe_dump(exported, sort_keys=False, allow_unicode=True)
+            path.write_text(text, encoding="utf-8")
+            result["path"] = str(path)
+        return result
+
+    desired, error = _lab_spec_from_input(labspec, spec)
+    if error:
+        return _lab_action_error(action, error)
+
+    if action == "validate":
+        return {"ok": True, "action": action, "spec": desired}
+
+    if action == "plan":
+        actual = {}
+        if topology is not None:
+            actual, error = _lab_actual_for_action(labspec, topology, project,
+                                                   desired["project"])
+            if error:
+                return _lab_action_error(action, error)
+        commands, error = _lab_plan(labspec, desired, actual, server)
+        if error:
+            return _lab_action_error(action, error)
+        readable = _lab_readable_plan(labspec, commands, server)
+        return {"ok": True, "action": action, "plan": readable, "argv": commands}
+
+    if action == "diff":
+        actual, error = _lab_actual_for_action(labspec, topology, project,
+                                               desired["project"], missing_ok=True)
+        if error:
+            return _lab_action_error(action, error)
+        differ = getattr(labspec, "diff", None)
+        if not callable(differ):
+            return _lab_error(action, "scripts/labspec.py no proporciona diff; falta integrar dclcore")
+        difference = differ(desired, actual)
+        if not isinstance(difference, dict):
+            return _lab_error(action, "labspec.diff no devolvió un dict")
+        commands, error = _lab_plan(labspec, desired, actual, server)
+        if error:
+            return _lab_action_error(action, error)
+        readable = _lab_readable_plan(labspec, commands, server)
+        return {**difference, "ok": True, "action": action, "plan": readable}
+
+    if action == "apply":
+        if yes is not True:
+            actual = {}
+            if topology is not None:
+                actual, error = _lab_actual_for_action(labspec, topology, project,
+                                                       desired["project"])
+                if error:
+                    return _lab_action_error(action, error)
+            commands, error = _lab_plan(labspec, desired, actual, server)
+            if error:
+                return _lab_action_error(action, error)
+            readable = _lab_readable_plan(labspec, commands, server)
+            return _lab_error(
+                action,
+                "apply escribe en GNS3: repite con yes=True (no se ha ejecutado nada)",
+                plan=readable, argv=commands, exit_code=2)
+        actual, error = _lab_actual_for_action(labspec, topology, project,
+                                               desired["project"], missing_ok=True)
+        if error:
+            return _lab_action_error(action, error)
+        commands, error = _lab_plan(labspec, desired, actual, server)
+        if error:
+            return _lab_action_error(action, error)
+        readable = _lab_readable_plan(labspec, commands, server)
+        apply_function = getattr(labspec, "aplicar_deseado", None)
+        if callable(apply_function):
+            exit_code, output = _lab_capture_call(
+                labspec, apply_function, desired, actual, server, True)
+        else:
+            apply_function = getattr(labspec, "aplicar", None)
+            if not callable(apply_function):
+                return _lab_error(action, "scripts/labspec.py no proporciona aplicar_deseado")
+            exit_code, output = _lab_capture_call(
+                labspec, apply_function, desired, server, True)
+        result = {"ok": exit_code == 0, "action": action, "exit_code": exit_code,
+                  "output": output, "plan": readable, "argv": commands}
+        if exit_code != 0:
+            last_line = next((line for line in reversed(output.splitlines()) if line.strip()), "")
+            result["error"] = last_line or f"apply terminó con exit {exit_code}"
+        return result
+
+    verifier = getattr(labspec, "verificar", None)
+    if not callable(verifier):
+        return _lab_error(action, "scripts/labspec.py no proporciona verificar")
+    exit_code, output = _lab_capture_call(labspec, verifier, desired, server)
+    result = {"ok": exit_code == 0, "action": action, "exit_code": exit_code,
+              "output": output}
+    if exit_code != 0:
+        last_line = next((line for line in reversed(output.splitlines()) if line.strip()), "")
+        result["error"] = last_line or f"verify terminó con exit {exit_code}"
+    return result
+
+
+@mcp.tool
+def gns3_lab(action: str, spec: Optional[str | dict] = None,
+             topology: Optional[str | dict] = None, project: Optional[str] = None,
+             out: Optional[str] = None, yes: bool = False,
+             server: Optional[str] = None) -> dict:
+    """Úsala para operar una spec declarativa sin duplicar labspec. **Mixta**: lee o escribe según action.
+
+    Acciones: validate, plan, diff, apply, export y verify. ``spec`` admite YAML o dict y,
+    si se omite, usa ``GNS3_LAB_SPEC``. ``topology`` admite JSON o dict. ``apply`` exige
+    ``yes=True``; sin él devuelve el plan y el código 2 sin escribir. export puede guardar
+    el spec en ``out`` (YAML, o JSON si la extensión es .json).
+    """
+    normalized_action = str(action).lower()
+    valid = ["validate", "plan", "diff", "apply", "export", "verify"]
+    if normalized_action not in valid:
+        return {"ok": False, "action": normalized_action,
+                **_unknown_action(normalized_action, valid)}
+    try:
+        labspec = _labspec_module()
+        return _gns3_lab_action(labspec, normalized_action, spec, topology,
+                                project, out, yes, server)
+    except Exception as exc:
+        return _lab_error(normalized_action, str(exc) or type(exc).__name__)
 
 
 @mcp.tool
@@ -3119,6 +3539,8 @@ def _batch_block_reason(tool: str, args: dict) -> Optional[str]:
         blocked = action in ("stop", "reload")
     elif tool == "gns3_nodes_bulk":
         blocked = True
+    elif tool == "gns3_lab":
+        blocked = action == "apply" and args.get("yes") is True
     if not blocked:
         return None
     suffix = f" (action={action})" if action else ""
@@ -3640,9 +4062,11 @@ def _resource_project(project: str) -> tuple[Optional[dict], Optional[dict]]:
     names = ", ".join(available) or "(ninguno)"
     if not hits:
         error = f"proyecto no encontrado: {project}. Nombres disponibles: {names}"
+        code = "project_not_found"
     else:
         error = f"'{project}' es ambiguo: hay {len(hits)} proyectos con ese nombre. Nombres disponibles: {names}"
-    return None, {"error": error, "available_projects": available}
+        code = "project_ambiguous"
+    return None, {"error": error, "code": code, "available_projects": available}
 
 
 @mcp.resource("gns3://status", mime_type="application/json")
@@ -3671,32 +4095,99 @@ def gns3_resource_templates() -> str:
     return _resource_json(tpls)
 
 
-@mcp.resource("gns3://project/{project}/topology", mime_type="application/json")
-def gns3_resource_project_topology(project: str) -> str:
-    """Nodos y enlaces de un proyecto, sin abrirlo ni modificar su estado."""
+def _resource_project_topology_data(project: str, for_lab: bool = False) -> tuple[Optional[dict], Optional[dict]]:
+    """Resumen de nodos y enlaces; ``for_lab`` añade los campos que consume labspec.export."""
     proj, err = _resource_project(project)
     if err:
-        return _resource_json(err)
+        return None, err
     pid = proj["project_id"]
     nodes = _api("GET", f"/v2/projects/{pid}/nodes")
     if not isinstance(nodes, list):
-        return _resource_json({"error": f"no se pudieron leer los nodos de {proj.get('name')}",
-                               "detail": nodes})
+        return None, {"error": f"no se pudieron leer los nodos de {proj.get('name')}",
+                      "detail": nodes}
     links = _api("GET", f"/v2/projects/{pid}/links")
     if not isinstance(links, list):
-        return _resource_json({"error": f"no se pudieron leer los enlaces de {proj.get('name')}",
-                               "detail": links})
+        return None, {"error": f"no se pudieron leer los enlaces de {proj.get('name')}",
+                      "detail": links}
     names = {n.get("node_id"): n.get("name") for n in nodes}
-    return _resource_json({
+    node_summaries = []
+    for node in nodes:
+        summary = {"name": node.get("name"), "type": node.get("node_type"),
+                   "status": node.get("status"), "console": node.get("console")}
+        if for_lab:
+            summary["node_type"] = node.get("node_type")
+            properties = node.get("properties") or {}
+            if isinstance(properties, dict) and properties.get("adapter_type") is not None:
+                summary["properties"] = {"adapter_type": properties.get("adapter_type")}
+        node_summaries.append(summary)
+    return {
         "project": {"project_id": pid, "name": proj.get("name"), "status": proj.get("status")},
-        "nodes": [{"name": n.get("name"), "type": n.get("node_type"),
-                   "status": n.get("status"), "console": n.get("console")} for n in nodes],
+        "nodes": node_summaries,
         "links": [{"link_id": link.get("link_id"),
                    "ends": [{"node": names.get(end.get("node_id"), end.get("node_id")),
                              "adapter": end.get("adapter_number"),
                              "port": end.get("port_number")} for end in link.get("nodes", [])]}
                   for link in links],
-    })
+    }, None
+
+
+@mcp.resource("gns3://project/{project}/topology", mime_type="application/json")
+def gns3_resource_project_topology(project: str) -> str:
+    """Nodos y enlaces de un proyecto, sin abrirlo ni modificar su estado."""
+    data, error = _resource_project_topology_data(project)
+    return _resource_json(error or data)
+
+
+@mcp.resource("gns3://lab/desired", mime_type="application/json")
+def gns3_resource_lab_desired() -> str:
+    """Spec validada y normalizada de la ruta declarada en GNS3_LAB_SPEC."""
+    try:
+        labspec = _labspec_module()
+        desired, error = _lab_desired_spec(labspec)
+        return _resource_json(error or desired)
+    except Exception as exc:
+        return _resource_json(_lab_resource_error(exc))
+
+
+@mcp.resource("gns3://lab/actual", mime_type="application/json")
+def gns3_resource_lab_actual() -> str:
+    """Topología resumida del proyecto declarado por GNS3_LAB_SPEC; sólo lectura."""
+    try:
+        labspec = _labspec_module()
+        desired, error = _lab_desired_spec(labspec)
+        if error:
+            return _resource_json(error)
+        topology, error = _resource_project_topology_data(desired["project"], for_lab=True)
+        return _resource_json(error or topology)
+    except Exception as exc:
+        return _resource_json(_lab_resource_error(exc))
+
+
+@mcp.resource("gns3://lab/diff", mime_type="application/json")
+def gns3_resource_lab_diff() -> str:
+    """Diferencia deseado/real y plan legible de labspec, sin escribir en GNS3."""
+    try:
+        labspec = _labspec_module()
+        desired, error = _lab_desired_spec(labspec)
+        if error:
+            return _resource_json(error)
+        actual, error = _lab_actual_for_action(labspec, None, desired["project"],
+                                               missing_ok=True)
+        if error:
+            return _resource_json(error)
+        differ = getattr(labspec, "diff", None)
+        if not callable(differ):
+            return _resource_json({"error": "scripts/labspec.py no proporciona diff; falta integrar dclcore"})
+        difference = differ(desired, actual)
+        if not isinstance(difference, dict):
+            return _resource_json({"error": "labspec.diff no devolvió un dict"})
+        commands, error = _lab_plan(labspec, desired, actual, None)
+        if error:
+            return _resource_json(error)
+        readable = _lab_readable_plan(labspec, commands, None)
+        return _resource_json({**difference, "plan": readable})
+    except Exception as exc:
+        return _resource_json(_lab_resource_error(exc))
 
 
 @mcp.prompt(name="gns3-diagnostico", description="Guion para diagnosticar un lab GNS3 sin VNC.")
