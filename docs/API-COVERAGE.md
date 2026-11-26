@@ -214,9 +214,9 @@ genéricas del controlador.
 | `api/controller/notification_handler.py` | `GET /v2/notifications/ws` | `notifications_ws_url()` compone la URL; `watch` y `gns3_events` abren el canal fuera del núcleo |
 | `api/controller/project_handler.py` | `GET /v2/projects/{id}/notifications/ws` | ídem, con `notifications_ws_url(pid)` |
 | `api/controller/server_handler.py` | `POST /v2/version` | cambia la versión informada; sin método en el núcleo |
-| `api/controller/compute_handler.py` | `GET /v2/computes/endpoint/{id}/{emulator}/{action}` | pasarela de descarga; `compute_action()` cubre GET/POST, no el endpoint de descarga |
-| `api/controller/link_handler.py` | `GET /v2/projects/{id}/links/{lid}` (detalle) | `links()` da la lista; no hay `link_get()` |
-| `api/controller/drawing_handler.py` | `GET /v2/projects/{id}/drawings/{did}` (detalle) | `drawings()` da la lista; no hay `drawing_get()` |
+| `api/controller/compute_handler.py` | `GET /v2/computes/endpoint/{id}/{emulator}/{action}` | `compute_endpoint()` y `gns3_compute_endpoint` resuelven la URL; `compute_action()` no la usa |
+| `api/controller/link_handler.py` | `GET /v2/projects/{id}/links/{lid}` (detalle) | `link_get()` y `gns3_link_get`; la CLI no tiene verbo `get` |
+| `api/controller/drawing_handler.py` | `GET /v2/projects/{id}/drawings/{did}` (detalle) | `drawing_get()` y `gns3_drawing_get`; la CLI no tiene verbo `get` |
 | `index_handler.py` | `/`, `/debug`, `/upload`, `/compute`, `/controller`, `/projects/{id}`, `/static/web-ui/{filename}` | rutas de la web UI, no API de operación |
 
 Ver también [GUI-PORTADA.md](GUI-PORTADA.md), [NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md),

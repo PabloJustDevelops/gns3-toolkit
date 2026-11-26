@@ -114,6 +114,8 @@ su acción. Ambas se comprueban con el código: `cli/gns3lab` (dict `handlers`) 
 | Notificaciones HTTP | `notify` | `gns3_notifications` |
 | Eventos WebSocket | `watch` | `gns3_events_url`, `gns3_events` (url/listen) |
 | Lote de tools | — | `gns3_batch` |
+| Resolución de endpoint de compute | `compute endpoint` | `gns3_compute_endpoint` |
+| Descarga binaria del compute | `compute download --out RUTA [--force]` | `gns3_compute_download` |
 | Informe Markdown | `examen informe` | `gns3_informe` |
 
 ## Sólo en un lado
@@ -130,7 +132,7 @@ proyectos, `gns3_drawings` (clear), `gns3_batch` y las resources/prompts.
 # 47 comandos: claves del dict handlers
 ./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l
 
-# 47 tools: decoradores @mcp.tool
+# 48 tools: decoradores @mcp.tool
 env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python -c \
   "import asyncio,gns3_mcp_server as s; print(len(asyncio.run(s.mcp.list_tools())))"
 ```

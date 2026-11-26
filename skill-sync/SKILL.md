@@ -1,7 +1,7 @@
 ---
 name: gns3-lab-automation
 description: "Use when driving GNS3 2.2 labs from Hermes or extending the toolkit."
-version: 2.2.0
+version: 2.3.0
 author: Hermes (Pablo)
 license: MIT
 metadata:
@@ -103,6 +103,7 @@ gns3lab verify qemu examen-kit --node PF1    # checks de solo lectura del nodo
 gns3lab doctor --check-updates --json        # ¿hay versión nueva?
 gns3lab project ls -p examen-kit --prefix project-files/ --json
 gns3lab compute endpoint local --emulator qemu --remote-action binaries --json
+gns3lab compute download local --emulator qemu --remote-action binaries --out pcap.bin
 python3 scripts/labspec.py validate examples/lab-ejemplo.yaml
 python3 scripts/labspec.py plan examples/lab-ejemplo.yaml
 
@@ -137,8 +138,11 @@ no hay release ni tag, reporta `update_available: false` sin error. Detalle:
 
 `gns3lab project ls` lista ficheros del proyecto en un compute (`--compute`, por defecto `local`),
 con `--prefix` opcional; `gns3_compute_endpoint` y `gns3lab compute endpoint ...` resuelven la URL
-directa del compute, pero **no descargan bytes** ni llaman a esa URL. Para lanzar el repo desde
-cinco harness distintos, consulta `docs/HARNESSES.md` y `scripts/harness_detect.py --json`.
+directa del compute. `gns3_compute_download` y `gns3lab compute download ... --out RUTA [--force]`
+bajan los bytes de esa URL a un temporal del directorio de destino y hacen rename atómico: sin
+`--force` rechazan sobrescribir. No lances una descarga real sin que el usuario lo pida. Para
+lanzar el repo desde cinco harness distintos, consulta `docs/HARNESSES.md` y
+`scripts/harness_detect.py --json`.
 
 ## Trampas ya pagadas (no repetirlas)
 

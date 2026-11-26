@@ -116,7 +116,7 @@ env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python -m pytest -q
 Es la suite completa y no necesita servidor GNS3. Salida real de esta sesión:
 
 ```text
-717 passed in 260.46s (0:04:20)
+737 passed in 271.00s (0:04:30)
 ```
 
 El número de tests crece con el repo; lo que decide es `passed`, sin `failed` ni `error`, y

@@ -9,7 +9,7 @@ mano por VNC cuesta 40 minutos y pierde teclas.
 | Fichero | Qué hace |
 |---|---|
 | `gns3core.py` | Núcleo sin dependencias de terceros: `Client` (API REST v2), `Console` (consola telnet leída por prompt), `QemuMonitor` (canal HMP), `ocr`. |
-| `gns3_mcp_server.py` | Servidor MCP (fastmcp) con **47 tools**, 3 resources + 1 template y 2 prompts. Importa `gns3core`. |
+| `gns3_mcp_server.py` | Servidor MCP (fastmcp) con **48 tools**, 3 resources + 1 template y 2 prompts. Importa `gns3core`. |
 | `cli/gns3lab` | CLI de **47 comandos**, `--json` global y subcomandos `pf` y `verify`. Añade la raíz del repo a `sys.path`. |
 | `pfsense.py` | Integración nativa de pfSense: parsea/renderiza `/conf/config.xml` sin perder secciones; credenciales solo por entorno. |
 | `tests/` | pytest: **700 tests**, dobles de HTTP/telnet/HMP, 100 % de `gns3core.py` y 100 % de `pfsense.py`. |

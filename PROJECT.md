@@ -3,7 +3,7 @@
 ## Qué es
 
 `gns3-toolkit` empaqueta la operación de un servidor GNS3 2.2 sin GUI: una librería
-(`gns3core`), un servidor MCP de 47 tools y una CLI de 47 comandos. El objetivo inmediato
+(`gns3core`), un servidor MCP de 48 tools y una CLI de 47 comandos. El objetivo inmediato
 es el examen del 1 de diciembre de 2026: montar un escenario (pfSense + VLANs + NAT +
 clientes) desde la terminal, con el VNC sólo como último recurso.
 
@@ -13,14 +13,14 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   `nio_ports` (NIO y captura por puerto, acciones masivas, `resume`/`pause`, qemu img, VMs
   invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
-- CLI: **47 comandos**; MCP: **47 tools** (`mcp.list_tools()` → 47).
+- CLI: **47 comandos**; MCP: **48 tools** (`mcp.list_tools()` → 48).
 - `gns3lab verify qemu|pf|vpcs` y `gns3_verify`: verificación solo lectura por componente, con
   checks y problemas accionables (`docs/VERIFICACION.md`).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 717 passed, 100 % de `gns3core.py`** (937 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
+- **Tests: 737 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
-- MCP: 47 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
+- MCP: 48 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
   **2 prompts** (`gns3-diagnostico`, `gns3-examen`).
 - Skill `gns3-lab-automation` reescrita como envoltorio del repo público, con backup en
   `/tmp/gns3-skill-backup-20261125-1909.tar.gz`.

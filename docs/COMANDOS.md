@@ -245,18 +245,23 @@ gns3lab project file put notas.txt --content "hola" -p examen-kit
 
 ```text
 usage: gns3lab compute [-h] [--json] [--set SET] [--emulator EMULATOR]
-                       [--remote-action REMOTE_ACTION] [--yes]
+                       [--remote-action REMOTE_ACTION] [--out OUT] [--force]
+                       [--yes]
                        [action] [cid] [emulator_arg] [remote_arg]
 ```
 
 Sin acción lista computes; con id o nombre muestra detalle. Acciones: `add`, `update`, `rm`,
-`ports`, `idlepc`, `action` (pasarela al compute: `binaries`, `img`…). `rm` exige `--yes`.
+`ports`, `idlepc`, `action` (pasarela al compute: `binaries`, `img`…), `endpoint` (resuelve la
+URL directa) y `download` (baja bytes a `--out`, con `--force` para sobrescribir). `rm` exige
+`--yes`.
 
 ```bash
 gns3lab compute
 gns3lab compute local
 gns3lab compute ports local
 gns3lab compute action local qemu binaries
+gns3lab compute endpoint local qemu binaries
+gns3lab compute download local --emulator qemu --remote-action binaries --out pcap.bin
 ```
 
 ### `emulator`
