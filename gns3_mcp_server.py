@@ -1075,7 +1075,7 @@ def gns3_capturas(action: str = "phases", project: Optional[str] = None,
         path = captures.write_index(entries, outdir)
     except Exception as exc:
         return _lab_error(action, exc)
-    return {"ok": True, "action": action, "path": _lab_redact(path)}
+    return {"ok": True, "action": action, "path": str(path)}
 
 
 @mcp.tool

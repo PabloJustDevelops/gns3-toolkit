@@ -223,6 +223,17 @@ def test_index_escribe_las_entradas_pasadas(captures_module, tmp_path):
     assert (tmp_path / "indice.md").is_file()
 
 
+def test_index_devuelve_la_ruta_real_sin_redactar_el_usuario(captures_module, tmp_path, monkeypatch):
+    monkeypatch.setenv("GNS3_USER", "admin")
+    ruta = "/home/admin/capturas/indice.md"
+    monkeypatch.setattr(captures_module, "write_index", lambda _entries, _outdir: ruta)
+
+    result = server.gns3_capturas(
+        action="index", spec=[{"phase": "topologia"}], outdir=str(tmp_path))
+
+    assert result == {"ok": True, "action": "index", "path": ruta}
+
+
 def test_index_sin_entradas_devuelve_el_indice_existente(captures_module, tmp_path):
     indice = tmp_path / "indice.md"
     indice.write_text("índice existente\n", encoding="utf-8")

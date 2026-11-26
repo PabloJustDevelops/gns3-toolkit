@@ -129,10 +129,10 @@ proyectos, `gns3_drawings` (clear), `gns3_batch` y las resources/prompts.
 ## Cómo se comprueba
 
 ```bash
-# 47 comandos: claves del dict handlers
+# 48 comandos: claves del dict handlers
 ./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l
 
-# 48 tools: decoradores @mcp.tool
+# 50 tools: decoradores @mcp.tool
 env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python -c \
   "import asyncio,gns3_mcp_server as s; print(len(asyncio.run(s.mcp.list_tools())))"
 ```
