@@ -37,7 +37,7 @@ esta rama.
 | planificar | `plan` | `gns3lab lab plan --spec …` | no |
 | exportar | `export` (previsto) | `gns3lab lab export --project … --out …` | solo lectura; escribe `--out` en local |
 | comparar | `diff` (previsto) | `gns3lab lab diff --spec … --topology …` | no, si se pasa `--topology` |
-| aplicar | `apply --yes` | `gns3lab lab apply --spec … --yes` | sí |
+| aplicar | `apply --yes` | `gns3lab lab apply --spec … [--topology topo.json] --yes` | sí |
 | verificar | `verify` | `gns3lab lab verify --spec …` | solo lectura |
 
 `diff` y `export` aceptan `--topology <fichero.json>` para poder probarse sin servidor.
@@ -64,6 +64,7 @@ si hay alguno. No habla con el servidor.
 Parte de una topología real y produce un spec v1 normalizado. `template` se toma de `node_type`
 o `template`, y `adapter_type` de `properties`. **Nunca inventa `ip` ni `expect`**: esos campos
 siguen escribiéndose a mano. Un enlace sin dos extremos se omite y se reporta en `warn`.
+`porta`/`portb` son opcionales y recogen `port_number` cuando no es 0; si faltan significan 0.
 
 ```bash
 gns3lab lab export --project lab-ejemplo --out lab.yaml       # previsto en dclcli
@@ -94,8 +95,9 @@ Salida de ejemplo (ilustrativa, no medida):
 }
 ```
 
-Compara nodos por nombre y enlaces por `(a, pa, b, pb)` normalizado. `diff(e, e)` da
-`sin_cambios: true` con `plan` vacío: esa es la propiedad que hace idempotente el ciclo.
+Compara nodos por nombre y enlaces por `(a, pa, porta, b, pb, portb)` normalizado, con los
+puertos ausentes valiendo 0. `diff(e, e)` da `sin_cambios: true` con `plan` vacío: esa es la
+propiedad que hace idempotente el ciclo.
 
 **`sobrantes` se informan, nunca se borran.** Un nodo o enlace que esté en el servidor pero no en
 el YAML aparece en el informe; ninguna acción del ciclo lo elimina.
@@ -118,7 +120,8 @@ gns3lab link add pc2 sw1 --pa 0 --pb 1 -p lab-ejemplo
 gns3lab up lab-ejemplo
 ```
 
-Con `diff`, el plan omite `new` si el proyecto ya existe y sólo crea lo que falta.
+Con `diff`, el plan omite `new` y `up` si el proyecto ya existe y sólo crea lo que falta.
+Cuando `porta`/`portb` están declarados, `link add` recibe `--ppa/--ppb`.
 
 ### 5. `apply --yes`
 
@@ -127,10 +130,12 @@ python3 scripts/labspec.py apply --yes examples/lab-ejemplo.yaml
 gns3lab lab apply --spec examples/lab-ejemplo.yaml --yes     # previsto en dclcli
 ```
 
-Crea el proyecto (`new`), añade nodos (`node add`), aplica `adapter_type` (`node props`), crea
-enlaces (`link add`) y arranca (`up`). Se detiene en el primer fallo y no borra proyectos ni
-nodos. Es la única acción del ciclo que escribe en GNS3: debe reportarse en el informe de la
-tarea.
+El `apply` directo crea el proyecto (`new`), añade nodos (`node add`), aplica `adapter_type`
+(`node props`), crea enlaces (`link add`) y arranca (`up`). `gns3lab lab apply` consulta la
+topología real, crea sólo lo que falta y arranca únicamente al crear el proyecto; con
+`--topology` usa un JSON local sin consultar el servidor. Ambos se detienen en el primer fallo
+y no borran proyectos ni nodos. Es la única acción del ciclo que escribe en GNS3: debe
+reportarse en el informe de la tarea.
 
 Sin `--yes`, la orden se niega:
 

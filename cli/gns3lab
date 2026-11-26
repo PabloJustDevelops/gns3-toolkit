@@ -4308,14 +4308,27 @@ def _lab_actual(L, ruta: str) -> dict:
     return exportar(crudo)
 
 
-def _lab_topologia_servidor(args, conf) -> dict:
+def _lab_topologia_servidor(args, conf, project: str | None = None,
+                            missing_ok: bool = False) -> dict:
     """Nodos y enlaces del proyecto leídos con gns3core.Client (solo lectura)."""
     if core is None:
         raise RuntimeError("falta gns3core para `lab export`: ejecuta ./scripts/install.sh")
     c = _core_client(Server(args.server, conf))
     if not c.alive():
         raise ConnectionError(f"servidor {args.server} no responde")
-    proyecto = c.resolve_project(getattr(args, "project", None))
+    needle = project if project is not None else getattr(args, "project", None)
+    if missing_ok and needle:
+        proyectos = c.projects()
+        coincidencias = [p for p in proyectos
+                         if p.get("project_id") == needle
+                         or str(p.get("name", "")).casefold() == needle.casefold()]
+        if not coincidencias:
+            return {}
+        if len(coincidencias) > 1:
+            raise ValueError(f"proyecto ambiguo: {needle}")
+        proyecto = coincidencias[0]
+    else:
+        proyecto = c.resolve_project(needle)
     pid = proyecto["project_id"]
     nodos = c.nodes(pid)
     nombres = {n.get("node_id"): n.get("name") for n in nodos}
@@ -4336,7 +4349,8 @@ def _lab_topologia_servidor(args, conf) -> dict:
             nombre = nombres.get(e.get("node_id"))
             if not nombre:
                 break
-            pares.append({"node": nombre, "adapter": e.get("adapter_number", 0)})
+            pares.append({"node": nombre, "adapter": e.get("adapter_number", 0),
+                          "port_number": e.get("port_number", 0)})
         if len(pares) == 2:
             salida_enlaces.append({"ends": pares})
     return {"project": proyecto.get("name"), "nodes": salida_nodos,
@@ -4384,8 +4398,22 @@ def cmd_lab(args, conf) -> int:
 
         if accion == "apply":
             deseado = _lab_spec(L, args.spec)
-            actual = _lab_actual(L, args.topology) if getattr(args, "topology", None) else None
-            comandos = _lab_comandos(L, deseado, server)
+            if getattr(args, "topology", None):
+                actual = _lab_actual(L, args.topology)
+            else:
+                topologia = _lab_topologia_servidor(
+                    args, conf, project=deseado["project"], missing_ok=True)
+                if not topologia:
+                    actual = {}
+                elif topologia.get("nodes"):
+                    actual = L.export(topologia, project=deseado["project"])
+                else:
+                    actual = {"project": deseado["project"], "nodes": [], "links": []}
+            planificar = getattr(L, "plan", None)
+            if not callable(planificar):
+                raise RuntimeError("labspec no tiene plan(): falta el carril dclcore")
+            comandos = [_lab_mostrar(L, cmd, server)
+                        for cmd in planificar(deseado, actual, server)]
             if not args.yes:
                 datos = {"plan": comandos, "yes": False, "project": deseado["project"]}
                 if not _lab_json(args):
@@ -4396,7 +4424,7 @@ def cmd_lab(args, conf) -> int:
                 return _lab_out(args, accion, False, datos, rc=2)
             aplicar = getattr(L, "aplicar_deseado", None)
             if callable(aplicar):
-                rc = aplicar(deseado, actual or {}, server, True)
+                rc = aplicar(deseado, actual, server, True)
             else:
                 rc = L.aplicar(deseado, server, True)
             datos = {"plan": comandos, "yes": True, "rc": rc,
@@ -4941,7 +4969,7 @@ def main() -> int:
                        help="salida {ok, action, data}")
         if nombre in ("validate", "plan", "diff", "apply", "verify"):
             q.add_argument("--spec", required=True, help="fichero YAML del laboratorio")
-        if nombre in ("diff", "export"):
+        if nombre in ("diff", "apply", "export"):
             q.add_argument("--topology",
                            help="topología JSON local (sin hablar con el servidor)")
         if nombre == "apply":

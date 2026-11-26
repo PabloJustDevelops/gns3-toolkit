@@ -556,13 +556,26 @@ def _lab_redact(text: Any) -> str:
     return re.sub(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}", "Basic [redactado]", value)
 
 
+def _lab_redact_any(value: Any) -> Any:
+    """Redacta credenciales también dentro de estructuras anidadas."""
+    if isinstance(value, str):
+        return _lab_redact(value)
+    if isinstance(value, dict):
+        return {key: _lab_redact_any(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_lab_redact_any(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_lab_redact_any(item) for item in value)
+    return value
+
+
 def _lab_error(action: str, error: Any, **extra) -> dict:
     detail = _lab_redact(str(error) or "error desconocido")
     return {"ok": False, "action": action, "error": detail, **extra}
 
 
 def _lab_action_error(action: str, error: Optional[dict]) -> dict:
-    extra = {key: (_lab_redact(value) if isinstance(value, str) else value)
+    extra = {key: _lab_redact_any(value)
              for key, value in (error or {}).items() if key != "error"}
     return _lab_error(action, (error or {}).get("error", "error desconocido"), **extra)
 
@@ -932,6 +945,12 @@ def _lab_actual_for_action(labspec, topology: Optional[str | dict],
 def _gns3_lab_action(labspec, action: str, spec: Optional[str | dict],
                     topology: Optional[str | dict], project: Optional[str],
                     out: Optional[str], yes: bool, server: Optional[str]) -> dict:
+    if action == "apply" and server is not None:
+        return _lab_error(
+            action,
+            "gns3_lab apply solo opera en el servidor del MCP; "
+            "usa gns3lab lab apply --server para otro",
+        )
     if action == "export":
         if topology is None:
             if not project:
@@ -1062,8 +1081,9 @@ def gns3_lab(action: str, spec: Optional[str | dict] = None,
 
     Acciones: validate, plan, diff, apply, export y verify. ``spec`` admite YAML o dict y,
     si se omite, usa ``GNS3_LAB_SPEC``. ``topology`` admite JSON o dict. ``apply`` exige
-    ``yes=True``; sin él devuelve el plan y el código 2 sin escribir. export puede guardar
-    el spec en ``out`` (YAML, o JSON si la extensión es .json).
+    ``yes=True``; sin él devuelve el plan y el código 2 sin escribir. No acepta ``server``:
+    para otro servidor usa ``gns3lab lab apply --server``. export puede guardar el spec en
+    ``out`` (YAML, o JSON si la extensión es .json).
     """
     normalized_action = str(action).lower()
     valid = ["validate", "plan", "diff", "apply", "export", "verify"]

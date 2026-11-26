@@ -75,6 +75,39 @@ def test_gns3_lab_apply_sin_yes_no_escribe(monkeypatch):
 
 
 @requires_tool
+def test_gns3_lab_apply_rechaza_un_servidor_ajeno():
+    resultado = server.gns3_lab(action="apply", spec=str(EJEMPLO), server="otro")
+
+    assert resultado["ok"] is False
+    assert resultado["error"] == (
+        "gns3_lab apply solo opera en el servidor del MCP; "
+        "usa gns3lab lab apply --server para otro"
+    )
+    assert "plan" not in resultado
+
+
+@requires_tool
+def test_lab_action_error_redacta_detail_anidado(monkeypatch):
+    secreto = "clave-falsa-dclfix-9f4c2a"
+    monkeypatch.setenv("GNS3_PASSWORD", secreto)
+    monkeypatch.setattr(server, "_conf", lambda: {})
+    error = {
+        "error": "fallo al leer la topología",
+        "detail": {
+            "url": f"http://usuario:{secreto}@127.0.0.1:3080",
+            "attempts": [{"password": secreto}, (secreto,)],
+        },
+    }
+
+    resultado = server._lab_action_error("diff", error)
+    texto = json.dumps(resultado, ensure_ascii=False)
+
+    assert secreto not in texto
+    assert "[redactado]" in texto
+    assert resultado["detail"]["attempts"][1] == ("[redactado]",)
+
+
+@requires_tool
 def test_gns3_lab_diff_funciona_sin_gns3_lab_spec(monkeypatch):
     monkeypatch.delenv("GNS3_LAB_SPEC", raising=False)
 
