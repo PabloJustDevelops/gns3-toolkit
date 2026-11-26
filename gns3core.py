@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import ipaddress
 import json
 import os
 import re
@@ -1109,3 +1110,303 @@ def screen_text(monitor: "QemuMonitor", psm: int = 4, scale: int = 2) -> dict:
         return shot
     shot["ocr"] = ocr(shot["path"], psm=psm)
     return shot
+
+
+# ───────────────────── verificación por componente (solo lectura) ─────────────────────
+VERIFY_COMPONENTS = ("qemu", "pf", "vpcs")
+IPV4_RE = r"(\d{1,3}(?:\.\d{1,3}){3})"
+
+
+def _vcheck(name: str, ok: bool, detail: str) -> dict:
+    return {"name": name, "ok": bool(ok), "detail": str(detail)}
+
+
+def _vresult(component: str, project: str, checks: list[dict]) -> dict:
+    problems = [f"{c['name']}: {c['detail']}" for c in checks if not c["ok"]]
+    return {"component": component, "project": project, "ok": not problems,
+            "checks": checks, "problems": problems}
+
+
+def _vlist(value: Any) -> list:
+    """Normaliza una sección repetible de config.xml a lista."""
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _is_pfsense_node(node: dict) -> bool:
+    props = node.get("properties") or {}
+    text = f"{node.get('name', '')} {props.get('hda_disk_image', '')}".lower()
+    return "pfsense" in text
+
+
+def _select_verify_node(nodes: list[dict], component: str,
+                        node: str | None) -> tuple[Optional[dict], Optional[str]]:
+    """Un único nodo del componente; si hay varios, pide `--node` en vez de adivinar."""
+    if component == "pf":
+        candidates = [n for n in nodes if _is_pfsense_node(n)]
+        label = "pfSense"
+    else:
+        wanted = "vpcs" if component == "vpcs" else "qemu"
+        candidates = [n for n in nodes
+                      if str(n.get("node_type") or "").lower() == wanted]
+        if component == "qemu":
+            candidates = [n for n in candidates if not _is_pfsense_node(n)]
+        label = wanted
+    if node:
+        low = node.lower()
+        exact = [n for n in candidates if str(n.get("name", "")).lower() == low]
+        candidates = exact or [n for n in candidates
+                               if low in str(n.get("name", "")).lower()]
+        if not candidates:
+            return None, f"nodo '{node}' no encontrado entre los nodos {label}"
+    if not candidates:
+        return None, f"el proyecto no tiene nodos {label}"
+    if len(candidates) > 1:
+        nombres = ", ".join(str(n.get("name")) for n in candidates)
+        return None, f"hay varios nodos {label}: {nombres}; repite con --node"
+    return candidates[0], None
+
+
+def _verify_qemu_checks(node: dict) -> list[dict]:
+    checks = []
+    status = node.get("status")
+    checks.append(_vcheck("estado", status == "started", f"status={status or '?'}"))
+    adapter = (node.get("properties") or {}).get("adapter_type")
+    checks.append(_vcheck("adapter_type", bool(adapter),
+                          f"adapter_type={adapter}" if adapter
+                          else "falta adapter_type en properties"))
+    port = find_monitor_port(node_id=node.get("node_id"))
+    checks.append(_vcheck(
+        "puerto HMP", bool(port),
+        f"tcp:{port}" if port else
+        "sin -monitor tcp en /proc (nodo parado o proceso de otro usuario)"))
+    if not port:
+        checks.append(_vcheck("info status", False, "sin puerto HMP que consultar"))
+        return checks
+    try:
+        with QemuMonitor(port) as monitor:
+            result = monitor.run("info status")
+    except OSError as e:
+        checks.append(_vcheck("info status", False,
+                              f"no conecta al monitor tcp:{port}: {e}"))
+        return checks
+    output = str(result.get("output") or "")
+    ok = not result.get("error") and "status" in output.lower()
+    checks.append(_vcheck("info status", ok,
+                          output.strip() or result.get("error") or "sin respuesta"))
+    return checks
+
+
+def _pf_network(lan: dict) -> Optional[ipaddress.IPv4Network]:
+    try:
+        return ipaddress.ip_network(f"{lan['ipaddr']}/{lan['subnet']}", strict=False)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _verify_pf_config_checks(doc: dict, ifaces: dict) -> list[dict]:
+    checks = []
+    required = ("system", "interfaces", "filter", "nat", "dhcpd")
+    missing = [name for name in required if not isinstance(doc.get(name), dict)]
+    checks.append(_vcheck("secciones", not missing,
+                          f"presentes: {', '.join(required)}" if not missing
+                          else f"faltan: {', '.join(missing)}"))
+
+    interfaces = doc.get("interfaces") if isinstance(doc.get("interfaces"), dict) else {}
+
+    def physical(role: str) -> Optional[str]:
+        value = interfaces.get(role)
+        return value.get("if") if isinstance(value, dict) else None
+
+    actual = {role: physical(role) for role in ("wan", "lan")}
+    expected = {"wan": ifaces.get("wan"), "lan": ifaces.get("lan")}
+    coherent = bool(ifaces) and actual == expected
+    checks.append(_vcheck(
+        "interfaces configuradas", coherent,
+        f"wan={actual['wan'] or '-'} lan={actual['lan'] or '-'}; "
+        f"esperado wan={expected['wan']} lan={expected['lan']}"))
+
+    filters = doc.get("filter") if isinstance(doc.get("filter"), dict) else {}
+    rules = _vlist(filters.get("rule"))
+    invalid = [r for r in rules
+               if not isinstance(r, dict)
+               or r.get("type") not in ("pass", "block", "reject")
+               or r.get("interface") not in interfaces]
+    checks.append(_vcheck(
+        "reglas", bool(rules) and not invalid,
+        f"{len(rules)} regla(s)" +
+        (f"; {len(invalid)} con interfaz o acción inválida" if invalid else "")))
+
+    nat = doc.get("nat") if isinstance(doc.get("nat"), dict) else {}
+    outbound = nat.get("outbound") if isinstance(nat.get("outbound"), dict) else {}
+    mode = str(outbound.get("mode") or "")
+    nat_rules = _vlist(outbound.get("rule"))
+    nat_ok = mode in ("automatic", "hybrid", "manual") and (
+        mode == "automatic" or bool(nat_rules))
+    checks.append(_vcheck(
+        "NAT", nat_ok,
+        f"modo={mode or '(vacío)'}" +
+        (f", {len(nat_rules)} regla(s) manuales" if nat_rules else "")))
+
+    dhcpd = doc.get("dhcpd") if isinstance(doc.get("dhcpd"), dict) else {}
+    lan = dhcpd.get("lan") if isinstance(dhcpd.get("lan"), dict) else {}
+    rango = lan.get("range") if isinstance(lan.get("range"), dict) else {}
+    desde, hasta = str(rango.get("from") or ""), str(rango.get("to") or "")
+    network = _pf_network(interfaces.get("lan") or {})
+    try:
+        first, last = ipaddress.IPv4Address(desde), ipaddress.IPv4Address(hasta)
+        valid_range = first <= last and (network is None or
+                                         (first in network and last in network))
+    except (ipaddress.AddressValueError, ValueError):
+        valid_range = False
+    dhcp_ok = bool(lan) and "enable" in lan and valid_range
+    checks.append(_vcheck(
+        "DHCP", dhcp_ok,
+        f"enable={'sí' if 'enable' in lan else 'no'}, "
+        f"rango={desde or '-'}-{hasta or '-'}, "
+        f"red={network or 'no calculable'}"))
+    return checks
+
+
+def _verify_pf_checks(node: dict) -> list[dict]:
+    checks = []
+    try:
+        import pfsense as pfs
+    except ImportError as e:
+        checks.append(_vcheck("interfaces", False,
+                              f"falta pfsense.py en la raíz del repo ({e})"))
+        checks.append(_vcheck("PFSENSE_PASSWORD", False,
+                              "no se puede comprobar config.xml sin pfsense.py"))
+        checks.append(_vcheck("config.xml", False, "módulo pfsense ausente"))
+        return checks
+    try:
+        ifaces = pfs.detect_ifnames(node)
+    except Exception as e:
+        checks.append(_vcheck("interfaces", False, str(e)))
+        ifaces = {}
+    else:
+        checks.append(_vcheck(
+            "interfaces", True,
+            f"wan={ifaces.get('wan')} lan={ifaces.get('lan')} "
+            f"(adapter_type={(node.get('properties') or {}).get('adapter_type')})"))
+
+    has_password = bool(os.environ.get("PFSENSE_PASSWORD"))
+    checks.append(_vcheck(
+        "PFSENSE_PASSWORD", has_password,
+        "PFSENSE_PASSWORD definida (valor no leído)" if has_password
+        else "falta PFSENSE_PASSWORD: expórtala en el entorno (nunca en el repo)"))
+    if not has_password:
+        checks.append(_vcheck("config.xml", False,
+                              "no se lee /conf/config.xml sin PFSENSE_PASSWORD"))
+        return checks
+    try:
+        doc = pfs.PfSense.from_env().get_config()
+    except Exception as e:
+        checks.append(_vcheck("config.xml", False,
+                              f"{type(e).__name__}: {e}"))
+        return checks
+    if not isinstance(doc, dict) or doc.get("ok") is False:
+        detail = (doc.get("error") if isinstance(doc, dict)
+                  else "la respuesta no es un documento XML")
+        checks.append(_vcheck("config.xml", False, str(detail)))
+        return checks
+    checks.append(_vcheck("config.xml", True, "leído /conf/config.xml (solo lectura)"))
+    checks.extend(_verify_pf_config_checks(doc, ifaces))
+    return checks
+
+
+def _verify_vpcs_checks(client: Client, pid: str, node: dict) -> list[dict]:
+    checks = []
+    status = node.get("status")
+    checks.append(_vcheck("estado", status == "started", f"status={status or '?'}"))
+    ctype = str(node.get("console_type") or "").lower()
+    port = node.get("console")
+    if ctype != "telnet" or not port:
+        checks.append(_vcheck("consola", False,
+                              f"consola={ctype or 'ninguna'} puerto={port}"))
+        return checks
+    try:
+        with console_for(client, pid, node) as console:
+            result = console.run("show ip", timeout=12.0, idle=0.9)
+    except (OSError, ConsoleError) as e:
+        checks.append(_vcheck("consola", False, f"telnet:{port}: {e}"))
+        return checks
+    checks.append(_vcheck("consola", True, f"telnet:{port} responde a show ip"))
+
+    output = str(result.get("output") or "")
+    match = re.search(rf"IP/MASK\s*:\s*{IPV4_RE}/(\d{{1,2}})", output)
+    ip = match.group(1) if match else None
+    bits = int(match.group(2)) if match else 0
+    ip_ok = bool(ip and ip != "0.0.0.0" and 0 < bits <= 32)
+    checks.append(_vcheck("show ip", ip_ok,
+                          f"ip={ip or 'sin IP'}/{bits or '?'}"
+                          if ip else "show ip no devuelve IP/MASK"))
+
+    gateway = re.search(rf"GATEWAY\s*:\s*{IPV4_RE}", output)
+    gw = gateway.group(1) if gateway else None
+    if not gw:
+        checks.append(_vcheck("gateway", False, "show ip no devuelve GATEWAY"))
+    elif gw.endswith((".0", ".255")):
+        checks.append(_vcheck(
+            "gateway", False,
+            f"gateway={gw} parece la máscara (bug de VPCS tras ip dhcp); "
+            "fija la IP a mano con la gateway del DHCP SERVER"))
+    else:
+        try:
+            same_net = bool(ip) and ipaddress.IPv4Address(gw) in ipaddress.ip_network(
+                f"{ip}/{bits}", strict=False)
+        except ValueError:
+            same_net = False
+        checks.append(_vcheck("gateway", same_net,
+                              f"gateway={gw}" + ("" if same_net
+                                                 else f" fuera de {ip}/{bits}")))
+    return checks
+
+
+def verify_component(client: Client, project: Optional[str], component: str,
+                     node: Optional[str] = None) -> dict:
+    """Comprueba que un componente del laboratorio está listo, sin cambiar nada.
+
+    Solo lectura: no abre proyectos, no arranca nodos y no escribe en pfSense.
+    Devuelve ``{component, project, ok, checks, problems}``.
+    """
+    component = str(component or "").lower()
+    if component not in VERIFY_COMPONENTS:
+        return _vresult(component, project or "", [_vcheck(
+            "componente", False,
+            f"componente desconocido: {component!r}; válidos: "
+            f"{', '.join(VERIFY_COMPONENTS)}")])
+    try:
+        proj = client.resolve_project(project)
+    except SystemExit as e:
+        return _vresult(component, project or "",
+                        [_vcheck("proyecto", False, str(e))])
+    name = str(proj.get("name") or project or "")
+    pid = proj["project_id"]
+    if proj.get("status") != "opened":
+        return _vresult(component, name, [_vcheck(
+            "proyecto abierto", False,
+            f"el proyecto '{name}' está cerrado; verify no lo abre: "
+            f"usa `gns3lab up {name}` (o POST /v2/projects/{pid}/open)")])
+    checks = [_vcheck("proyecto abierto", True, f"{name} ({pid[:8]})")]
+    try:
+        nodes = client.nodes(pid)
+    except (ConnectionError, RuntimeError, SystemExit) as e:
+        checks.append(_vcheck("nodos", False, str(e)))
+        return _vresult(component, name, checks)
+    target, error = _select_verify_node(nodes, component, node)
+    if error:
+        checks.append(_vcheck("nodo", False, error))
+        return _vresult(component, name, checks)
+    checks.append(_vcheck("nodo", True,
+                          f"{target.get('name')} ({str(target.get('node_id') or '')[:8]})"))
+    if component == "qemu":
+        checks.extend(_verify_qemu_checks(target))
+    elif component == "pf":
+        checks.extend(_verify_pf_checks(target))
+    else:
+        checks.extend(_verify_vpcs_checks(client, pid, target))
+    return _vresult(component, name, checks)

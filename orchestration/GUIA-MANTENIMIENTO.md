@@ -68,7 +68,7 @@ env -u PYTHONPATH -u VIRTUAL_ENV python3 scripts/verify.py
 Salida real de esta sesión (los conteos cambian con el código; la línea que decide es la última):
 
 ```text
-comandos=46 tools=42 áreas=12
+comandos=47 tools=43 áreas=12
 OK: sin deriva
 ```
 

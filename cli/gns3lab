@@ -4128,6 +4128,41 @@ def cmd_pf(args, conf) -> int:
         return _pf_error(args, f"pf {act}: {e}")
 
 
+# --------------------------------------------------------------------------- #
+# verificación por componente (solo lectura)
+# --------------------------------------------------------------------------- #
+def cmd_verify(args, conf) -> int:
+    """Comprueba un componente sin abrir el proyecto ni arrancar nodos."""
+    if core is None:
+        print("falta el núcleo gns3core para verificar el componente",
+              file=sys.stderr)
+        return 1
+    s = Server(args.server, conf)
+    c = _core_client(s)
+    if not c.alive():
+        print(f"servidor {s.name} ({s.url}) no responde", file=sys.stderr)
+        return 2
+    try:
+        result = core.verify_component(c, args.project, args.component, node=args.node)
+    except (ConnectionError, RuntimeError) as e:
+        print(f"verify {args.component}: {e}", file=sys.stderr)
+        return 1
+    if getattr(args, "json", False):
+        _json_out(result)
+    else:
+        print(f"{result['project']} / {result['component']}")
+        for check in result["checks"]:
+            print(f"  [{'OK ' if check['ok'] else 'NO '}] "
+                  f"{check['name']}: {check['detail']}")
+        if result["problems"]:
+            print("\nPROBLEMAS:")
+            for problem in result["problems"]:
+                print(f"  - {problem}")
+        else:
+            print("\nOK: componente listo")
+    return 0 if result["ok"] else 1
+
+
 def _run_handler(args, handler, conf) -> int:
     """Ejecuta el handler; con --json global normaliza su stdout.
 
@@ -4580,6 +4615,14 @@ def main() -> int:
     q.add_argument("--port", type=int, default=22022, help="puerto (por defecto 22022)")
     q.add_argument("--json", action="store_true", help="salida {ok, data}")
 
+    # -- verificación por componente (solo lectura) -------------------------- #
+    p = sub.add_parser("verify", help="comprueba que un componente del laboratorio está listo")
+    p.add_argument("component", choices=["qemu", "pf", "vpcs"],
+                   help="componente a verificar")
+    p.add_argument("project", help="proyecto GNS3 (nombre o id)")
+    p.add_argument("--node", help="nodo concreto si hay varios del mismo tipo")
+    p.add_argument("--json", action="store_true", help="salida estructurada")
+
     args = ap.parse_args()
     # La configuración se lee después de parsear: `--help` no toca disco.
     conf = load_conf()
@@ -4601,7 +4644,7 @@ def main() -> int:
         "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
         "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
         "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
-        "examen": cmd_examen, "pf": cmd_pf,
+        "examen": cmd_examen, "pf": cmd_pf, "verify": cmd_verify,
         "project": cmd_project, "gns3vm": cmd_gns3vm, "notify": cmd_notify,
         "symbol": cmd_symbol, "iou-license": cmd_iou_license,
         "server": cmd_server, "emulator": cmd_emulator,
@@ -4614,7 +4657,7 @@ def main() -> int:
                   "console", "capture", "snap", "template", "images",
                   "project", "gns3vm", "notify", "symbol", "iou-license",
                   "server", "emulator", "nio", "capture-port", "all", "disk",
-                  "vm", "watch", "version-v1"}
+                  "vm", "watch", "version-v1", "verify"}
     if args.cmd in needs_core and core is None:
         print(f"falta {CORE_DIR / 'gns3core.py'}: ejecuta ./scripts/install.sh",
               file=sys.stderr)

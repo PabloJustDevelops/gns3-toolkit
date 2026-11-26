@@ -1,11 +1,12 @@
 # Comandos de `gns3lab`
 
-Referencia de los 46 subcomandos que registra `cli/gns3lab`. Las líneas `usage` están copiadas
+Referencia de los 47 subcomandos que registra `cli/gns3lab`. Las líneas `usage` están copiadas
 de `gns3lab <cmd> --help`; los ejemplos suponen el servidor local y el proyecto `examen-kit`.
 
 Índice: [Convenciones](#convenciones) · [Servidor](#servidor-y-diagnóstico) ·
 [Proyectos](#proyectos) · [Catálogo](#catálogo-y-computes) · [Topología](#topología) ·
-[Consola](#consola-y-pantalla) · [pfSense](#pfsense) · [Ficheros](#ficheros-y-discos).
+[Consola](#consola-y-pantalla) · [pfSense](#pfsense) · [Verificación](#verificación-por-componente) ·
+[Ficheros](#ficheros-y-discos).
 
 ## Convenciones
 
@@ -712,6 +713,33 @@ gns3lab pf ssh --port 22022
 `rule` y `nat` insertan antes de cualquier `reject`. `put_config` hace copia de seguridad
 `config.xml.bak-<stamp>`, recarga con `/etc/rc.reload_all` y no borra secciones que no entiende.
 Detalle en [PFSENSE-NATIVO.md](PFSENSE-NATIVO.md).
+
+## Verificación por componente
+
+### `verify`
+
+```text
+usage: gns3lab verify [-h] [--node NODE] [--json] {qemu,pf,vpcs} project
+```
+
+Comprobación **solo de lectura** de que un componente está realmente listo, no solo de que la
+API respondió `200`: no abre proyectos ni arranca nodos. Si el proyecto está cerrado, devuelve
+un problema accionable en vez de abrirlo. `--node` desempata cuando hay varios nodos del mismo
+tipo. `--json` devuelve `{component, project, ok, checks, problems}`.
+
+```bash
+gns3lab verify qemu examen-kit --json
+gns3lab verify pf examen-kit --json
+gns3lab verify vpcs examen-kit --node PC1 --json
+```
+
+- `qemu`: nodo y estado, `adapter_type`, puerto HMP localizado en `/proc` y `info status`.
+- `pf`: interfaces deducidas sin SSH, `PFSENSE_PASSWORD` definida (solo el nombre),
+  `/conf/config.xml` leído sin escribir, secciones, interfaces, reglas, NAT y DHCP coherentes.
+- `vpcs`: consola telnet accesible, `show ip` legible y gateway dentro de la red (rechaza la
+  máscara que VPCS pinta como gateway tras `ip dhcp`).
+
+Detalle y límites en [VERIFICACION.md](VERIFICACION.md).
 
 ## Ficheros y discos
 

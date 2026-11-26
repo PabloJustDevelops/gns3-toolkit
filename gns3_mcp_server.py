@@ -637,6 +637,28 @@ def _gns3_pfsense_mcp(
 
 
 @mcp.tool
+def gns3_verify(component: str, project: Optional[str] = None,
+                project_id: Optional[str] = None,
+                project_name: Optional[str] = None,
+                node: Optional[str] = None) -> dict:
+    """Úsala para comprobar si qemu, pf o vpcs está listo antes de dar el laboratorio por bueno.
+    **Lectura**: no abre proyectos, no arranca nodos y no escribe en pfSense.
+
+    Devuelve ``{component, project, ok, checks, problems}``. Para ``qemu`` comprueba estado,
+    ``adapter_type``, el puerto HMP en ``/proc`` y ``info status``; para ``pf`` deduce
+    interfaces sin SSH, lee ``/conf/config.xml`` y valida secciones, reglas, NAT y DHCP;
+    para ``vpcs`` abre la consola telnet y exige ``show ip`` con IP y gateway coherentes.
+    """
+    needle = project_id or project_name or project
+    try:
+        client = _client()
+        return core.verify_component(client, needle, component, node=node)
+    except (ConnectionError, RuntimeError) as e:
+        return {"component": component, "project": needle or "", "ok": False,
+                "checks": [], "problems": [str(e)]}
+
+
+@mcp.tool
 def gns3_templates(kind: Optional[str] = None) -> Any:
     """Listado compacto de plantillas (qemu, docker, vpcs, iou, dynamips...). Úsala para
     ver qué puedes instanciar; para crear, editar o borrar usa `gns3_template`.

@@ -21,6 +21,14 @@ abierto); timeout, descarga o stream en curso. El inventario se contrastó con
 Leyenda: `—` no existe en ese lado. `URL` significa que el núcleo compone la dirección pero no
 abre el canal.
 
+## Verificación por componente
+
+`gns3lab verify` y `gns3_verify` no añaden rutas: reutilizan `GET /v2/projects` (`resolve_project`),
+`GET /v2/projects/{id}/nodes` (`nodes`) y, según el componente, `/proc` (puerto HMP), el canal
+HMP (`info status`), la consola telnet (`show ip`) o `pfsense.PfSense.get_config()`
+(`cat /conf/config.xml`). Nunca abren el proyecto ni escriben en el firewall. Contrato y límites
+en [VERIFICACION.md](VERIFICACION.md); pruebas en `tests/test_verify_component.py`.
+
 ## `server`
 
 | Endpoint | Método de `gns3core` | CLI | MCP | Test |

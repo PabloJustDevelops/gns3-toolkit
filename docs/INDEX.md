@@ -9,7 +9,7 @@ escribieron.
 | Documento | Para qué sirve | Fuente de verdad | Cómo se verifica |
 |---|---|---|---|
 | [ARQUITECTURA.md](ARQUITECTURA.md) | piezas, clases de `gns3core`, flujo de una orden y por qué consola/HMP | `gns3core.py`, `gns3_mcp_server.py`, `cli/gns3lab` | `python3 scripts/verify.py`; `pytest -q` |
-| [COMANDOS.md](COMANDOS.md) | referencia de los 46 subcomandos con flags y ejemplos | `cli/gns3lab` (parser y handlers) | `./cli/gns3lab <cmd> --help`; recuento con `sed -n '2p'` |
+| [COMANDOS.md](COMANDOS.md) | referencia de los 47 subcomandos con flags y ejemplos | `cli/gns3lab` (parser y handlers) | `./cli/gns3lab <cmd> --help`; recuento con `sed -n '2p'` |
 | [PARIDAD.md](PARIDAD.md) | qué operación está en CLI, en MCP o en ambos | dict `handlers` y funciones `@mcp.tool` | `scripts/verify.py`; `mcp.list_tools()` |
 | [API-COVERAGE.md](API-COVERAGE.md) | endpoint a método, verbo CLI, tool MCP y test | `API_V2_MAP` y `Client` en `gns3core.py` | `scripts/verify.py`; `pytest --collect-only -q` |
 | [GUI-PORTADA.md](GUI-PORTADA.md) | operaciones de la GUI con su comando, tool y endpoint | métodos de `Client` y handlers | bloque `Cómo se ha verificado` del propio documento |
@@ -18,6 +18,7 @@ escribieron.
 | [NIO-Y-CAPTURAS.md](NIO-Y-CAPTURAS.md) | diferencia entre captura de enlace y de puerto, NIO y errores del compute | `port_nio()`, `port_capture()`, `link_capture()` | `pytest -q tests/test_client_nio.py` |
 | [EVENTOS.md](EVENTOS.md) | notificaciones HTTP y WebSocket, formato y eventos esperados | `notifications()`, `notifications_ws_url()`, handlers de `gns3server` | `gns3lab watch --seconds 5`; `pytest -q tests/test_mcp_resources.py` |
 | [PFSENSE-NATIVO.md](PFSENSE-NATIVO.md) | llevar pfSense por `config.xml` y SSH, con el menú sólo como último recurso | `pfsense.py`, `cli/gns3lab pf` | `pytest -q tests/test_pfsense.py tests/test_cli_pf.py`; `gns3lab pf --help` |
+| [VERIFICACION.md](VERIFICACION.md) | `verify qemu|pf|vpcs`: checks reales, salida y límites | `verify_component()` en `gns3core.py` | `pytest -q tests/test_verify_component.py`; `gns3lab verify --help` |
 | [UPDATES.md](UPDATES.md) | aviso de versión nueva por CLI, caché y publicación de releases | `VERSION` y `check_updates()` en `cli/gns3lab` | `pytest -q tests/test_update_check.py`; `gns3lab doctor --check-updates --json` |
 | [MCP-VELOCIDAD.md](MCP-VELOCIDAD.md) | qué hace `gns3_batch`, qué paraleliza y cómo medirlo | `gns3_batch()` y `_batch_is_read_only()` | el bloque `Cómo medirlo` del documento |
 | [EXAMEN.md](EXAMEN.md) | guion ordenado del examen, con la salida que confirma cada paso | CLI, `pfsense.py` y `examen` | `gns3lab examen verify`; `gns3lab doctor` |

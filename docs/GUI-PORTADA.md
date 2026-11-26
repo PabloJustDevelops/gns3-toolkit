@@ -105,8 +105,8 @@ sin disfrazarlo. Los verbos reales, el body del NIO y el significado del `500` e
 ## Cómo se ha verificado
 
 ```bash
-grep -c '^@mcp.tool' gns3_mcp_server.py                          # 42
-./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l  # 46
+grep -c '^@mcp.tool' gns3_mcp_server.py                          # 43
+./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l  # 47
 python3 - <<'PY'                                                  # 12 áreas en API_V2_MAP
 import ast, re
 s = open('gns3core.py').read()
@@ -116,7 +116,7 @@ PY
 grep -n 'def node_resize_disk\|def console_reset\|def gns3vm\|def symbols' gns3core.py
 ```
 
-Verificado en este árbol: `mcp.list_tools()` devuelve 42 tools y `gns3lab` registra 46
+Verificado en este árbol: `mcp.list_tools()` devuelve 43 tools y `gns3lab` registra 47
 subcomandos. Las operaciones de la última tabla (NIO, captura por puerto, acciones masivas,
 eventos WS y versión v1) figuran en ambas listas; los métodos del núcleo y los endpoints están
 en `gns3core.py` y en el inventario de rutas.

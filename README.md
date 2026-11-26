@@ -1,12 +1,12 @@
 # gns3-toolkit
 
 Operar un servidor **GNS3 2.2** desde la terminal o desde un agente MCP, sin GUI. Núcleo
-compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **42 tools** y CLI
-`gns3lab` con **46 subcomandos**. Repo público:
+compartido (`gns3core`, **12 áreas** en `API_V2_MAP`), servidor MCP de **43 tools** y CLI
+`gns3lab` con **47 subcomandos**. Repo público:
 https://github.com/PabloJustDevelops/gns3-toolkit
 
-Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **42 tools**
-(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **46 subcomandos** (`handlers` en
+Estado real (2026-11-25), leído del código: **12 áreas** (`gns3core.API_V2_MAP`), **43 tools**
+(`mcp.list_tools()` sobre `gns3_mcp_server.py`), **47 subcomandos** (`handlers` en
 `cli/gns3lab`). Las
 acciones de la GUI operativa portadas al núcleo están en
 [docs/GUI-PORTADA.md](docs/GUI-PORTADA.md); las que aún no tienen comando o tool se marcan
@@ -51,18 +51,18 @@ gns3lab pf detect -p examen-kit --json       # wan=em0, lan=em1 sin SSH
 
 ## Superficie
 
-**CLI** — 46 subcomandos: `servers status up down test export import fix port compute stats
+**CLI** — 47 subcomandos: `servers status up down test export import fix port compute stats
 symbols appliances images templates snap template console capture exec shot key type mon new
 node upload draw link doctor project notify symbol iou-license server emulator nio capture-port
-all disk vm watch report`. Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
+all disk vm watch verify`. Referencia completa en [docs/COMANDOS.md](docs/COMANDOS.md).
 
-**MCP** — 42 tools: `gns3_appliances gns3_capture gns3_command_line gns3_compute gns3_console
+**MCP** — 43 tools: `gns3_appliances gns3_capture gns3_command_line gns3_compute gns3_console
 gns3_console_control gns3_drawings gns3_emulator gns3_events gns3_events_url gns3_exec
 gns3_gns3vm gns3_images gns3_iou_license gns3_link_edit gns3_links gns3_monitor gns3_nio
 gns3_node_action gns3_node_edit gns3_node_files gns3_nodes gns3_nodes_bulk gns3_notifications
 gns3_port_capture gns3_project_files gns3_project_io gns3_project_stats gns3_projects
 gns3_server gns3_server_paths gns3_snapshots gns3_statistics gns3_status gns3_symbols
-gns3_template gns3_templates gns3_topology gns3_upload`. Transporte stdio; credenciales leídas
+gns3_template gns3_templates gns3_topology gns3_upload gns3_verify`. Transporte stdio; credenciales leídas
 de `~/.config/GNS3/2.2/gns3_server.conf`.
 
 **Núcleo** — `Client` (REST `/v2`), `Console` (telnet por prompt, `--More--`, `[y/n]`,
@@ -91,6 +91,8 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 - [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) — cómo encajan CLI, MCP y núcleo.
 - [docs/PFSENSE-NATIVO.md](docs/PFSENSE-NATIVO.md) — integración nativa sin VNC: detección de
   interfaces, `config.xml`, reglas/NAT/SSH, errores literales y verificación.
+- [docs/VERIFICACION.md](docs/VERIFICACION.md) — `gns3lab verify` y `gns3_verify`: checks por
+  componente, salida estructurada y límites de la comprobación (solo lectura).
 - [docs/MCP-VELOCIDAD.md](docs/MCP-VELOCIDAD.md) — `gns3_batch`, paralelismo de lecturas y
   medición real del coste del MCP.
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — síntoma, causa y arreglo.
@@ -102,9 +104,9 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 - `upload`, `node disk` y todo lo que lee `/proc` (`shot`, `key`, `type`, `mon`) actúan sobre el
   compute **local**. En un servidor remoto, el disco tiene que estar ya allí.
 - El puerto de consola no se puede fijar por `PUT` en un nodo: se fija en la plantilla.
-Declaración de alcance: 12 áreas, 42 tools y 46 comandos, recalculados por `scripts/verify.py`.
+Declaración de alcance: 12 áreas, 43 tools y 47 comandos, recalculados por `scripts/verify.py`.
 - El OCR lee bien 720x400 con fuente VGA; no espera texto pequeño.
-- Tests: 638 passed, cobertura 100 % de `gns3core.py` (720 sentencias, 0 miss) y 100 % de
+- Tests: 675 passed, cobertura 100 % de `gns3core.py` (916 sentencias, 0 miss) y 100 % de
   `pfsense.py` (435 sentencias, 0 miss), con dobles
   de HTTP, telnet y HMP y sin servidor GNS3. La matriz de lo que cubre cada
   endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).

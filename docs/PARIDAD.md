@@ -28,6 +28,7 @@ su acción. Ambas se comprueban con el código: `cli/gns3lab` (dict `handlers`) 
 | Ficheros del proyecto | `project file get|put` | `gns3_project_files` (get/put) |
 | Exportar / importar `.gns3p` | `export`, `import`, `port` | `gns3_project_io` (export/import) |
 | Kit de examen | `examen setup|verify|reset|informe` | `gns3_informe` |
+| Verificación por componente | `verify qemu|pf|vpcs` | `gns3_verify` |
 
 ## Computes, imágenes y catálogo
 
@@ -126,10 +127,10 @@ proyectos, `gns3_drawings` (clear), `gns3_batch` y las resources/prompts.
 ## Cómo se comprueba
 
 ```bash
-# 46 comandos: claves del dict handlers
+# 47 comandos: claves del dict handlers
 ./cli/gns3lab --help | sed -n '2p' | tr -d ' ' | tr ',' '\n' | wc -l
 
-# 42 tools: decoradores @mcp.tool
+# 43 tools: decoradores @mcp.tool
 env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python -c \
   "import asyncio,gns3_mcp_server as s; print(len(asyncio.run(s.mcp.list_tools())))"
 ```
