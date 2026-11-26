@@ -91,3 +91,21 @@ def test_uuid_manda_sobre_nombre_de_disco_copiado(monkeypatch, tmp_path):
                                 "-monitor", "tcp:127.0.0.1:41005"])
 
     assert find_monitor_port(node_id="nodo-5", disk="pfSense-minitest.qcow2") == 41005
+
+
+def test_uuid_exacto_ignora_otro_proceso_que_lo_contiene_en_el_disco(monkeypatch, tmp_path):
+    """El UUID de un nodo en la ruta del disco no identifica otro proceso QEMU."""
+    _proc(tmp_path, "60", args=["qemu-system-x86_64", "-uuid", "otro-nodo",
+                                "-drive", "file=/proyectos/x/project-files/qemu/nodo-5/ajeno.qcow2",
+                                "-monitor", "tcp:127.0.0.1:41001"])
+    _proc(tmp_path, "61", args=["qemu-system-x86_64", "-uuid", "nodo-5",
+                                "-drive", "file=/proyectos/x/project-files/qemu/nodo-5/hda_disk.qcow2",
+                                "-monitor", "tcp:127.0.0.1:41002"])
+
+    class ProcRaiz:
+        def iterdir(self):
+            return iter([tmp_path / "60", tmp_path / "61"])
+
+    monkeypatch.setattr(gns3core, "Path", lambda _path: ProcRaiz())
+
+    assert find_monitor_port(node_id="nodo-5") == 41002

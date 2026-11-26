@@ -1071,8 +1071,11 @@ def find_monitor_port(node_id: Optional[str] = None, disk: Optional[str] = None)
             continue
         args = [a.decode(errors="replace") for a in raw.split(b"\0") if a]
         joined = " ".join(args)
-        if node_id and node_id not in joined:
-            continue
+        if node_id:
+            uuid_values = [args[i + 1] for i, arg in enumerate(args[:-1])
+                           if arg == "-uuid"]
+            if node_id not in uuid_values:
+                continue
         if not node_id and disk and disk not in joined:
             continue
         for i, a in enumerate(args):
