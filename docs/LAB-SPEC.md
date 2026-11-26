@@ -24,7 +24,9 @@ expect:                    # opcional: comandos de consola por nodo
 ```
 
 `validate` acumula los errores con la ruta del campo (`nodes[1].ip`,
-`links[0].b`, `expect.pc1[0]`) y sale con código 1 si hay alguno.
+`links[0].b`, `expect.pc1[0]`) y sale con código 1 si hay alguno. El campo `ip` sigue siendo
+sólo una expectativa de verificación: `apply` no lo configura dentro del nodo; `verify` lo
+comprueba con `show ip` cuando es VPCS.
 
 ## Comandos
 
@@ -49,6 +51,45 @@ python scripts/labspec.py verify examples/lab-ejemplo.yaml
   Devuelve 0 si todo pasa y 1 con el informe por nodo/enlace si algo falla.
 
 `--server/-s` se pasa tal cual a `gns3lab` y aparece también en el plan.
+
+### `export` y `diff` (previstos en el carril `dclcore`)
+
+En este árbol `scripts/labspec.py` no los registra todavía (`--help` lista `validate`, `plan`,
+`verify`, `apply`). El contrato previsto añade dos subcomandos al fichero, `export` y `diff`, sin
+cambiar el esquema v1:
+
+- `export(topology, project=None) -> dict`: convierte una topología real en un spec v1
+  normalizado y válido. `template` se toma de `node_type` o `template`, `adapter_type` de
+  `properties`; los enlaces pasan a `{a, b, pa, pb}`. Nunca inventa `ip` ni `expect`. Un enlace
+  sin dos extremos se omite y se reporta en `warn`, sin lanzar excepción. En la CLI se prevé
+  `python3 scripts/labspec.py export --topology topo.json` (o `--stdin`).
+- `diff(deseado, actual) -> dict`: devuelve `crear_nodos`, `crear_enlaces`, `sobrantes_nodos`,
+  `sobrantes_enlaces` y `sin_cambios`. Compara por nombre de nodo y por `(a, pa, b, pb)`
+  normalizado. `diff(e, e)` da `sin_cambios: true` y plan vacío. En la CLI se prevé
+  `python3 scripts/labspec.py diff --spec … --topology topo.json`, con `--json` opcional.
+
+Los `sobrantes` **se informan, nunca se borran**: ni `diff` ni `apply` eliminan nodos ni
+enlaces del servidor. `plan(deseado, actual)` omite `new` si el proyecto existe y sólo crea lo
+que falta; `aplicar_deseado` sin `yes` imprime el plan y sale con 2.
+
+### Subcomando `gns3lab lab` (previsto en el carril `dclcli`)
+
+`cli/gns3lab` registra hoy `export` para proyectos `.gns3p`, pero no `lab`. El carril `dclcli`
+añadirá `gns3lab lab <acción> [--json]` con seis acciones, todas delegadas en `labspec`:
+
+| Acción | Ejemplo previsto |
+|---|---|
+| `validate` | `gns3lab lab validate --spec examples/lab-ejemplo.yaml` |
+| `plan` | `gns3lab lab plan --spec examples/lab-ejemplo.yaml` |
+| `diff` | `gns3lab lab diff --spec … --topology topo.json` |
+| `apply` | `gns3lab lab apply --spec … --yes` |
+| `verify` | `gns3lab lab verify --spec …` |
+| `export` | `gns3lab lab export --project lab-ejemplo --out lab.yaml` |
+
+`--json` devuelve `ok`, `action` y `data`; en `apply` sin `--yes` devuelve `ok=false` y el plan.
+`export` lee la topología con `gns3core.Client` y escribe YAML en local; es la única parte que
+necesita servidor. El ciclo completo y la salida de ejemplo están en
+[LAB-DECLARATIVO.md](LAB-DECLARATIVO.md).
 
 Ejemplo completo: [lab-ejemplo.yaml](../examples/lab-ejemplo.yaml) (dos VPCS y
 un switch, sin pfSense).
