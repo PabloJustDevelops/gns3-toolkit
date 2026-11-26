@@ -70,7 +70,7 @@ def test_run_timeout_sin_salida_ni_stderr_no_rompe_la_redaccion(monkeypatch, cli
     result = client.run("true", timeout=1)
 
     assert result == {"cmd": "true", "output": "", "ok": False,
-                      "error": "timeout tras 1s"}
+                      "error": "timeout tras 1s", "timeout": True}
 
 
 @pytest.mark.parametrize("timeout", [0, -1, "cero"])
