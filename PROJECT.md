@@ -17,7 +17,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 - `gns3lab verify qemu|pf|vpcs` y `gns3_verify`: verificación solo lectura por componente, con
   checks y problemas accionables (`docs/VERIFICACION.md`).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 770 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
+- **Tests: 828 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
 - MCP: 50 tools, **6 resources + 1 resource template** (`gns3://project/{project}/topology`) y
@@ -128,6 +128,23 @@ Gates en `master`: 456 passed con `--cov-fail-under=100`, 39 tools conectadas, 4
 `doctor` sin hallazgos. El mismo día se importó el kit al servidor del aula (`192.168.71.251`)
 como proyecto nuevo, sin modificar `Pablo Rodriguez Garijo` (`db277172…5cf`).
 
+### Novena tanda: capturas por fase y WebUI, con PRs (2026-11-26)
+
+Cinco agentes en el espacio `gns3-toolkit` de Herdr; cada entrega pasó por rama, PR, CI
+(`verify`) y revisión con Codex `sol 6.2 medium`. Los hallazgos del revisor se devolvieron
+a sus agentes y se corrigieron: context manager de Playwright, campos `usernamefld`/
+`passwordfld`, login rechazado, `BASE_TOOLS` tras la tool nueva, rutas redactadas,
+validación de `after` y numeración de capturas, `find_monitor_port` con `-uuid` exacto.
+Dos ramas se rebasearon para no borrar `captures.py` ni el reference de la skill.
+
+PRs mergeados: #2 y #5 (errores HTTP de plantillas en CLI y MCP), #8 (capturas HMP por fase),
+#9 (WebUI headless solo lectura con fallback a consola), #10 (tool `gns3_capturas`), #11 y #12
+(docs/skill y `find_monitor_port`). Issues abiertos: #1 y #3 y #4 (este último cerrado por #12).
+
+Verificado en `master`: 828 passed, 100 % de `gns3core.py` y `pfsense.py`; 50 tools, 48 comandos,
+6 resources; `verify.py` y `check-links.py` limpios. Última revisión de Codex bloqueada por
+`usage limit` (11:17 PM): se sustituyó por revisión manual del diff final y pasada anterior.
+
 ### Octava tanda: laboratorio declarativo y revisión independiente (2026-11-25/26)
 
 Seis worktrees desde `a08c117`, agentes `dcl-*` con `hungerg-free` (núcleo, MCP, tests) y
@@ -140,8 +157,8 @@ Una segunda pasada del mismo revisor encontró tres regresiones, corregidas y ve
 `master`: rechazo de topología de otro proyecto, HTTP 500 al leer enlaces ya no se interpreta
 como lista vacía y `verify` compara `porta/portb`.
 
-Verificado en `master`: 770 passed, 100 % de `gns3core.py` y `pfsense.py` (1431 sentencias),
-49 tools, 48 comandos, 6 resources, `verify.py` y `check-links.py` limpios.
+Verificado en `master`: 828 passed, 100 % de `gns3core.py` y `pfsense.py` (1431 sentencias),
+50 tools, 48 comandos, 6 resources, `verify.py` y `check-links.py` limpios.
 
 ### Séptima tanda: pfSense nativo y MCP más rápido (2026-11-25)
 
