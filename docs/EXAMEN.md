@@ -1,6 +1,6 @@
 # Guion del examen
 
-Secciones: Atajo: el kit en tres comandos · 1. Comprobar el servidor · 2. Levantar el kit · 3. Leer el menú de pfSense por OCR · 4. Asignar interfaces · 5. VLANs en el switch · 6. Verificar con ping y doctor · 7. Llevarlo al servidor del aula · Lista final.
+Secciones: Atajo: el kit en tres comandos · Capturas por fase · 1. Comprobar el servidor · 2. Levantar el kit · 3. Leer el menú de pfSense por OCR · 4. Asignar interfaces · 5. VLANs en el switch · 6. Verificar con ping y doctor · 7. Llevarlo al servidor del aula · Lista final.
 
 Secuencia para montar y entregar el escenario sin GUI, en el orden en que se hace. Cada paso
 lleva el comando exacto y la salida que confirma que salió bien. Si un paso no imprime lo que
@@ -20,6 +20,25 @@ gns3lab examen informe --name "Kit de examen"  # Markdown en ~/GNS3/informes/
 
 Si el kit ya está montado a mano, el guion de abajo sigue siendo la referencia de qué se
 comprueba y qué salida confirma cada paso.
+
+## Capturas por fase
+
+Si el profesor pide imágenes del montaje, se capturan fases concretas (topología, pfSense, reglas,
+NAT, verificación), no una imagen por tecla. El bloque `captures:` del manifiesto decide qué fases
+se guardan, con un máximo de cinco, y el resultado es un `indice.md` con fase, archivo, nodo y OCR;
+no se genera un documento final de capturas.
+
+```bash
+gns3lab shot PF1 -p examen-kit                        # HMP con OCR, hoy disponible
+gns3lab lab apply --spec examples/lab-ejemplo.yaml --captures --yes   # previsto en capcore
+gns3lab examen capturas --out ~/GNS3/capturas          # previsto en capweb
+gns3lab examen capturas --webui --out ~/GNS3/capturas  # previsto en capweb, sólo lectura
+```
+
+La WebUI se usa sólo como evidencia visual: nunca para configurar. Si el navegador o la IP no
+están disponibles, se imprime la razón y se captura por consola. Credenciales sólo del entorno
+(`PFSENSE_*`); VNC es el último recurso. Guía completa en
+[CAPTURAS-EXAMEN.md](CAPTURAS-EXAMEN.md).
 
 ## 1. Comprobar el servidor
 

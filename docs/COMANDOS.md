@@ -6,7 +6,8 @@ de `gns3lab <cmd> --help`; los ejemplos suponen el servidor local y el proyecto 
 Índice: [Convenciones](#convenciones) · [Servidor](#servidor-y-diagnóstico) ·
 [Proyectos](#proyectos) · [Catálogo](#catálogo-y-computes) · [Topología](#topología) ·
 [Consola](#consola-y-pantalla) · [pfSense](#pfsense) · [Verificación](#verificación-por-componente) ·
-[Laboratorio declarativo](#laboratorio-declarativo) · [Ficheros](#ficheros-y-discos).
+[Laboratorio declarativo](#laboratorio-declarativo) · [Capturas](#capturas-por-fase-previsto-en-capcorecapwebcapmcp) ·
+[Ficheros](#ficheros-y-discos).
 
 ## Convenciones
 
@@ -151,7 +152,9 @@ gns3lab examen verify --name "Kit de examen"
 gns3lab examen informe --server clase --name "Pablo Rodriguez"
 ```
 
-`setup` y `reset` cambian estado: se reportan. `informe` sólo lee.
+`setup` y `reset` cambian estado: se reportan. `informe` sólo lee. La acción `capturas` con
+`--webui`, `--host`, `--out`, `--phase` y `--json` está **prevista en capweb**: hoy no está en
+`./cli/gns3lab examen --help`. Detalle en [CAPTURAS-EXAMEN.md](CAPTURAS-EXAMEN.md).
 
 ## Proyectos
 
@@ -779,7 +782,8 @@ python3 scripts/labspec.py apply --yes examples/lab-ejemplo.yaml
 python3 scripts/labspec.py verify examples/lab-ejemplo.yaml
 ```
 
-`export` y `diff` están implementados en `labspec.py`. Ciclo completo y
+`export` y `diff` están implementados en `labspec.py`. El flag `--captures` de `apply` está
+**previsto en capcore**: hoy `./cli/gns3lab lab apply --help` no lo lista. Ciclo completo y
 salida de ejemplo en [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md); esquema en
 [LAB-SPEC.md](LAB-SPEC.md).
 
@@ -796,6 +800,42 @@ Hoy `gns3_mcp_server.py` publica `gns3://status`, `gns3://projects`, `gns3://tem
 `gns3://project/{project}/topology`; las tres resources de laboratorio y la tool `gns3_lab`
 **no están todavía en este árbol**. El contrato completo está en
 [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) y el mapa en [INDEX.md](INDEX.md).
+
+## Capturas por fase (previsto en capcore/capweb/capmcp)
+
+Forma prevista, no ejecutable en este worktree (verificadas las ayudas `examen --help` y
+`lab apply --help`, y ausente `gns3_capturas` en `gns3_mcp_server.py`):
+
+```text
+usage: gns3lab lab apply [-h] [--json] --spec SPEC [--topology TOPOLOGY] [--yes]
+                         [--captures]                      # previsto en capcore
+usage: gns3lab examen capturas [-h] [--webui] [--host HOST] [--out OUT]
+                               [--phase PHASE] [--json]     # previsto en capweb
+```
+
+```bash
+gns3lab lab apply --spec examples/lab-ejemplo.yaml --captures --yes   # previsto en capcore
+gns3lab examen capturas --out ~/GNS3/capturas                          # previsto en capweb
+gns3lab examen capturas --webui --out ~/GNS3/capturas                  # previsto en capweb
+```
+
+Tool MCP prevista en capmcp: `gns3_capturas(action="phases|console|webui|index", project=None,
+spec=None, node=None, outdir=None, phase=None)`. `phases` lee el bloque `captures:` sin escribir;
+`console` usa el monitor HMP; `webui` degrada a consola con `reason` y `fallback="consola"` si el
+navegador no está disponible; `index` delega en `write_index`. No configura nada y el error nunca
+incluye la contraseña.
+
+Lo que sí está hoy para capturar a mano, con ayuda real:
+
+```text
+usage: gns3lab shot [-h] [-p PROJECT] [--psm PSM] [--scale SCALE] [--no-ocr] node
+usage: gns3lab mon [-h] [-p PROJECT] node cmd [cmd ...]
+```
+
+La imagen de consola sale de HMP (PPM → PNG con Pillow, OCR x2 `--psm 4`); la WebUI es sólo
+evidencia en modo lectura, nunca configuración; VNC es el último recurso. Credenciales `PFSENSE_*`
+sólo del entorno. El resultado es `indice.md`, sin documento final. Detalle en
+[CAPTURAS-EXAMEN.md](CAPTURAS-EXAMEN.md).
 
 ## Ficheros y discos
 

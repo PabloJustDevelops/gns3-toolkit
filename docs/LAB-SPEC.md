@@ -23,6 +23,11 @@ links:                     # lista (puede estar vacía)
 expect:                    # opcional: comandos de consola por nodo
   pc1:
     - show ip
+# previsto en capcore: capturas por fase (máximo 5)
+# captures:
+#   - phase: topologia
+#     after: apply          # apply | verify
+#     node: null            # o nombre de nodo con monitor HMP
 ```
 
 `validate` acumula los errores con la ruta del campo (`nodes[1].ip`,
@@ -56,6 +61,17 @@ python scripts/labspec.py verify examples/lab-ejemplo.yaml
   Devuelve 0 si todo pasa y 1 con el informe por nodo/enlace si algo falla.
 
 `--server/-s` se pasa tal cual a `gns3lab` y aparece también en el plan.
+
+### Capturas por fase (previsto en capcore)
+
+El campo opcional `captures` no está activo en este árbol. El contrato previsto añade entradas
+`{phase, after, node}` con `after` igual a `apply` o `verify`, un máximo de 5 fases y un error con
+la ruta del campo (`captures[0].after`) si falta el nombre o el momento. Con `captures=True`,
+`aplicar_deseado` y `verificar` capturan por HMP tras la fase correspondiente; un fallo de captura
+se reporta en el resultado y no cambia el exit code del montaje. La orden prevista es
+`gns3lab lab apply --spec … --captures --yes` (el flag `--captures` no está hoy en
+`./cli/gns3lab lab apply --help`). El índice resultante y las reglas de la WebUI están en
+[CAPTURAS-EXAMEN.md](CAPTURAS-EXAMEN.md).
 
 ### `export` y `diff` (implementados)
 
