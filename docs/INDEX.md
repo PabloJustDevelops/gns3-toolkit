@@ -24,6 +24,7 @@ escribieron.
 | [UPDATES.md](UPDATES.md) | aviso de versión nueva por CLI, caché y publicación de releases | `VERSION` y `check_updates()` en `cli/gns3lab` | `pytest -q tests/test_update_check.py`; `gns3lab doctor --check-updates --json` |
 | [MCP-VELOCIDAD.md](MCP-VELOCIDAD.md) | qué hace `gns3_batch`, qué paraleliza y cómo medirlo | `gns3_batch()` y `_batch_is_read_only()` | el bloque `Cómo medirlo` del documento |
 | [EXAMEN.md](EXAMEN.md) | guion ordenado del examen, con la salida que confirma cada paso | CLI, `pfsense.py` y `examen` | `gns3lab examen verify`; `gns3lab doctor` |
+| [CAPTURAS-EXAMEN.md](CAPTURAS-EXAMEN.md) | ciclo de capturas por fase: bloque `captures:`, HMP/WebUI e `indice.md` | `captures.py`, `webui_capture.py`, `cli/gns3lab` y `gns3_mcp_server.py` (previsto en capcore/capweb/capmcp) | `python3 scripts/check-links.py`; `./cli/gns3lab examen --help`; `./cli/gns3lab lab apply --help` |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | síntoma literal, causa y arreglo | mensajes del código y de la API | `grep` del mensaje en el código; `gns3lab doctor` |
 | [HARNESSES.md](HARNESSES.md) | lanzar el repo desde Command Code, OpenCode, Hermes, freebuff o Codex: comandos, MCP y límites | `scripts/harness_detect.py` y `harnesses/*/AGENTS.md` | `pytest -q tests/test_harness_detect.py`; `scripts/harness_detect.py --json` |
 
@@ -44,6 +45,24 @@ no tiene `lab` y el MCP no publica las resources de laboratorio. Estado del cont
 Regla común: `sobrantes` se informan, nunca se borran; `apply` sin `--yes` sale con 2;
 `ip` es expectativa de `verify`, no una escritura de `apply`. La referencia corta para la skill
 vive en [skill-sync/references/lab-declarativo.md](../skill-sync/references/lab-declarativo.md).
+
+## Capturas por fase: piezas previstas
+
+En este árbol no hay `captures.py`, ni `webui_capture.py`, ni la tool `gns3_capturas`; las órdenes
+`gns3lab lab apply --captures` y `gns3lab examen capturas` tampoco están en el parser. Estado del
+contrato:
+
+| Pieza | Estado | Carril | Documentación |
+|---|---|---|---|
+| `captures.py` (`capture_phase`, `write_index`, `phases_from_spec`) | previsto en capcore | `capcore` | [CAPTURAS-EXAMEN.md](CAPTURAS-EXAMEN.md) |
+| `gns3lab lab apply --captures` | previsto en capcore | `capcore` | [LAB-SPEC.md](LAB-SPEC.md) |
+| `webui_capture.py` y `gns3lab examen capturas` | previsto en capweb | `capweb` | [COMANDOS.md](COMANDOS.md) |
+| tool `gns3_capturas` | previsto en capmcp | `capmcp` | [COMANDOS.md](COMANDOS.md) |
+
+Regla común: HMP para la consola, navegador headless sólo para la WebUI y en modo lectura, VNC
+último recurso, credenciales sólo del entorno y salida limitada a `indice.md` (sin documento
+final). Referencia corta para la skill:
+[skill-sync/references/capturas-fases.md](../skill-sync/references/capturas-fases.md).
 
 ## Documentos históricos (no se reescriben)
 
