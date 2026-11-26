@@ -80,3 +80,14 @@ def test_cmdline_vacio_no_rompe(monkeypatch, tmp_path):
     _simular_proc(monkeypatch, tmp_path)
     _proc(tmp_path, "61", raw=b"")
     assert find_monitor_port() is None
+
+
+def test_uuid_manda_sobre_nombre_de_disco_copiado(monkeypatch, tmp_path):
+    """El disco copiado al proyecto se llama hda_disk.qcow2: con uuid válido
+    el nombre del disco original no debe filtrar el proceso."""
+    _simular_proc(monkeypatch, tmp_path)
+    _proc(tmp_path, "61", args=["qemu-system-x86_64", "-uuid", "nodo-5",
+                                "-drive", "file=/proyectos/x/project-files/qemu/nodo-5/hda_disk.qcow2",
+                                "-monitor", "tcp:127.0.0.1:41005"])
+
+    assert find_monitor_port(node_id="nodo-5", disk="pfSense-minitest.qcow2") == 41005

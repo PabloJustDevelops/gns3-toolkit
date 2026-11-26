@@ -1073,7 +1073,7 @@ def find_monitor_port(node_id: Optional[str] = None, disk: Optional[str] = None)
         joined = " ".join(args)
         if node_id and node_id not in joined:
             continue
-        if disk and disk not in joined:
+        if not node_id and disk and disk not in joined:
             continue
         for i, a in enumerate(args):
             if a.startswith("-monitor") and "tcp:" in a:
