@@ -79,6 +79,18 @@ def test_timeout_del_reload_sin_el_cambio_no_es_exito(monkeypatch, client):
     assert "timeout tras 180s" in result["detail"]
 
 
+def test_timeout_del_reload_con_lectura_fallida_no_es_exito(monkeypatch, client):
+    _put_con_reload(
+        monkeypatch, client, _response(ok=False, error="timeout tras 180s", timeout=True),
+    )
+    monkeypatch.setattr(client, "get_config", lambda: {"ok": False, "error": "ssh caído"})
+
+    result = client.put_config(DOC, backup=False)
+
+    assert result["ok"] is False
+    assert result["detail"] == "timeout tras 180s; verificación fallida: ssh caído"
+
+
 def test_timeout_del_reload_usa_senal_explicita(monkeypatch, client):
     _put_con_reload(
         monkeypatch, client,
@@ -102,6 +114,21 @@ def test_verificacion_acepta_campos_adicionales_del_reload(monkeypatch, client):
 
     assert result["ok"] is True
     assert result["reload"] == "timeout"
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual", "contains"),
+    [
+        (["pass"], {"type": "pass"}, False),
+        (["pass", "block"], ["reject", "pass", "log", "block", "reject"], True),
+        (["pass", "block"], ["pass", "reject"], False),
+        ([], [], True),
+    ],
+)
+def test_config_contains_recorre_listas_y_rechaza_coincidencias_ausentes(
+    expected, actual, contains,
+):
+    assert pfsense._config_contains(expected, actual) is contains
 
 
 def test_detail_sin_ruido_openssh_conserva_otros_avisos(monkeypatch, client):
