@@ -2093,7 +2093,7 @@ def cmd_mon(args, conf):
     s = Server(args.server, conf)
     mon = _monitor(s, args.project, args.node)
     try:
-        print(json.dumps(mon.run(" ".join(args.cmd)), ensure_ascii=False, indent=2))
+        print(json.dumps(mon.run(" ".join(args.command)), ensure_ascii=False, indent=2))
     finally:
         mon.close()
     return 0
@@ -4929,7 +4929,7 @@ def main() -> int:
 
     p = sub.add_parser("mon", help="envía un comando HMP al monitor del nodo")
     p.add_argument("node")
-    p.add_argument("cmd", nargs="+")
+    p.add_argument("command", nargs="+")
     p.add_argument("-p", "--project")
 
     # -- montaje por API ---------------------------------------------------- #
