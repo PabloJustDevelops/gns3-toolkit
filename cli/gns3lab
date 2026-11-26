@@ -998,6 +998,14 @@ def _resolve_id(items: list[dict], needle: str, key: str, what: str) -> dict:
                                  for x in hits))
 
 
+def _templates_or_die(c) -> list[dict]:
+    """Plantillas del servidor; un error HTTP no es 'no hay plantillas'."""
+    cuerpo = c.json_or_die("/v2/templates", "plantillas")
+    if not isinstance(cuerpo, list):
+        raise RuntimeError(f"plantillas: respuesta no válida ({type(cuerpo).__name__})")
+    return cuerpo
+
+
 def cmd_up(args, conf):
     s = Server(args.server, conf)
     proj = s.resolve(args.project)
@@ -1754,7 +1762,7 @@ def cmd_template(args, conf):
     if act == "duplicate":
         if not args.target:
             raise SystemExit("duplicate exige el nombre o id de la plantilla")
-        tpl = _resolve_id(c.templates(), args.target, "template_id", "plantilla")
+        tpl = _resolve_id(_templates_or_die(c), args.target, "template_id", "plantilla")
         st, res = _core_call(c.template_duplicate, tpl["template_id"], args.name)
         if not _ok(st):
             print(f"no se pudo duplicar {tpl.get('name')}: [{st}] {_err(res)}",
@@ -1778,7 +1786,7 @@ def cmd_template(args, conf):
             return 0
         if not args.filename:
             raise SystemExit("base-config exige el fichero (p. ej. startup-config)")
-        tpl = _resolve_id(c.templates(), args.target, "template_id", "plantilla")
+        tpl = _resolve_id(_templates_or_die(c), args.target, "template_id", "plantilla")
         if args.content is None:
             data = _core_call(c.template_base_config, tpl["template_id"], args.filename)
             if isinstance(data, dict) and data.get("error"):
@@ -2179,7 +2187,7 @@ def cmd_node(args, conf):
     if act == "add":
         if not args.template:
             raise SystemExit("add exige --template")
-        tpl = next((t for t in c.templates()
+        tpl = next((t for t in _templates_or_die(c)
                     if t.get("template_id") == args.template
                     or str(t.get("name", "")).lower() == args.template.lower()), None)
         if not tpl:
@@ -3484,7 +3492,7 @@ def _examen_setup(args, conf, c, name: str) -> int:
               "no lo borro ni lo modifico")
         return 0
 
-    templates = c.templates()
+    templates = _templates_or_die(c)
     elegidas = {}
     for kind in ("pfsense", "nat", "switch", "vpcs"):
         tpl = _examen_template(templates, kind)
