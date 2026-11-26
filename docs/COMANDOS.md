@@ -6,7 +6,7 @@ de `gns3lab <cmd> --help`; los ejemplos suponen el servidor local y el proyecto 
 Índice: [Convenciones](#convenciones) · [Servidor](#servidor-y-diagnóstico) ·
 [Proyectos](#proyectos) · [Catálogo](#catálogo-y-computes) · [Topología](#topología) ·
 [Consola](#consola-y-pantalla) · [pfSense](#pfsense) · [Verificación](#verificación-por-componente) ·
-[Ficheros](#ficheros-y-discos).
+[Laboratorio declarativo](#laboratorio-declarativo) · [Ficheros](#ficheros-y-discos).
 
 ## Convenciones
 
@@ -745,6 +745,57 @@ gns3lab verify vpcs examen-kit --node PC1 --json
   máscara que VPCS pinta como gateway tras `ip dhcp`).
 
 Detalle y límites en [VERIFICACION.md](VERIFICACION.md).
+
+## Laboratorio declarativo (previsto en el carril `dclcli`)
+
+`cli/gns3lab` registra hoy `export` para proyectos `.gns3p`, pero **no registra `lab`**. El
+subcomando se añadirá en el carril `dclcli`, delegando siempre en `scripts/labspec.py`; no
+sustituye al `export` de proyectos. Forma prevista (no copiada de `--help`):
+
+```text
+usage: gns3lab lab [-h] [--json] {validate,plan,diff,apply,verify,export} ...
+```
+
+| Acción prevista | Ejemplo | Delegado en `labspec` |
+|---|---|---|
+| `validate` | `gns3lab lab validate --spec examples/lab-ejemplo.yaml` | `validar` |
+| `plan` | `gns3lab lab plan --spec examples/lab-ejemplo.yaml` | `ordenes` |
+| `diff` | `gns3lab lab diff --spec … --topology topo.json` | `diff` |
+| `apply` | `gns3lab lab apply --spec … --yes` | `aplicar_deseado` |
+| `verify` | `gns3lab lab verify --spec …` | `verificar` |
+| `export` | `gns3lab lab export --project lab-ejemplo --out lab.yaml` | `export` |
+
+`--json` global devuelve `{ok, action, data}`. `apply` sin `--yes` devuelve `ok=false` con el
+plan y no escribe nada; `diff` y `export` aceptan `--topology <fichero.json>` para funcionar sin
+servidor. `export` lee nodos y enlaces con `gns3core.Client` y sólo escribe el fichero local
+`--out`. Los `sobrantes` de `diff` se informan, nunca se borran.
+
+Mientras tanto, las órdenes directas que sí están en este árbol son:
+
+```bash
+python3 scripts/labspec.py validate examples/lab-ejemplo.yaml
+python3 scripts/labspec.py plan examples/lab-ejemplo.yaml
+python3 scripts/labspec.py apply --yes examples/lab-ejemplo.yaml
+python3 scripts/labspec.py verify examples/lab-ejemplo.yaml
+```
+
+`export` y `diff` en `labspec.py` están previstos en el carril `dclcore`. Ciclo completo y
+salida de ejemplo en [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md); esquema en
+[LAB-SPEC.md](LAB-SPEC.md).
+
+### Resources y tool de laboratorio (previstos en el carril `dclmcp`)
+
+- `gns3://lab/desired`: spec validada y normalizada desde la variable `GNS3_LAB_SPEC`. Sin la
+  variable o sin fichero, devuelve `{"error": "…", "hint": "define GNS3_LAB_SPEC"}`.
+- `gns3://lab/actual`: topología resumida del proyecto declarado en `desired`.
+- `gns3://lab/diff`: resultado de `labspec.diff` más el plan en órdenes legibles; solo lectura.
+- `gns3_lab(action="validate|plan|diff|apply|export|verify", …)`: delega en `labspec`; `apply`
+  sin `yes=True` no toca nada y devuelve el plan.
+
+Hoy `gns3_mcp_server.py` publica `gns3://status`, `gns3://projects`, `gns3://templates` y
+`gns3://project/{project}/topology`; las tres resources de laboratorio y la tool `gns3_lab`
+**no están todavía en este árbol**. El contrato completo está en
+[LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) y el mapa en [INDEX.md](INDEX.md).
 
 ## Ficheros y discos
 

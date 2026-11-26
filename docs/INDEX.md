@@ -19,11 +19,31 @@ escribieron.
 | [EVENTOS.md](EVENTOS.md) | notificaciones HTTP y WebSocket, formato y eventos esperados | `notifications()`, `notifications_ws_url()`, handlers de `gns3server` | `gns3lab watch --seconds 5`; `pytest -q tests/test_mcp_resources.py` |
 | [PFSENSE-NATIVO.md](PFSENSE-NATIVO.md) | llevar pfSense por `config.xml` y SSH, con el menú sólo como último recurso | `pfsense.py`, `cli/gns3lab pf` | `pytest -q tests/test_pfsense.py tests/test_cli_pf.py`; `gns3lab pf --help` |
 | [VERIFICACION.md](VERIFICACION.md) | `verify qemu|pf|vpcs`: checks reales, salida y límites | `verify_component()` en `gns3core.py` | `pytest -q tests/test_verify_component.py`; `gns3lab verify --help` |
+| [LAB-SPEC.md](LAB-SPEC.md) | esquema v1 del laboratorio declarativo y qué no hace `apply` | `scripts/labspec.py` | `python3 scripts/labspec.py --help`; `validate examples/lab-ejemplo.yaml` |
+| [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) | ciclo `validate → export → diff → apply --yes → verify` y estado de cada pieza | `scripts/labspec.py`, `cli/gns3lab`, `gns3_mcp_server.py` | `python3 scripts/check-links.py`; `python3 scripts/labspec.py --help` |
 | [UPDATES.md](UPDATES.md) | aviso de versión nueva por CLI, caché y publicación de releases | `VERSION` y `check_updates()` en `cli/gns3lab` | `pytest -q tests/test_update_check.py`; `gns3lab doctor --check-updates --json` |
 | [MCP-VELOCIDAD.md](MCP-VELOCIDAD.md) | qué hace `gns3_batch`, qué paraleliza y cómo medirlo | `gns3_batch()` y `_batch_is_read_only()` | el bloque `Cómo medirlo` del documento |
 | [EXAMEN.md](EXAMEN.md) | guion ordenado del examen, con la salida que confirma cada paso | CLI, `pfsense.py` y `examen` | `gns3lab examen verify`; `gns3lab doctor` |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | síntoma literal, causa y arreglo | mensajes del código y de la API | `grep` del mensaje en el código; `gns3lab doctor` |
 | [HARNESSES.md](HARNESSES.md) | lanzar el repo desde Command Code, OpenCode, Hermes, freebuff o Codex: comandos, MCP y límites | `scripts/harness_detect.py` y `harnesses/*/AGENTS.md` | `pytest -q tests/test_harness_detect.py`; `scripts/harness_detect.py --json` |
+
+## Laboratorio declarativo: piezas previstas
+
+En este árbol `scripts/labspec.py` sólo registra `validate`, `plan`, `verify` y `apply`; la CLI
+no tiene `lab` y el MCP no publica las resources de laboratorio. Estado del contrato:
+
+| Pieza | Estado | Carril | Documentación |
+|---|---|---|---|
+| `scripts/labspec.py export` y `diff` | previsto | `dclcore` | [LAB-SPEC.md](LAB-SPEC.md) |
+| `gns3lab lab` (validar, planificar, exportar, comparar, aplicar, verificar) | previsto | `dclcli` | [COMANDOS.md](COMANDOS.md) |
+| tool `gns3_lab` | prevista | `dclmcp` | [COMANDOS.md](COMANDOS.md) |
+| `gns3://lab/desired` (usa `GNS3_LAB_SPEC`) | prevista | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
+| `gns3://lab/actual` | prevista | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
+| `gns3://lab/diff` | prevista | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
+
+Regla común: `sobrantes` se informan, nunca se borran; `apply` sin `--yes` sale con 2;
+`ip` es expectativa de `verify`, no una escritura de `apply`. La referencia corta para la skill
+vive en [skill-sync/references/lab-declarativo.md](../skill-sync/references/lab-declarativo.md).
 
 ## Documentos históricos (no se reescriben)
 

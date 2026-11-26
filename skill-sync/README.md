@@ -14,6 +14,9 @@ copiando desde aquí y **nunca** editando el repo desde la skill.
 - [references/pfsense-nativo.md](references/pfsense-nativo.md) — referencia corta del flujo
   nativo de pfSense (`pf detect` → `assign` → `ip` → `dhcp` → `rule` → `nat` → `ssh`).
   Aviso: nunca guardes la contraseña en el repo.
+- [references/lab-declarativo.md](references/lab-declarativo.md) — referencia corta del ciclo
+  `validate → export → diff → apply --yes → verify`, la variable `GNS3_LAB_SPEC` y la regla de
+  no borrar los `sobrantes`. Previsto en los carriles `dclcore`/`dclcli`/`dclmcp`.
 
 ## Instalación desde cero
 
@@ -41,6 +44,8 @@ copiando desde aquí y **nunca** editando el repo desde la skill.
    install -Dm755 skill-sync/scripts/gns3.sh "$SKILL_DIR/scripts/gns3.sh"
    install -Dm644 skill-sync/references/pfsense-nativo.md \
      "$SKILL_DIR/references/pfsense-nativo.md"
+   install -Dm644 skill-sync/references/lab-declarativo.md \
+     "$SKILL_DIR/references/lab-declarativo.md"
    ```
 
 ## Sincronización con backup y verificación
@@ -80,6 +85,8 @@ el repo y los gates pasan. El backup va fuera del repo, en `~/.hermes/backups/`,
      "$SKILL_DIR/scripts/gns3.sh"
    install -Dm644 skill-sync/references/pfsense-nativo.md \
      "$SKILL_DIR/references/pfsense-nativo.md"
+   install -Dm644 skill-sync/references/lab-declarativo.md \
+     "$SKILL_DIR/references/lab-declarativo.md"
    ```
 
 4. Verifica que la copia es idéntica y que el envoltorio es válido:
@@ -89,11 +96,13 @@ el repo y los gates pasan. El backup va fuera del repo, en `~/.hermes/backups/`,
    diff -u skill-sync/scripts/gns3.sh "$SKILL_DIR/scripts/gns3.sh"
    diff -u skill-sync/references/pfsense-nativo.md \
      "$SKILL_DIR/references/pfsense-nativo.md"
+   diff -u skill-sync/references/lab-declarativo.md \
+     "$SKILL_DIR/references/lab-declarativo.md"
    bash -n "$SKILL_DIR/scripts/gns3.sh"
    test -x "$SKILL_DIR/scripts/gns3.sh" && echo "envoltorio ejecutable"
    ```
 
-   Los tres `diff` deben salir con exit code 0 y sin líneas.
+   Los cuatro `diff` deben salir con exit code 0 y sin líneas.
 
 5. Borra los scripts antiguos **sólo después del backup**, si siguen ahí. Sus funciones ya las
    cubre `gns3lab`:
