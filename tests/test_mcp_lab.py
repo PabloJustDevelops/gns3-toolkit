@@ -1,0 +1,105 @@
+"""Contrato de resources y tool `gns3_lab`, sin servidor GNS3."""
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+from pathlib import Path
+
+import pytest
+
+import gns3_mcp_server as server
+
+REPO = Path(__file__).resolve().parents[1]
+EJEMPLO = REPO / "examples" / "lab-ejemplo.yaml"
+LAB_RESOURCES = (
+    "gns3://lab/desired",
+    "gns3://lab/actual",
+    "gns3://lab/diff",
+)
+BASE_TOOLS = 48
+
+
+def _resources() -> dict[str, object]:
+    return {str(recurso.uri): recurso
+            for recurso in asyncio.run(server.mcp.list_resources())}
+
+
+def _call(fn, *args, **kwargs):
+    resultado = fn(*args, **kwargs)
+    return asyncio.run(resultado) if inspect.isawaitable(resultado) else resultado
+
+
+def _payload(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
+requires_resources = pytest.mark.skipif(
+    bool(set(LAB_RESOURCES) - _resources().keys()),
+    reason="BRIEF-dclmcp pendiente: faltan resources gns3://lab/desired|actual|diff",
+)
+requires_tool = pytest.mark.skipif(
+    not hasattr(server, "gns3_lab"),
+    reason="BRIEF-dclmcp pendiente: falta la tool gns3_lab",
+)
+
+
+@requires_resources
+def test_list_resources_incluye_los_tres_recursos_de_lab():
+    assert set(LAB_RESOURCES) <= _resources().keys()
+
+
+@requires_tool
+def test_list_tools_crece_en_uno_con_gns3_lab():
+    tools = asyncio.run(server.mcp.list_tools())
+
+    assert len(tools) == BASE_TOOLS + 1
+    assert "gns3_lab" in {tool.name for tool in tools}
+
+
+@requires_tool
+def test_gns3_lab_apply_sin_yes_no_escribe(monkeypatch):
+    labspec = server._labspec_module()
+
+    def prohibido(*_args, **_kwargs):
+        raise AssertionError("gns3_lab apply sin yes no debe ejecutar ni llamar a la API")
+
+    monkeypatch.setattr(labspec, "ejecutar", prohibido)
+    monkeypatch.setattr(server, "_api", prohibido)
+
+    resultado = server.gns3_lab(action="apply", spec=str(EJEMPLO))
+
+    assert resultado["ok"] is False
+    assert resultado["plan"]
+    assert "yes" in resultado["error"].lower()
+
+
+@requires_tool
+def test_gns3_lab_diff_funciona_sin_gns3_lab_spec(monkeypatch):
+    monkeypatch.delenv("GNS3_LAB_SPEC", raising=False)
+
+    def prohibido(*_args, **_kwargs):
+        raise AssertionError("gns3_lab diff con topology no debe llamar a la API")
+
+    monkeypatch.setattr(server, "_api", prohibido)
+
+    resultado = server.gns3_lab(
+        action="diff",
+        spec=str(EJEMPLO),
+        topology={"project": "lab-ejemplo", "nodes": [], "links": []},
+    )
+
+    assert "error" not in resultado
+    datos = resultado.get("data", resultado)
+    assert [nodo["name"] for nodo in datos["crear_nodos"]] == ["pc1", "pc2", "sw1"]
+
+
+@requires_resources
+def test_resource_desired_sin_variable_devuelve_error_y_hint(monkeypatch):
+    monkeypatch.delenv("GNS3_LAB_SPEC", raising=False)
+    recurso = _resources()["gns3://lab/desired"]
+
+    resultado = _payload(_call(recurso.fn))
+
+    assert resultado["error"]
+    assert resultado["hint"] == "define GNS3_LAB_SPEC"
