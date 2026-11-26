@@ -746,17 +746,17 @@ gns3lab verify vpcs examen-kit --node PC1 --json
 
 Detalle y límites en [VERIFICACION.md](VERIFICACION.md).
 
-## Laboratorio declarativo (previsto en el carril `dclcli`)
+## Laboratorio declarativo (implementado)
 
 `cli/gns3lab` registra hoy `export` para proyectos `.gns3p`, pero **no registra `lab`**. El
 subcomando se añadirá en el carril `dclcli`, delegando siempre en `scripts/labspec.py`; no
-sustituye al `export` de proyectos. Forma prevista (no copiada de `--help`):
+sustituye al `export` de proyectos. Forma real:
 
 ```text
 usage: gns3lab lab [-h] [--json] {validate,plan,diff,apply,verify,export} ...
 ```
 
-| Acción prevista | Ejemplo | Delegado en `labspec` |
+| Acción | Ejemplo | Delegado en `labspec` |
 |---|---|---|
 | `validate` | `gns3lab lab validate --spec examples/lab-ejemplo.yaml` | `validar` |
 | `plan` | `gns3lab lab plan --spec examples/lab-ejemplo.yaml` | `ordenes` |
@@ -779,11 +779,11 @@ python3 scripts/labspec.py apply --yes examples/lab-ejemplo.yaml
 python3 scripts/labspec.py verify examples/lab-ejemplo.yaml
 ```
 
-`export` y `diff` en `labspec.py` están previstos en el carril `dclcore`. Ciclo completo y
+`export` y `diff` están implementados en `labspec.py`. Ciclo completo y
 salida de ejemplo en [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md); esquema en
 [LAB-SPEC.md](LAB-SPEC.md).
 
-### Resources y tool de laboratorio (previstos en el carril `dclmcp`)
+### Resources y tool de laboratorio (implementados)
 
 - `gns3://lab/desired`: spec validada y normalizada desde la variable `GNS3_LAB_SPEC`. Sin la
   variable o sin fichero, devuelve `{"error": "…", "hint": "define GNS3_LAB_SPEC"}`.
