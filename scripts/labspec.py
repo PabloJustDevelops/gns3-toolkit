@@ -23,7 +23,7 @@ CLI = REPO / "cli" / "gns3lab"
 VERSION = 1
 CLAVES_TOP = {"version", "project", "nodes", "links", "expect", "warn"}
 CLAVES_NODO = {"name", "template", "adapter_type", "ip"}
-CLAVES_ENLACE = {"a", "b", "pa", "pb"}
+CLAVES_ENLACE = {"a", "b", "pa", "pb", "porta", "portb"}
 NOMBRE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -128,7 +128,7 @@ def validar(data: dict) -> list[str]:
                 extremos.append(valor)
         if len(extremos) == 2 and extremos[0] == extremos[1]:
             errores.append(f"{base}: un nodo no puede enlazarse consigo mismo")
-        for puerto in ("pa", "pb"):
+        for puerto in ("pa", "pb", "porta", "portb"):
             valor = enlace.get(puerto, 0)
             if not _es_entero(valor) or valor < 0:
                 errores.append(f"{base}.{puerto}: debe ser entero >= 0")
@@ -166,8 +166,14 @@ def normalizar(data: dict) -> dict:
         if nodo.get("ip"):
             limpio["ip"] = nodo["ip"]
         nodos.append(limpio)
-    enlaces = [{"a": e["a"], "b": e["b"], "pa": e.get("pa", 0), "pb": e.get("pb", 0)}
-               for e in data.get("links", [])]
+    enlaces = []
+    for e in data.get("links", []):
+        limpio = {"a": e["a"], "b": e["b"],
+                  "pa": e.get("pa", 0), "pb": e.get("pb", 0)}
+        for puerto in ("porta", "portb"):
+            if puerto in e:
+                limpio[puerto] = e[puerto]
+        enlaces.append(limpio)
     expect = {k: list(v) for k, v in (data.get("expect") or {}).items()}
     salida = {"version": VERSION, "project": data["project"],
               "nodes": nodos, "links": enlaces, "expect": expect}
@@ -224,21 +230,30 @@ def export(topology: dict, project: str | None = None) -> dict:
                 break
             nombre = extremo.get("node")
             adapter = extremo.get("adapter", 0)
+            puerto = extremo.get("port_number", extremo.get("port", 0))
             if isinstance(adapter, str) and adapter.isdigit():
                 adapter = int(adapter)
+            if isinstance(puerto, str) and puerto.isdigit():
+                puerto = int(puerto)
             if (not isinstance(nombre, str) or nombre not in nombres
-                    or not _es_entero(adapter) or adapter < 0):
+                    or not _es_entero(adapter) or adapter < 0
+                    or not _es_entero(puerto) or puerto < 0):
                 extremos = []
                 break
-            extremos.append((nombre, adapter))
+            extremos.append((nombre, adapter, puerto))
         if len(extremos) != 2:
-            warn.append(f"{base}: omitido (extremo o adapter inválido)")
+            warn.append(f"{base}: omitido (extremo, adapter o puerto inválido)")
             continue
         if extremos[0][0] == extremos[1][0]:
             warn.append(f"{base}: omitido (un nodo no puede enlazarse consigo mismo)")
             continue
-        enlaces.append({"a": extremos[0][0], "b": extremos[1][0],
-                        "pa": extremos[0][1], "pb": extremos[1][1]})
+        enlace = {"a": extremos[0][0], "b": extremos[1][0],
+                  "pa": extremos[0][1], "pb": extremos[1][1]}
+        if extremos[0][2] != 0:
+            enlace["porta"] = extremos[0][2]
+        if extremos[1][2] != 0:
+            enlace["portb"] = extremos[1][2]
+        enlaces.append(enlace)
 
     candidato["links"] = enlaces
     salida = normalizar(candidato)
@@ -249,11 +264,11 @@ def export(topology: dict, project: str | None = None) -> dict:
 
 def _clave_enlace(enlace: dict) -> tuple:
     """Identidad independiente del orden de los dos extremos."""
-    a = (enlace["a"], enlace.get("pa", 0))
-    b = (enlace["b"], enlace.get("pb", 0))
+    a = (enlace["a"], enlace.get("pa", 0), enlace.get("porta", 0))
+    b = (enlace["b"], enlace.get("pb", 0), enlace.get("portb", 0))
     if b < a:
         a, b = b, a
-    return (a[0], a[1], b[0], b[1])
+    return (a[0], a[1], a[2], b[0], b[1], b[2])
 
 
 def diff(deseado: dict, actual: dict) -> dict:
@@ -290,9 +305,14 @@ def ordenes(spec: dict) -> list[list[str]]:
             cmds.append(["node", "props", nodo["name"], "--set",
                          f"adapter_type={nodo['adapter_type']}", "-p", proyecto])
     for enlace in spec["links"]:
-        cmds.append(["link", "add", enlace["a"], enlace["b"],
-                     "--pa", str(enlace["pa"]), "--pb", str(enlace["pb"]),
-                     "-p", proyecto])
+        cmd = ["link", "add", enlace["a"], enlace["b"],
+               "--pa", str(enlace["pa"]), "--pb", str(enlace["pb"])]
+        if "porta" in enlace:
+            cmd.extend(["--ppa", str(enlace["porta"])])
+        if "portb" in enlace:
+            cmd.extend(["--ppb", str(enlace["portb"])])
+        cmd.extend(["-p", proyecto])
+        cmds.append(cmd)
     cmds.append(["up", proyecto])
     return cmds
 
@@ -311,10 +331,16 @@ def plan(deseado: dict, actual: dict, server: str | None = None) -> list[list[st
             cmds.append(["node", "props", nodo["name"], "--set",
                          f"adapter_type={nodo['adapter_type']}", "-p", proyecto])
     for enlace in cambios["crear_enlaces"]:
-        cmds.append(["link", "add", enlace["a"], enlace["b"],
-                     "--pa", str(enlace["pa"]), "--pb", str(enlace["pb"]),
-                     "-p", proyecto])
-    cmds.append(["up", proyecto])
+        cmd = ["link", "add", enlace["a"], enlace["b"],
+               "--pa", str(enlace["pa"]), "--pb", str(enlace["pb"])]
+        if "porta" in enlace:
+            cmd.extend(["--ppa", str(enlace["porta"])])
+        if "portb" in enlace:
+            cmd.extend(["--ppb", str(enlace["portb"])])
+        cmd.extend(["-p", proyecto])
+        cmds.append(cmd)
+    if not actual.get("project"):
+        cmds.append(["up", proyecto])
     return cmds
 
 

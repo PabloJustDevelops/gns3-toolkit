@@ -96,7 +96,14 @@ def test_lab_validate_json_acepta_el_ejemplo(run_main, capsys):
 
 
 @requires_lab
-def test_lab_apply_sin_yes_no_ejecuta_nada(run_main, monkeypatch, capsys):
+def test_lab_apply_sin_yes_no_ejecuta_nada(run_main, monkeypatch, tmp_path, capsys):
+    topologia = tmp_path / "topologia.json"
+    topologia.write_text(json.dumps({
+        "project": "lab-ejemplo",
+        "nodes": [],
+        "links": [],
+    }), encoding="utf-8")
+
     def prohibido(*_args, **_kwargs):
         raise AssertionError("lab apply sin --yes no debe lanzar procesos")
 
@@ -104,12 +111,118 @@ def test_lab_apply_sin_yes_no_ejecuta_nada(run_main, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_core_client", prohibido)
     monkeypatch.setattr(cli, "Server", prohibido)
 
-    rc = run_main(["lab", "apply", "--spec", str(EJEMPLO), "--json"])
+    rc = run_main([
+        "lab", "apply", "--spec", str(EJEMPLO),
+        "--topology", str(topologia), "--json",
+    ])
 
     payload = json.loads(capsys.readouterr().out)
     assert rc == 2
     assert payload["ok"] is False
     assert payload["data"]["plan"]
+
+
+@requires_lab
+def test_lab_apply_con_topologia_idempotente(run_main, monkeypatch, tmp_path, capsys):
+    topologia = tmp_path / "topologia.json"
+    topologia.write_text(json.dumps({
+        "project": "lab-ejemplo",
+        "nodes": [
+            {"name": "pc1", "template": "VPCS"},
+            {"name": "pc2", "template": "VPCS"},
+            {"name": "sw1", "template": "Ethernet switch"},
+        ],
+        "links": [
+            {"ends": [
+                {"node": "pc1", "adapter": 0, "port_number": 0},
+                {"node": "sw1", "adapter": 0, "port_number": 0},
+            ]},
+            {"ends": [
+                {"node": "pc2", "adapter": 0, "port_number": 0},
+                {"node": "sw1", "adapter": 1, "port_number": 0},
+            ]},
+        ],
+    }), encoding="utf-8")
+
+    def prohibido(*_args, **_kwargs):
+        raise AssertionError("lab apply local no debe construir un cliente GNS3")
+
+    monkeypatch.setattr(cli, "_core_client", prohibido)
+    monkeypatch.setattr(cli, "Server", prohibido)
+
+    rc = run_main([
+        "lab", "apply", "--spec", str(EJEMPLO),
+        "--topology", str(topologia), "--json",
+    ])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert payload["data"]["plan"] == []
+    assert payload["data"]["yes"] is False
+
+
+@requires_lab
+def test_lab_apply_sin_topologia_consulta_y_acepta_proyecto_inexistente(
+    run_main, monkeypatch, capsys
+):
+    llamadas = []
+
+    class Cliente:
+        def alive(self):
+            llamadas.append("alive")
+            return True
+
+        def projects(self):
+            llamadas.append("projects")
+            return []
+
+        def resolve_project(self, _project):
+            raise AssertionError("debe comprobar la existencia exacta antes de resolver")
+
+    monkeypatch.setattr(cli, "Server", lambda *_args: object())
+    monkeypatch.setattr(cli, "_core_client", lambda _server: Cliente())
+
+    def prohibido(*_args, **_kwargs):
+        raise AssertionError("lab apply sin --yes no debe lanzar procesos")
+
+    monkeypatch.setattr(subprocess, "run", prohibido)
+
+    rc = run_main(["lab", "apply", "--spec", str(EJEMPLO), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert llamadas == ["alive", "projects"]
+    assert any("new lab-ejemplo" in cmd for cmd in payload["data"]["plan"])
+    assert any("up lab-ejemplo" in cmd for cmd in payload["data"]["plan"])
+
+
+@requires_lab
+def test_lab_apply_sin_topologia_proyecto_vacio_no_arranca(
+    run_main, monkeypatch, capsys
+):
+    class Cliente:
+        def alive(self):
+            return True
+
+        def projects(self):
+            return [{"project_id": "pid-1", "name": "lab-ejemplo"}]
+
+        def nodes(self, _pid):
+            return []
+
+        def links(self, _pid):
+            return []
+
+    monkeypatch.setattr(cli, "Server", lambda *_args: object())
+    monkeypatch.setattr(cli, "_core_client", lambda _server: Cliente())
+
+    rc = run_main(["lab", "apply", "--spec", str(EJEMPLO), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert any("node add" in cmd for cmd in payload["data"]["plan"])
+    assert not any("new lab-ejemplo" in cmd for cmd in payload["data"]["plan"])
+    assert not any("up lab-ejemplo" in cmd for cmd in payload["data"]["plan"])
 
 
 @requires_lab

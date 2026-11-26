@@ -72,6 +72,41 @@ def test_export_valido_omite_enlaces_rotos_y_no_inventa_ip_ni_expect():
     assert "links[1]" in str(especificacion["warn"])
 
 
+@requires_export
+@requires_diff_plan
+def test_export_diff_y_plan_conservan_los_puertos_del_enlace():
+    topologia = {
+        "project": "p",
+        "nodes": [
+            {"name": "pc1", "node_type": "VPCS"},
+            {"name": "sw1", "node_type": "ethernet_switch"},
+        ],
+        "links": [{"ends": [
+            {"node": "pc1", "adapter": 0, "port_number": 2},
+            {"node": "sw1", "adapter": 1, "port_number": 3},
+        ]}],
+    }
+
+    deseado = labspec.export(topologia)
+    enlace = {"a": "pc1", "b": "sw1", "pa": 0, "pb": 1,
+              "porta": 2, "portb": 3}
+
+    assert labspec.validar(deseado) == []
+    assert deseado["links"] == [enlace]
+    actual = _spec(
+        [{"name": "pc1", "template": "VPCS"},
+         {"name": "sw1", "template": "ethernet_switch"}],
+        [{"a": "pc1", "b": "sw1", "pa": 0, "pb": 1}],
+    )
+    resultado = labspec.diff(deseado, actual)
+    assert resultado["crear_enlaces"] == [enlace]
+    assert resultado["sobrantes_enlaces"] == actual["links"]
+    assert labspec.plan(deseado, actual) == [[
+        "link", "add", "pc1", "sw1", "--pa", "0", "--pb", "1",
+        "--ppa", "2", "--ppb", "3", "-p", "p",
+    ]]
+
+
 @requires_diff_plan
 def test_diff_detecta_nodos_y_enlaces_nuevos_y_sobrantes():
     deseado = _spec(
@@ -118,6 +153,16 @@ def test_diff_y_plan_son_idempotentes():
     assert labspec.plan(especificacion, especificacion) == []
 
 
+@requires_diff_plan
+def test_plan_solo_arranca_al_crear_el_proyecto():
+    deseado = _spec([{"name": "pc1", "template": "VPCS"}])
+    existente = _spec([])
+    nodo = ["node", "add", "--template", "VPCS", "--name", "pc1", "-p", "p"]
+
+    assert labspec.plan(deseado, existente) == [nodo]
+    assert labspec.plan(deseado, {}) == [["new", "p"], nodo, ["up", "p"]]
+
+
 @requires_aplicar_deseado
 def test_aplicar_deseado_sin_yes_no_ejecuta(monkeypatch):
     def prohibido(*_args, **_kwargs):
@@ -140,7 +185,7 @@ def test_aplicar_deseado_con_yes_ejecuta_el_plan_en_orden(monkeypatch):
         ],
         [{"a": "pc1", "b": "pc2", "pa": 0, "pb": 0}],
     )
-    actual = _spec([])
+    actual = {}
     llamadas = []
 
     def ejecutar(argv, server=None):
@@ -151,6 +196,7 @@ def test_aplicar_deseado_con_yes_ejecuta_el_plan_en_orden(monkeypatch):
 
     assert labspec.aplicar_deseado(deseado, actual, "local", True) == 0
     assert llamadas == [
+        (["new", "p"], "local"),
         (["node", "add", "--template", "VPCS", "--name", "pc1", "-p", "p"], "local"),
         (["node", "add", "--template", "VPCS", "--name", "pc2", "-p", "p"], "local"),
         (["link", "add", "pc1", "pc2", "--pa", "0", "--pb", "0", "-p", "p"], "local"),

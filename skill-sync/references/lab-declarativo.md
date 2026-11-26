@@ -18,7 +18,8 @@ Ciclo: `validate → export → diff → apply --yes → verify`. **`apply` sin 
 y sale con 2**; en el MCP devuelve `{"ok": false, "error": "…", "plan": [...]}`.
 
 `ip` en el YAML es una expectativa de `verify`, no una orden de configuración: `apply` no
-asigna IPs dentro de los nodos.
+asigna IPs dentro de los nodos. Los enlaces admiten `porta`/`portb` opcionales (puerto 0 por
+defecto); `export` los conserva si no son 0, `diff` los compara y `plan` usa `--ppa/--ppb`.
 
 Las seis acciones del subcomando `lab` están **previstas en el carril `dclcli`**; `export` y
 `diff` en `labspec.py`, en el **`dclcore`**; la tool `gns3_lab` y las resources, en el
