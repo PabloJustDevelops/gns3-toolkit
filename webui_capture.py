@@ -128,6 +128,23 @@ class WebUICapture:
         slug = re.sub(r"[^A-Za-z0-9_-]+", "-", page).strip("-_") or "pagina"
         return f"{index:02d}-{slug}.png"
 
+    @staticmethod
+    def _login_failure(page) -> str | None:
+        """Detecta el formulario de acceso o el error que publica pfSense 2.7.2."""
+        parsed = urlsplit(str(getattr(page, "url", "")))
+        if parsed.path.lower().rstrip("/").rsplit("/", 1)[-1] in {"login", "login.php"}:
+            return "login rechazado por pfSense: la URL sigue en el formulario de acceso"
+
+        error = page.locator("body#login .msgbox.text-danger h4")
+        if error.count():
+            detail = error.first.inner_text().strip()
+            suffix = f": {detail}" if detail else ""
+            return f"login rechazado por pfSense{suffix}"
+
+        if page.locator("#passwordfld").count():
+            return "login rechazado por pfSense: sigue visible el formulario de acceso"
+        return None
+
     def capture(self, pages: list[tuple[str, str]] | None = None) -> dict:
         """Hace login una vez y captura las páginas; cualquier fallo cae a consola."""
         available, reason = self.available()
@@ -161,6 +178,9 @@ class WebUICapture:
                             'form:has(#passwordfld) button[type="submit"]'
                         )
                         page.wait_for_load_state("domcontentloaded")
+                        login_failure = self._login_failure(page)
+                        if login_failure:
+                            raise WebUIUnavailable(login_failure)
 
                         for index, (name, path) in enumerate(selected, 1):
                             page.goto(self._page_url(path), wait_until="domcontentloaded",

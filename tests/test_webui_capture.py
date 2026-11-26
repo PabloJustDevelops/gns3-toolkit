@@ -24,12 +24,39 @@ sys.modules[SPEC.name] = cli
 LOADER.exec_module(cli)
 
 
+class FakeLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        if self.selector == "body#login .msgbox.text-danger h4":
+            return int(bool(self.page.login_rejected and self.page.login_error))
+        if self.selector == "#passwordfld":
+            return int(self.page.login_rejected)
+        return 0
+
+    def inner_text(self):
+        return self.page.login_error or ""
+
+
 class FakePage:
-    def __init__(self, screenshot_error: str | None = None):
+    def __init__(self, screenshot_error: str | None = None, *,
+                 login_rejected: bool = False, login_error: str | None = None,
+                 login_url: str | None = None):
         self.calls: list[tuple] = []
         self.screenshot_error = screenshot_error
+        self.login_rejected = login_rejected
+        self.login_error = login_error
+        self.login_url = login_url
+        self.url = ""
 
     def goto(self, url, **kwargs):
+        self.url = url
         self.calls.append(("goto", url, kwargs))
 
     def fill(self, selector, value):
@@ -37,6 +64,12 @@ class FakePage:
 
     def click(self, selector):
         self.calls.append(("click", selector))
+        if "passwordfld" in selector and self.login_url:
+            self.url = self.login_url
+
+    def locator(self, selector):
+        self.calls.append(("locator", selector))
+        return FakeLocator(self, selector)
 
     def wait_for_load_state(self, state):
         self.calls.append(("wait", state))
@@ -214,6 +247,42 @@ def test_capture_por_defecto_hace_login_una_vez_y_cierra_perfil(
     perfil = Path(playwright.chromium.kwargs["user_data_dir"])
     assert perfil.parent == Path("/tmp")
     assert not perfil.exists()
+    assert playwright.chromium.context.closed is True
+    assert playwright.stopped is True
+
+
+@pytest.mark.parametrize(
+    ("login_url", "login_error", "expected_reason"),
+    [
+        (
+            None,
+            "Invalid login (Authentication failed).",
+            "login rechazado por pfSense: Invalid login (Authentication failed).",
+        ),
+        (
+            "https://192.0.2.1:443/login.php",
+            None,
+            "login rechazado por pfSense: la URL sigue en el formulario de acceso",
+        ),
+    ],
+)
+def test_capture_login_rechazado_no_captura_el_formulario_y_cierra_recursos(
+    fake_playwright, tmp_path, login_url, login_error, expected_reason,
+):
+    page = FakePage(login_rejected=True, login_error=login_error, login_url=login_url)
+    playwright, _ = fake_playwright(page)
+    capture = webui.WebUICapture("192.0.2.1", "admin", "clave-ficticia", str(tmp_path))
+
+    result = capture.capture()
+
+    assert result["ok"] is False
+    assert result["captures"] == []
+    assert result["reason"] == expected_reason
+    assert result["fallback"] == "consola"
+    assert not any(call[0] == "screenshot" for call in page.calls)
+    assert [call[1] for call in page.calls if call[0] == "goto"] == [
+        "https://192.0.2.1:443/",
+    ]
     assert playwright.chromium.context.closed is True
     assert playwright.stopped is True
 
