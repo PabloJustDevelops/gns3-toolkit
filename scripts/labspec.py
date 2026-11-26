@@ -21,7 +21,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "cli" / "gns3lab"
 VERSION = 1
-CLAVES_TOP = {"version", "project", "nodes", "links", "expect"}
+CLAVES_TOP = {"version", "project", "nodes", "links", "expect", "warn"}
 CLAVES_NODO = {"name", "template", "adapter_type", "ip"}
 CLAVES_ENLACE = {"a", "b", "pa", "pb"}
 NOMBRE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -148,6 +148,11 @@ def validar(data: dict) -> list[str]:
             if not isinstance(comando, str) or not comando.strip():
                 errores.append(f"{base}[{i}]: comando no vacío obligatorio")
 
+    warn = data.get("warn", [])
+    if not isinstance(warn, list) or any(
+            not isinstance(mensaje, str) or not mensaje.strip() for mensaje in warn):
+        errores.append("warn: debe ser una lista de mensajes no vacíos")
+
     return errores
 
 
@@ -164,8 +169,114 @@ def normalizar(data: dict) -> dict:
     enlaces = [{"a": e["a"], "b": e["b"], "pa": e.get("pa", 0), "pb": e.get("pb", 0)}
                for e in data.get("links", [])]
     expect = {k: list(v) for k, v in (data.get("expect") or {}).items()}
-    return {"version": VERSION, "project": data["project"],
-            "nodes": nodos, "links": enlaces, "expect": expect}
+    salida = {"version": VERSION, "project": data["project"],
+              "nodes": nodos, "links": enlaces, "expect": expect}
+    if "warn" in data:
+        salida["warn"] = list(data["warn"])
+    return salida
+
+
+def export(topology: dict, project: str | None = None) -> dict:
+    """Convierte una topología leída en un spec v1 sin inventar configuración."""
+    if not isinstance(topology, dict):
+        raise SpecError("topología: la raíz debe ser un mapa JSON")
+
+    nombre_proyecto = project if project is not None else topology.get("project")
+    if isinstance(nombre_proyecto, dict):
+        nombre_proyecto = nombre_proyecto.get("name")
+    nodos_raw = topology.get("nodes", [])
+    if not isinstance(nodos_raw, list):
+        raise SpecError("topología.nodes: debe ser una lista")
+
+    nodos = []
+    for nodo in nodos_raw:
+        if not isinstance(nodo, dict):
+            raise SpecError("topología.nodes: cada nodo debe ser un mapa")
+        limpio = {"name": nodo.get("name"),
+                  "template": nodo.get("node_type") or nodo.get("template")}
+        properties = nodo.get("properties")
+        if isinstance(properties, dict) and properties.get("adapter_type") is not None:
+            limpio["adapter_type"] = properties["adapter_type"]
+        nodos.append(limpio)
+
+    candidato = {"version": VERSION, "project": nombre_proyecto,
+                 "nodes": nodos, "links": [], "expect": {}}
+    errores = validar(candidato)
+    if errores:
+        raise SpecError("topología no exportable: " + "; ".join(errores))
+
+    nombres = {nodo["name"] for nodo in nodos}
+    enlaces_raw = topology.get("links", [])
+    if not isinstance(enlaces_raw, list):
+        raise SpecError("topología.links: debe ser una lista")
+    enlaces = []
+    warn = []
+    for i, enlace in enumerate(enlaces_raw):
+        base = f"links[{i}]"
+        ends = enlace.get("ends") if isinstance(enlace, dict) else None
+        if not isinstance(ends, (list, tuple)) or len(ends) != 2:
+            warn.append(f"{base}: omitido (no tiene dos extremos)")
+            continue
+        extremos = []
+        for extremo in ends:
+            if not isinstance(extremo, dict):
+                extremos = []
+                break
+            nombre = extremo.get("node")
+            adapter = extremo.get("adapter", 0)
+            if isinstance(adapter, str) and adapter.isdigit():
+                adapter = int(adapter)
+            if (not isinstance(nombre, str) or nombre not in nombres
+                    or not _es_entero(adapter) or adapter < 0):
+                extremos = []
+                break
+            extremos.append((nombre, adapter))
+        if len(extremos) != 2:
+            warn.append(f"{base}: omitido (extremo o adapter inválido)")
+            continue
+        if extremos[0][0] == extremos[1][0]:
+            warn.append(f"{base}: omitido (un nodo no puede enlazarse consigo mismo)")
+            continue
+        enlaces.append({"a": extremos[0][0], "b": extremos[1][0],
+                        "pa": extremos[0][1], "pb": extremos[1][1]})
+
+    candidato["links"] = enlaces
+    salida = normalizar(candidato)
+    if warn:
+        salida["warn"] = warn
+    return salida
+
+
+def _clave_enlace(enlace: dict) -> tuple:
+    """Identidad independiente del orden de los dos extremos."""
+    a = (enlace["a"], enlace.get("pa", 0))
+    b = (enlace["b"], enlace.get("pb", 0))
+    if b < a:
+        a, b = b, a
+    return (a[0], a[1], b[0], b[1])
+
+
+def diff(deseado: dict, actual: dict) -> dict:
+    """Compara por nombre y por extremos normalizados; nunca propone borrados."""
+    nodos_deseados = {nodo["name"]: nodo for nodo in deseado.get("nodes", [])}
+    nodos_actuales = {nodo["name"] for nodo in actual.get("nodes", [])}
+    crear_nodos = [
+        {clave: nodos_deseados[nombre][clave]
+         for clave in ("name", "template", "adapter_type") if clave in nodos_deseados[nombre]}
+        for nombre in sorted(nodos_deseados.keys() - nodos_actuales)
+    ]
+
+    enlaces_deseados = {_clave_enlace(e): e for e in deseado.get("links", [])}
+    enlaces_actuales = {_clave_enlace(e): e for e in actual.get("links", [])}
+    crear_enlaces = [enlaces_deseados[clave]
+                     for clave in sorted(enlaces_deseados.keys() - enlaces_actuales.keys())]
+    sobrantes_enlaces = [enlaces_actuales[clave]
+                         for clave in sorted(enlaces_actuales.keys() - enlaces_deseados.keys())]
+    sobrantes_nodos = sorted(nodos_actuales - nodos_deseados.keys())
+    sin_cambios = not (crear_nodos or crear_enlaces or sobrantes_nodos or sobrantes_enlaces)
+    return {"crear_nodos": crear_nodos, "crear_enlaces": crear_enlaces,
+            "sobrantes_nodos": sobrantes_nodos, "sobrantes_enlaces": sobrantes_enlaces,
+            "sin_cambios": sin_cambios}
 
 
 def ordenes(spec: dict) -> list[list[str]]:
@@ -179,6 +290,27 @@ def ordenes(spec: dict) -> list[list[str]]:
             cmds.append(["node", "props", nodo["name"], "--set",
                          f"adapter_type={nodo['adapter_type']}", "-p", proyecto])
     for enlace in spec["links"]:
+        cmds.append(["link", "add", enlace["a"], enlace["b"],
+                     "--pa", str(enlace["pa"]), "--pb", str(enlace["pb"]),
+                     "-p", proyecto])
+    cmds.append(["up", proyecto])
+    return cmds
+
+
+def plan(deseado: dict, actual: dict, server: str | None = None) -> list[list[str]]:
+    """Órdenes para crear sólo lo que falta; `server` lo añade el ejecutor."""
+    cambios = diff(deseado, actual)
+    if not cambios["crear_nodos"] and not cambios["crear_enlaces"]:
+        return []
+    proyecto = deseado["project"]
+    cmds = [] if actual.get("project") else [["new", proyecto]]
+    for nodo in cambios["crear_nodos"]:
+        cmds.append(["node", "add", "--template", nodo["template"],
+                     "--name", nodo["name"], "-p", proyecto])
+        if nodo.get("adapter_type"):
+            cmds.append(["node", "props", nodo["name"], "--set",
+                         f"adapter_type={nodo['adapter_type']}", "-p", proyecto])
+    for enlace in cambios["crear_enlaces"]:
         cmds.append(["link", "add", enlace["a"], enlace["b"],
                      "--pa", str(enlace["pa"]), "--pb", str(enlace["pb"]),
                      "-p", proyecto])
@@ -210,8 +342,8 @@ def capturar(argv: list[str], server: str | None = None) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
-def aplicar(spec: dict, server: str | None, yes: bool) -> int:
-    cmds = ordenes(spec)
+def aplicar_deseado(deseado: dict, actual: dict, server: str | None, yes: bool) -> int:
+    cmds = plan(deseado, actual, server)
     if not yes:
         for argv in cmds:
             print(_mostrar(argv, server))
@@ -224,8 +356,13 @@ def aplicar(spec: dict, server: str | None, yes: bool) -> int:
         if rc != 0:
             print(f"falló con exit {rc}; no sigo. No se borra nada.", file=sys.stderr)
             return rc
-    print(f"{spec['project']}: aplicado ({len(cmds)} órdenes)")
+    print(f"{deseado['project']}: aplicado ({len(cmds)} órdenes)")
     return 0
+
+
+def aplicar(spec: dict, server: str | None, yes: bool) -> int:
+    """Compatibilidad: crea el proyecto como en la v1 original."""
+    return aplicar_deseado(spec, {}, server, yes)
 
 
 def _nodos_de_status(salida: str, proyecto: str) -> dict[str, tuple[str, str]] | None:
@@ -358,10 +495,33 @@ def verificar(spec: dict, server: str | None) -> int:
     return 0 if not fallos else 1
 
 
+def _leer_topologia(ruta: str | None = None, stdin: bool = False) -> dict:
+    origen = "<stdin>" if stdin else str(ruta)
+    try:
+        texto = sys.stdin.read() if stdin else Path(ruta).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SpecError(f"{origen}: no se puede leer ({exc})") from exc
+    try:
+        data = json.loads(texto)
+    except json.JSONDecodeError as exc:
+        raise SpecError(f"{origen}: JSON inválido: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SpecError(f"{origen}: la raíz debe ser un mapa JSON")
+    return data
+
+
+def _actual_desde_topologia(topology: dict) -> dict:
+    """Exportación tolerante con un proyecto real vacío para poder hacer diff."""
+    if topology.get("nodes") == []:
+        return {"project": topology.get("project"), "nodes": [], "links": []}
+    return export(topology)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="laboratorio declarativo sobre gns3lab (sin borrar nada)")
     ap.add_argument("--server", "-s", help="servidor gns3lab (se pasa a la CLI)")
+    ap.add_argument("--json", action="store_true", help="salida JSON para diff")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for nombre, ayuda in (("validate", "valida el YAML y reporta errores"),
                           ("plan", "imprime las órdenes gns3lab sin ejecutarlas"),
@@ -371,7 +531,48 @@ def main(argv=None) -> int:
     p = sub.add_parser("apply", help="crea el laboratorio con la CLI existente")
     p.add_argument("--yes", action="store_true", help="obligatorio: confirma la escritura")
     p.add_argument("spec", help="fichero YAML del laboratorio")
+
+    p = sub.add_parser("export", help="exporta una topología JSON a spec v1")
+    origen = p.add_mutually_exclusive_group(required=True)
+    origen.add_argument("--topology", help="fichero JSON con la topología ya obtenida")
+    origen.add_argument("--stdin", action="store_true", help="lee la topología JSON de stdin")
+    p.add_argument("--project", help="nombre de proyecto que sobrescribe al de la topología")
+
+    p = sub.add_parser("diff", help="compara el spec deseado con una topología JSON")
+    p.add_argument("--spec", required=True, help="fichero YAML del laboratorio deseado")
+    p.add_argument("--topology", required=True, help="fichero JSON con la topología actual")
+    p.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                   help="salida JSON (también es el formato por defecto)")
     args = ap.parse_args(argv)
+
+    if args.cmd == "export":
+        try:
+            salida = export(_leer_topologia(args.topology, args.stdin), args.project)
+        except SpecError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        print(json.dumps(salida, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.cmd == "diff":
+        try:
+            data = leer(args.spec)
+        except SpecError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        errores = validar(data)
+        if errores:
+            for error in errores:
+                print(f"{args.spec}: {error}")
+            print(f"INVÁLIDO: {len(errores)} error(es)")
+            return 1
+        try:
+            salida = diff(normalizar(data), _actual_desde_topologia(_leer_topologia(args.topology)))
+        except SpecError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        print(json.dumps(salida, ensure_ascii=False, indent=2))
+        return 0
 
     try:
         data = leer(args.spec)
