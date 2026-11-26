@@ -1,7 +1,7 @@
 ---
 name: gns3-lab-automation
 description: "Use when driving GNS3 2.2 labs from Hermes or extending the toolkit."
-version: 2.0.0
+version: 2.1.0
 author: Hermes (Pablo)
 license: MIT
 metadata:
@@ -30,7 +30,7 @@ cd ~/Proyectos/gns3-toolkit && ./scripts/install.sh && gns3lab doctor
 ```
 
 `scripts/install.sh` es idempotente: crea el venv con Python 3.12 (`uv`), instala
-`fastmcp httpx pillow pytest`, enlaza `~/.local/bin/gns3lab`, compila los tres ficheros y
+`fastmcp httpx pillow pytest pytest-cov pyyaml`, enlaza `~/.local/bin/gns3lab`, compila los tres ficheros y
 lista las tools del MCP. `tesseract` y `qemu-img` son opcionales; `doctor` dice si faltan.
 El venv no se commitea. Para registrar el MCP en Hermes:
 
@@ -99,6 +99,10 @@ gns3lab type PF1 "2" --enter -p examen-kit   # opción de menú
 gns3lab key PF1 down down ret --show -p examen-kit
 gns3lab mon PF1 info status -p examen-kit    # HMP crudo
 gns3lab test examen-kit                      # PC↔PC, PC→gateway, PC→8.8.8.8
+gns3lab verify qemu examen-kit --node PF1    # checks de solo lectura del nodo
+gns3lab doctor --check-updates --json        # ¿hay versión nueva?
+python3 scripts/labspec.py validate examples/lab-ejemplo.yaml
+python3 scripts/labspec.py plan examples/lab-ejemplo.yaml
 
 gns3lab node props PF1 --set adapter_type=e1000 --set ram=2048 -p examen-kit
 gns3lab link add PC1 SW1 --pa 0 --pb 0 --ppb 1 -p examen-kit
@@ -110,6 +114,24 @@ La consola telnet lee por prompt o quietud y responde sólo a `--More--`, `[y/n]
 En nodos QEMU, `shot` usa el monitor HMP: el puerto se localiza leyendo `/proc/*/cmdline`
 (`gns3core.find_monitor_port`), nunca se adivina. Para verificar de verdad, `ping -c 2 <ip>`
 y `0% packet loss`; con VPCS, la IP se pone por consola (`ip dhcp`) y se confirma con `show ip`.
+
+## Verificación por componente y laboratorio declarativo
+
+`gns3lab verify <qemu|pf|vpcs> <proyecto>` y el tool `gns3_verify` comprueban estado real sin
+abrir proyectos ni arrancar nodos: `/proc` + HMP en QEMU, `config.xml` y entorno en pfSense,
+`show ip` en VPCS. Devuelve `{component, project, ok, checks, problems}`; con `--json` es
+parseable. No valida tráfico real ni sustituye a `doctor`. Detalle:
+[docs/VERIFICACION.md](https://github.com/PabloJustDevelops/gns3-toolkit/blob/master/docs/VERIFICACION.md).
+
+`scripts/labspec.py` describe el laboratorio en YAML (`version`, `project`, `nodes`, `links`,
+`expect`) y ofrece `validate`, `plan`, `apply --yes` y `verify`. `plan` no escribe; `apply`
+usa sólo comandos existentes de la CLI. No borra proyectos ni nodos. Detalle:
+[docs/LAB-SPEC.md](https://github.com/PabloJustDevelops/gns3-toolkit/blob/master/docs/LAB-SPEC.md).
+
+`gns3lab --version` imprime la versión local. `gns3lab doctor --check-updates [--json]` consulta
+GitHub con caché de 24 h (`GNS3LAB_NO_UPDATE_CHECK=1` la desactiva), nunca auto-actualiza. Si
+no hay release ni tag, reporta `update_available: false` sin error. Detalle:
+[docs/UPDATES.md](https://github.com/PabloJustDevelops/gns3-toolkit/blob/master/docs/UPDATES.md).
 
 ## Trampas ya pagadas (no repetirlas)
 

@@ -29,7 +29,7 @@ vía y no dupliques la misma llamada por dos sitios.
 
 | Situación | Vía | Motivo |
 |---|---|---|
-| Shell, script, una orden puntual, salida completa | `cli/gns3lab` | 46 comandos, `--json`, sin esquemas MCP |
+| Shell, script, una orden puntual, salida completa | `cli/gns3lab` | 47 comandos, `--json`, sin esquemas MCP |
 | Agente con el MCP `gns3` conectado | tools `gns3_*` | llamadas tipadas y `gns3_batch` para lecturas |
 | Tests o incrustar en Python | `gns3core.py` | núcleo stdlib; devuelve datos, no imprime |
 | Varias lecturas independientes | `gns3_batch` | una llamada, resultados indexados y paralelismo |
