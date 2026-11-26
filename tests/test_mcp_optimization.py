@@ -27,7 +27,7 @@ TOOLS_CONTRATO = {
     "gns3_events", "gns3_notifications", "gns3_iou_license", "gns3_server",
     "gns3_emulator", "gns3_batch", "gns3_informe", "gns3_link_get", "gns3_drawing_get",
     "gns3_verify", "gns3_project_file_list", "gns3_compute_endpoint",
-    "gns3_compute_download",
+    "gns3_compute_download", "gns3_lab",
 }
 
 # Pares que un LLM confunde al elegir: cada descripción debe remitir a la otra.
@@ -69,7 +69,8 @@ def test_el_contrato_publico_sigue_intacto(tools):
     plantillas = asyncio.run(server.mcp.list_resource_templates())
     prompts = asyncio.run(server.mcp.list_prompts())
     assert {str(r.uri) for r in recursos} == {
-        "gns3://status", "gns3://projects", "gns3://templates"}
+        "gns3://status", "gns3://projects", "gns3://templates",
+        "gns3://lab/desired", "gns3://lab/actual", "gns3://lab/diff"}
     assert {t.uri_template for t in plantillas} == {"gns3://project/{project}/topology"}
     assert {p.name for p in prompts} == {"gns3-diagnostico", "gns3-examen"}
 

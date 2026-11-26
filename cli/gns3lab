@@ -4340,7 +4340,13 @@ def _lab_topologia_servidor(args, conf, project: str | None = None,
             nodo["properties"] = {"adapter_type": props["adapter_type"]}
         salida_nodos.append(nodo)
     salida_enlaces = []
-    for enlace in c.links(pid):
+    if hasattr(c, "get"):
+        estado_enlaces, cuerpo_enlaces = c.get(f"/v2/projects/{pid}/links")
+        if estado_enlaces != 200 or not isinstance(cuerpo_enlaces, list):
+            raise RuntimeError(f"no se pudieron leer los enlaces de {needle}: HTTP {estado_enlaces}")
+    else:
+        cuerpo_enlaces = c.links(pid)
+    for enlace in cuerpo_enlaces:
         extremos = enlace.get("nodes") or []
         if len(extremos) != 2:
             continue  # `labspec.export` omite los enlaces incompletos y los reporta
@@ -4400,6 +4406,13 @@ def cmd_lab(args, conf) -> int:
             deseado = _lab_spec(L, args.spec)
             if getattr(args, "topology", None):
                 actual = _lab_actual(L, args.topology)
+                esperado = str(deseado["project"])
+                recibido = str(actual.get("project") or esperado)
+                if recibido.casefold() != esperado.casefold():
+                    print(f"--topology describe '{recibido}', no '{esperado}'",
+                          file=sys.stderr)
+                    return _lab_out(args, accion, False, {
+                        "error": f"topología de otro proyecto: {recibido} != {esperado}"}, rc=2)
             else:
                 topologia = _lab_topologia_servidor(
                     args, conf, project=deseado["project"], missing_ok=True)

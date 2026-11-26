@@ -3,7 +3,7 @@
 ## Qué es
 
 `gns3-toolkit` empaqueta la operación de un servidor GNS3 2.2 sin GUI: una librería
-(`gns3core`), un servidor MCP de 48 tools y una CLI de 47 comandos. El objetivo inmediato
+(`gns3core`), un servidor MCP de 49 tools y una CLI de 48 comandos. El objetivo inmediato
 es el examen del 1 de diciembre de 2026: montar un escenario (pfSense + VLANs + NAT +
 clientes) desde la terminal, con el VNC sólo como último recurso.
 
@@ -13,14 +13,14 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
   `nio_ports` (NIO y captura por puerto, acciones masivas, `resume`/`pause`, qemu img, VMs
   invitadas, `/v1/version` y el WebSocket de notificaciones). Inventario real de 78 rutas en
   `orchestration/inventario-rutas-gns3.txt`. Cuarta tanda (NIO en CLI/MCP/tests/docs) cerrada.
-- CLI: **47 comandos**; MCP: **48 tools** (`mcp.list_tools()` → 48).
+- CLI: **48 comandos**; MCP: **49 tools** (`mcp.list_tools()` → 49).
 - `gns3lab verify qemu|pf|vpcs` y `gns3_verify`: verificación solo lectura por componente, con
   checks y problemas accionables (`docs/VERIFICACION.md`).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 737 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
+- **Tests: 760 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
-- MCP: 48 tools, **3 resources + 1 resource template** (`gns3://project/{project}/topology`) y
+- MCP: 49 tools, **6 resources + 1 resource template** (`gns3://project/{project}/topology`) y
   **2 prompts** (`gns3-diagnostico`, `gns3-examen`).
 - Skill `gns3-lab-automation` reescrita como envoltorio del repo público, con backup en
   `/tmp/gns3-skill-backup-20261125-1909.tar.gz`.
@@ -127,6 +127,21 @@ Cuatro worktrees desde `fbac815`, agentes `gk4-*` con `hy4-flash-free` (CLI, doc
 Gates en `master`: 456 passed con `--cov-fail-under=100`, 39 tools conectadas, 42 comandos y
 `doctor` sin hallazgos. El mismo día se importó el kit al servidor del aula (`192.168.71.251`)
 como proyecto nuevo, sin modificar `Pablo Rodriguez Garijo` (`db277172…5cf`).
+
+### Octava tanda: laboratorio declarativo y revisión independiente (2026-11-25/26)
+
+Seis worktrees desde `a08c117`, agentes `dcl-*` con `hungerg-free` (núcleo, MCP, tests) y
+`hy4-flash-free` (CLI, docs). Cinco carriles entregaron export/diff, `gns3lab lab`, la tool
+`gns3_lab` y los resources `gns3://lab/desired|actual|diff`; `apply` sin `yes` no escribe y
+`sobrantes` solo se informan. Codex `sol 6.2 medium` revisó el diff y halló cinco fallos
+reales (servidor ajeno en MCP, credenciales en `detail` anidado, `up` sobre nodos fuera de
+spec, `lab apply` no idempotente, puerto de enlace perdido): carril `dclfix` los corrigió.
+Una segunda pasada del mismo revisor encontró tres regresiones, corregidas y verificadas en
+`master`: rechazo de topología de otro proyecto, HTTP 500 al leer enlaces ya no se interpreta
+como lista vacía y `verify` compara `porta/portb`.
+
+Verificado en `master`: 760 passed, 100 % de `gns3core.py` y `pfsense.py` (1431 sentencias),
+49 tools, 48 comandos, 6 resources, `verify.py` y `check-links.py` limpios.
 
 ### Séptima tanda: pfSense nativo y MCP más rápido (2026-11-25)
 

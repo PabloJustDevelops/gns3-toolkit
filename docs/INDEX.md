@@ -9,7 +9,7 @@ escribieron.
 | Documento | Para qué sirve | Fuente de verdad | Cómo se verifica |
 |---|---|---|---|
 | [ARQUITECTURA.md](ARQUITECTURA.md) | piezas, clases de `gns3core`, flujo de una orden y por qué consola/HMP | `gns3core.py`, `gns3_mcp_server.py`, `cli/gns3lab` | `python3 scripts/verify.py`; `pytest -q` |
-| [COMANDOS.md](COMANDOS.md) | referencia de los 47 subcomandos con flags y ejemplos | `cli/gns3lab` (parser y handlers) | `./cli/gns3lab <cmd> --help`; recuento con `sed -n '2p'` |
+| [COMANDOS.md](COMANDOS.md) | referencia de los 48 subcomandos con flags y ejemplos | `cli/gns3lab` (parser y handlers) | `./cli/gns3lab <cmd> --help`; recuento con `sed -n '2p'` |
 | [PARIDAD.md](PARIDAD.md) | qué operación está en CLI, en MCP o en ambos | dict `handlers` y funciones `@mcp.tool` | `scripts/verify.py`; `mcp.list_tools()` |
 | [API-COVERAGE.md](API-COVERAGE.md) | endpoint a método, verbo CLI, tool MCP y test | `API_V2_MAP` y `Client` en `gns3core.py` | `scripts/verify.py`; `pytest --collect-only -q` |
 | [GUI-PORTADA.md](GUI-PORTADA.md) | operaciones de la GUI con su comando, tool y endpoint | métodos de `Client` y handlers | bloque `Cómo se ha verificado` del propio documento |
@@ -34,12 +34,12 @@ no tiene `lab` y el MCP no publica las resources de laboratorio. Estado del cont
 
 | Pieza | Estado | Carril | Documentación |
 |---|---|---|---|
-| `scripts/labspec.py export` y `diff` | previsto | `dclcore` | [LAB-SPEC.md](LAB-SPEC.md) |
-| `gns3lab lab` (validar, planificar, exportar, comparar, aplicar, verificar) | previsto | `dclcli` | [COMANDOS.md](COMANDOS.md) |
-| tool `gns3_lab` | prevista | `dclmcp` | [COMANDOS.md](COMANDOS.md) |
-| `gns3://lab/desired` (usa `GNS3_LAB_SPEC`) | prevista | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
-| `gns3://lab/actual` | prevista | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
-| `gns3://lab/diff` | prevista | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
+| `scripts/labspec.py export` y `diff` | hecho   | `dclcore` | [LAB-SPEC.md](LAB-SPEC.md) |
+| `gns3lab lab` (validar, planificar, exportar, comparar, aplicar, verificar) | hecho   | `dclcli` | [COMANDOS.md](COMANDOS.md) |
+| tool `gns3_lab` | hecho   | `dclmcp` | [COMANDOS.md](COMANDOS.md) |
+| `gns3://lab/desired` (usa `GNS3_LAB_SPEC`) | hecho   | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
+| `gns3://lab/actual` | hecho   | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
+| `gns3://lab/diff` | hecho   | `dclmcp` | [LAB-DECLARATIVO.md](LAB-DECLARATIVO.md) |
 
 Regla común: `sobrantes` se informan, nunca se borran; `apply` sin `--yes` sale con 2;
 `ip` es expectativa de `verify`, no una escritura de `apply`. La referencia corta para la skill

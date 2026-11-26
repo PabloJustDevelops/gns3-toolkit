@@ -1,6 +1,6 @@
 # Comandos de `gns3lab`
 
-Referencia de los 47 subcomandos que registra `cli/gns3lab`. Las líneas `usage` están copiadas
+Referencia de los 48 subcomandos que registra `cli/gns3lab`. Las líneas `usage` están copiadas
 de `gns3lab <cmd> --help`; los ejemplos suponen el servidor local y el proyecto `examen-kit`.
 
 Índice: [Convenciones](#convenciones) · [Servidor](#servidor-y-diagnóstico) ·

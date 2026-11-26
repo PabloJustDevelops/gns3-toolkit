@@ -502,18 +502,14 @@ def verificar(spec: dict, server: str | None) -> int:
         print(f"enlaces: FALLO (no se pudo listar, exit {rc})")
         fallos += 1
     for enlace in spec["links"]:
-        pedido = tuple(sorted(((enlace["a"], str(enlace["pa"]), "0"),
-                               (enlace["b"], str(enlace["pb"]), "0"))))
-        # El puerto puede ser distinto del 0 por defecto del switch: se compara
-        # por nodo y adapter, que es lo que declara el YAML.
-        pedido_sin_puerto = tuple(sorted((n, a) for n, a, _ in pedido))
-        cortos = {tuple(sorted((n, a) for n, a, _ in par)) for par in existentes}
-        if pedido_sin_puerto in cortos:
+        pedido = tuple(sorted(((enlace["a"], str(enlace["pa"]), str(enlace.get("porta", 0))),
+                               (enlace["b"], str(enlace["pb"]), str(enlace.get("portb", 0))))))
+        if pedido in existentes:
             print(f"enlace {enlace['a']}:{enlace['pa']} <-> "
                   f"{enlace['b']}:{enlace['pb']}: OK")
         else:
             print(f"enlace {enlace['a']}:{enlace['pa']} <-> "
-                  f"{enlace['b']}:{enlace['pb']}: FALLO (no existe)")
+                  f"{enlace['b']}:{enlace['pb']}: FALLO (no existe o puertos distintos)")
             fallos += 1
 
     print(f"RESULTADO: {'OK' if not fallos else 'FALLO'} "
