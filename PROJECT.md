@@ -17,7 +17,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 - `gns3lab verify qemu|pf|vpcs` y `gns3_verify`: verificación solo lectura por componente, con
   checks y problemas accionables (`docs/VERIFICACION.md`).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 764 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
+- **Tests: 770 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
 - MCP: 49 tools, **6 resources + 1 resource template** (`gns3://project/{project}/topology`) y
@@ -140,7 +140,7 @@ Una segunda pasada del mismo revisor encontró tres regresiones, corregidas y ve
 `master`: rechazo de topología de otro proyecto, HTTP 500 al leer enlaces ya no se interpreta
 como lista vacía y `verify` compara `porta/portb`.
 
-Verificado en `master`: 764 passed, 100 % de `gns3core.py` y `pfsense.py` (1431 sentencias),
+Verificado en `master`: 770 passed, 100 % de `gns3core.py` y `pfsense.py` (1431 sentencias),
 49 tools, 48 comandos, 6 resources, `verify.py` y `check-links.py` limpios.
 
 ### Séptima tanda: pfSense nativo y MCP más rápido (2026-11-25)
