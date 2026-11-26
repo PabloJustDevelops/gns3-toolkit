@@ -27,7 +27,7 @@ escribieron.
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | síntoma literal, causa y arreglo | mensajes del código y de la API | `grep` del mensaje en el código; `gns3lab doctor` |
 | [HARNESSES.md](HARNESSES.md) | lanzar el repo desde Command Code, OpenCode, Hermes, freebuff o Codex: comandos, MCP y límites | `scripts/harness_detect.py` y `harnesses/*/AGENTS.md` | `pytest -q tests/test_harness_detect.py`; `scripts/harness_detect.py --json` |
 
-## Laboratorio declarativo: piezas previstas
+## Laboratorio declarativo: piezas implementadas
 
 En este árbol `scripts/labspec.py` sólo registra `validate`, `plan`, `verify` y `apply`; la CLI
 no tiene `lab` y el MCP no publica las resources de laboratorio. Estado del contrato:

@@ -19,11 +19,11 @@ validate → export → diff → apply --yes → verify
 Comprobado contra el código de este worktree:
 
 - `python3 scripts/labspec.py --help` lista `validate`, `plan`, `verify`, `apply`.
-- `export` y `diff` están **previstos en el carril `dclcore`** (`scripts/labspec.py`).
-- `gns3lab lab` con sus seis acciones está **previsto en el carril `dclcli`** (`cli/gns3lab`):
+- `export` y `diff` están **implementados** en `scripts/labspec.py`.
+- `gns3lab lab` con sus seis acciones está **implementado** en `cli/gns3lab`:
   hoy la CLI no registra ese subcomando, aunque sí tiene `export` para proyectos `.gns3p`.
 - La tool `gns3_lab` y las resources `gns3://lab/desired`, `gns3://lab/actual` y
-  `gns3://lab/diff` están **previstas en el carril `dclmcp`** (`gns3_mcp_server.py`).
+  `gns3://lab/diff` están **implementados** en `gns3_mcp_server.py`.
 
 Las órdenes y respuestas que aparecen más abajo siguen el contrato acordado entre carriles.
 Los bloques de salida están marcados como **ejemplo ilustrativo**: no son mediciones tomadas en
@@ -35,8 +35,8 @@ esta rama.
 |---|---|---|---|
 | validar | `validate` | `gns3lab lab validate --spec …` | no |
 | planificar | `plan` | `gns3lab lab plan --spec …` | no |
-| exportar | `export` (previsto) | `gns3lab lab export --project … --out …` | solo lectura; escribe `--out` en local |
-| comparar | `diff` (previsto) | `gns3lab lab diff --spec … --topology …` | no, si se pasa `--topology` |
+| exportar | `export` (implementado) | `gns3lab lab export --project … --out …` | solo lectura; escribe `--out` en local |
+| comparar | `diff` (implementado) | `gns3lab lab diff --spec … --topology …` | no, si se pasa `--topology` |
 | aplicar | `apply --yes` | `gns3lab lab apply --spec … [--topology topo.json] --yes` | sí |
 | verificar | `verify` | `gns3lab lab verify --spec …` | solo lectura |
 
@@ -67,8 +67,8 @@ siguen escribiéndose a mano. Un enlace sin dos extremos se omite y se reporta e
 `porta`/`portb` son opcionales y recogen `port_number` cuando no es 0; si faltan significan 0.
 
 ```bash
-gns3lab lab export --project lab-ejemplo --out lab.yaml       # previsto en dclcli
-python3 scripts/labspec.py export --topology topo.json        # previsto en dclcore
+gns3lab lab export --project lab-ejemplo --out lab.yaml       # implementado
+python3 scripts/labspec.py export --topology topo.json        # implementado
 ```
 
 La versión de la CLI obtiene nodos y enlaces con `gns3core.Client` y escribe YAML con
@@ -127,7 +127,7 @@ Cuando `porta`/`portb` están declarados, `link add` recibe `--ppa/--ppb`.
 
 ```bash
 python3 scripts/labspec.py apply --yes examples/lab-ejemplo.yaml
-gns3lab lab apply --spec examples/lab-ejemplo.yaml --yes     # previsto en dclcli
+gns3lab lab apply --spec examples/lab-ejemplo.yaml --yes     # implementado
 ```
 
 El `apply` directo crea el proyecto (`new`), añade nodos (`node add`), aplica `adapter_type`
@@ -151,14 +151,14 @@ gns3lab new lab-ejemplo
 …
 ```
 
-Código de salida: 2. En la tool `gns3_lab` (prevista en `dclmcp`), `apply` sin `yes=True`
+Código de salida: 2. En la tool `gns3_lab` (implementada), `apply` sin `yes=True`
 devuelve `{"ok": false, "error": "…", "plan": [...]}` y no toca nada.
 
 ### 6. `verify`
 
 ```bash
 python3 scripts/labspec.py verify examples/lab-ejemplo.yaml
-gns3lab lab verify --spec examples/lab-ejemplo.yaml          # previsto en dclcli
+gns3lab lab verify --spec examples/lab-ejemplo.yaml          # implementado
 ```
 
 Salida de ejemplo (ilustrativa, no medida):
@@ -179,7 +179,7 @@ dirección dentro del nodo; `verify` la comprueba con `show ip` en VPCS. Para as
 verdad, usa la vía nativa de [PFSENSE-NATIVO.md](PFSENSE-NATIVO.md) o los comandos de consola
 de [COMANDOS.md](COMANDOS.md).
 
-## Desde el MCP (previsto en `dclmcp`)
+## Desde el MCP
 
 | Recurso / tool | Qué da |
 |---|---|

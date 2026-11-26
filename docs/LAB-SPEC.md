@@ -57,34 +57,34 @@ python scripts/labspec.py verify examples/lab-ejemplo.yaml
 
 `--server/-s` se pasa tal cual a `gns3lab` y aparece también en el plan.
 
-### `export` y `diff` (previstos en el carril `dclcore`)
+### `export` y `diff` (implementados)
 
 En este árbol `scripts/labspec.py` no los registra todavía (`--help` lista `validate`, `plan`,
-`verify`, `apply`). El contrato previsto añade dos subcomandos al fichero, `export` y `diff`, sin
+`verify`, `apply`). El contrato implementado añade dos subcomandos al fichero, `export` y `diff`, sin
 ampliar opcionalmente el esquema v1:
 
 - `export(topology, project=None) -> dict`: convierte una topología real en un spec v1
   normalizado y válido. `template` se toma de `node_type` o `template`, `adapter_type` de
   `properties`; los enlaces pasan a `{a, b, pa, pb}` y añaden `porta`/`portb` sólo cuando
   `port_number` no es 0. Nunca inventa `ip` ni `expect`. Un enlace sin dos extremos se omite y
-  se reporta en `warn`, sin lanzar excepción. En la CLI se prevé
-  `python3 scripts/labspec.py export --topology topo.json` (o `--stdin`).
+  se reporta en `warn`, sin lanzar excepción. Disponible como `python3 scripts/labspec.py export --topology topo.json` (o `--stdin`) y
+  como `gns3lab lab export --topology topo.json`.
 - `diff(deseado, actual) -> dict`: devuelve `crear_nodos`, `crear_enlaces`, `sobrantes_nodos`,
   `sobrantes_enlaces` y `sin_cambios`. Compara por nombre de nodo y por
   `(a, pa, porta, b, pb, portb)` normalizado, con los puertos ausentes valiendo 0.
-  `diff(e, e)` da `sin_cambios: true` y plan vacío. En la CLI se prevé
-  `python3 scripts/labspec.py diff --spec … --topology topo.json`, con `--json` opcional.
+  `diff(e, e)` da `sin_cambios: true` y plan vacío. Disponible como `python3 scripts/labspec.py diff --spec … --topology topo.json` y
+  `gns3lab lab diff --spec … --topology topo.json`, con `--json` opcional.
 
 Los `sobrantes` **se informan, nunca se borran**: ni `diff` ni `apply` eliminan nodos ni
 enlaces del servidor. `plan(deseado, actual)` omite `new` y `up` si el proyecto existe y sólo
 crea lo que falta; `aplicar_deseado` sin `yes` imprime el plan y sale con 2.
 
-### Subcomando `gns3lab lab` (previsto en el carril `dclcli`)
+### Subcomando `gns3lab lab` (implementado)
 
 `cli/gns3lab` registra hoy `export` para proyectos `.gns3p`, pero no `lab`. El carril `dclcli`
 añadirá `gns3lab lab <acción> [--json]` con seis acciones, todas delegadas en `labspec`:
 
-| Acción | Ejemplo previsto |
+| Acción | Ejemplo |
 |---|---|
 | `validate` | `gns3lab lab validate --spec examples/lab-ejemplo.yaml` |
 | `plan` | `gns3lab lab plan --spec examples/lab-ejemplo.yaml` |
