@@ -76,6 +76,21 @@ def _sin_modulos(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "__file__", str(tmp_path / "gns3_mcp_server.py"))
 
 
+def _console_double(monkeypatch):
+    proyecto = {"project_id": "p1", "name": "lab"}
+    nodo = {"node_id": "n1", "name": "PF1", "node_type": "qemu", "status": "started",
+            "properties": {"hda_disk_image": "pf.qcow2"}}
+    cliente = SimpleNamespace(
+        resolve_project=lambda _project: proyecto,
+        find_node=lambda _pid, _node: nodo,
+    )
+    monitor = SimpleNamespace(closed=False)
+    monitor.close = lambda: setattr(monitor, "closed", True)
+    monkeypatch.setattr(server, "_client", lambda: cliente)
+    monkeypatch.setattr(server.core.QemuMonitor, "for_node", lambda **_kwargs: monitor)
+    return monitor
+
+
 def test_firma_publica_y_registro():
     assert list(inspect.signature(server.gns3_capturas).parameters) == [
         "action", "project", "spec", "node", "outdir", "phase",
@@ -146,6 +161,22 @@ def test_console_conecta_hmp_delega_y_cierra(captures_module, tmp_path, monkeypa
     assert monitor.closed is True
 
 
+def test_console_preserva_la_ruta_bajo_home_admin(captures_module, tmp_path, monkeypatch):
+    monkeypatch.setenv("PFSENSE_USER", "admin")
+    ruta = "/home/admin/capturas/01-topologia.png"
+    monkeypatch.setattr(
+        captures_module, "capture_phase",
+        lambda _monitor, _phase, _outdir, node=None: {"ok": True, "path": ruta, "node": node})
+    monitor = _console_double(monkeypatch)
+
+    result = server.gns3_capturas(
+        action="console", project="lab", node="PF1", phase="topologia", outdir=str(tmp_path))
+
+    assert result["path"] == ruta
+    assert result["node"] == "PF1"
+    assert monitor.closed is True
+
+
 def test_console_exige_nodo_fase_y_outdir(captures_module, tmp_path):
     result = server.gns3_capturas(action="console", project="lab", outdir=str(tmp_path))
 
@@ -161,6 +192,43 @@ def test_webui_delega_y_devuelve_su_resultado(captures_module, webui_module, tmp
     assert result["action"] == "webui"
     assert result["captures"] == [{"page": "interfaces"}]
     assert webui_module.calls == [("from_env", str(tmp_path), None), ("available",), ("capture",)]
+
+
+def test_webui_preserva_las_rutas_bajo_home_admin(webui_module, tmp_path, monkeypatch):
+    monkeypatch.setenv("PFSENSE_USER", "admin")
+    rutas = [
+        "/home/admin/capturas/01-interfaces.png",
+        "/home/admin/capturas/02-rules.png",
+    ]
+    webui_module.capture_result = {
+        "ok": True,
+        "captures": [{"page": "interfaces", "path": rutas[0]},
+                     {"page": "rules", "path": rutas[1]}],
+    }
+
+    result = server.gns3_capturas(action="webui", outdir=str(tmp_path))
+
+    assert [capture["path"] for capture in result["captures"]] == rutas
+
+
+def test_webui_preserva_ruta_y_redacta_solo_el_error(webui_module, tmp_path, monkeypatch):
+    secreto = "clave-falsa-capmcp-ruta-77b2"
+    monkeypatch.setenv("PFSENSE_USER", "admin")
+    monkeypatch.setenv("PFSENSE_PASSWORD", secreto)
+    ruta = "/home/admin/capturas/01-interfaces.png"
+    webui_module.capture_result = {
+        "ok": False,
+        "captures": [{"page": "interfaces", "path": ruta}],
+        "reason": f"captura fallida con {secreto}",
+    }
+
+    result = server.gns3_capturas(action="webui", outdir=str(tmp_path))
+    texto = json.dumps(result, ensure_ascii=False)
+
+    assert result["captures"][0]["path"] == ruta
+    assert result["fallback"] == "consola"
+    assert secreto not in texto
+    assert "[redactado]" in result["reason"]
 
 
 def test_webui_no_disponible_degrada_a_consola(webui_module, tmp_path):

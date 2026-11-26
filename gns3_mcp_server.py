@@ -956,6 +956,26 @@ def _capture_webui_fallback(reason: Any) -> dict:
             "reason": detail, "fallback": "consola"}
 
 
+_CAPTURE_ERROR_FIELDS = {"error", "reason", "detail", "message", "stderr"}
+_CAPTURE_SECRET_FIELDS = {"user", "username", "password", "passwd", "secret",
+                          "token", "authorization"}
+
+
+def _capture_redact_result(value: Any, field: Optional[str] = None) -> Any:
+    """Redacta errores y credenciales sin alterar rutas ni otros datos de captura."""
+    if field in _CAPTURE_SECRET_FIELDS:
+        return "[redactado]" if value not in (None, "") else value
+    if field in _CAPTURE_ERROR_FIELDS:
+        return _lab_redact_any(value)
+    if isinstance(value, dict):
+        return {key: _capture_redact_result(item, key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_capture_redact_result(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_capture_redact_result(item) for item in value)
+    return value
+
+
 @mcp.tool
 def gns3_capturas(action: str = "phases", project: Optional[str] = None,
                   spec: Optional[str | dict | list[dict]] = None,
@@ -1026,7 +1046,7 @@ def gns3_capturas(action: str = "phases", project: Optional[str] = None,
                 pass
         if not isinstance(result, dict):
             result = {"data": result}
-        return {**_lab_redact_any(result), "action": action}
+        return {**_capture_redact_result(result), "action": action}
 
     if action == "webui":
         if not outdir:
@@ -1051,7 +1071,7 @@ def gns3_capturas(action: str = "phases", project: Optional[str] = None,
             result = dict(result)
             if result.get("ok") is False:
                 result.setdefault("fallback", "consola")
-        return {**_lab_redact_any(result), "action": action}
+        return {**_capture_redact_result(result), "action": action}
 
     if not outdir:
         return _lab_error(action, "index exige outdir")
