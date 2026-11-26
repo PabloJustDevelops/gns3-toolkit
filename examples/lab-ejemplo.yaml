@@ -1,0 +1,23 @@
+version: 1
+project: lab-ejemplo
+nodes:
+  - name: pc1
+    template: VPCS
+  - name: pc2
+    template: VPCS
+  - name: sw1
+    template: Ethernet switch
+links:
+  - a: pc1
+    b: sw1
+    pa: 0
+    pb: 0
+  - a: pc2
+    b: sw1
+    pa: 0
+    pb: 1
+expect:
+  pc1:
+    - show ip
+  pc2:
+    - show ip
