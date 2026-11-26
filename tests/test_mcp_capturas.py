@@ -121,6 +121,16 @@ def test_phases_delega_en_la_spec_sin_escribir(captures_module, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_phases_no_redacta_nombres_que_contienen_el_usuario(captures_module, monkeypatch):
+    monkeypatch.setenv("PFSENSE_USER", "admin")
+    fases = [{"phase": "administracion", "after": "apply", "node": "admin"}]
+    monkeypatch.setattr(captures_module, "phases_from_spec", lambda _spec: fases)
+
+    result = server.gns3_capturas(action="phases", spec={})
+
+    assert result == {"ok": True, "action": "phases", "phases": fases}
+
+
 def test_phases_lee_gns3_lab_spec(captures_module, tmp_path, monkeypatch):
     ruta = tmp_path / "lab.yaml"
     ruta.write_text("captures:\n  - phase: topologia\n    after: apply\n", encoding="utf-8")
@@ -175,6 +185,29 @@ def test_console_preserva_la_ruta_bajo_home_admin(captures_module, tmp_path, mon
     assert result["path"] == ruta
     assert result["node"] == "PF1"
     assert monitor.closed is True
+
+
+def test_batch_conserva_la_ruta_de_una_captura_ok_con_warnings(captures_module, tmp_path, monkeypatch):
+    ruta = str(tmp_path / "01-topologia.png")
+    avisos = ["tesseract no disponible; OCR vacío"]
+    monkeypatch.setattr(
+        captures_module, "capture_phase",
+        lambda _monitor, _phase, _outdir, node=None: {
+            "ok": True, "path": ruta, "node": node, "error": None, "warnings": avisos})
+    _console_double(monkeypatch)
+
+    result = server.gns3_batch([{
+        "tool": "gns3_capturas",
+        "args": {"action": "console", "project": "lab", "node": "PF1",
+                 "phase": "topologia", "outdir": str(tmp_path)},
+    }])
+
+    assert result["ok"] is True
+    item = result["results"][0]
+    assert item["ok"] is True
+    assert item["result"]["path"] == ruta
+    assert item["result"]["warnings"] == avisos
+    assert item["result"]["error"] is None
 
 
 def test_console_exige_nodo_fase_y_outdir(captures_module, tmp_path):

@@ -956,7 +956,7 @@ def _capture_webui_fallback(reason: Any) -> dict:
             "reason": detail, "fallback": "consola"}
 
 
-_CAPTURE_ERROR_FIELDS = {"error", "reason", "detail", "message", "stderr"}
+_CAPTURE_ERROR_FIELDS = {"error", "reason", "detail", "message", "stderr", "warnings"}
 _CAPTURE_SECRET_FIELDS = {"user", "username", "password", "passwd", "secret",
                           "token", "authorization"}
 
@@ -1009,7 +1009,7 @@ def gns3_capturas(action: str = "phases", project: Optional[str] = None,
             phases = captures.phases_from_spec(data)
         except Exception as exc:
             return _lab_error(action, exc)
-        return {"ok": True, "action": action, "phases": _lab_redact_any(phases)}
+        return {"ok": True, "action": action, "phases": _capture_redact_result(phases)}
 
     if action == "console":
         missing = [name for name, value in (("node", node), ("phase", phase),

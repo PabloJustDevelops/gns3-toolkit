@@ -433,8 +433,8 @@ def _capturar_fases(spec: dict, after: str, server: str | None) -> None:
 
         if resultado.get("ok"):
             print(f"captura {fase['phase']}: OK ({resultado.get('path') or '-'})")
-            if resultado.get("error"):
-                print(f"  aviso: {resultado['error']}")
+            for aviso in resultado.get("warnings") or []:
+                print(f"  aviso: {aviso}")
         else:
             print(f"captura {fase['phase']}: FALLO "
                   f"({resultado.get('error') or 'error desconocido'})")

@@ -75,11 +75,12 @@ def test_capture_phase_convierte_ppm_a_png_y_usa_ocr_x2_psm4(monkeypatch, tmp_pa
 
     resultado = captures.capture_phase(monitor, "topologia", str(tmp_path), "PF1")
 
-    assert set(resultado) == {"ok", "phase", "path", "ocr", "node", "error"}
+    assert set(resultado) == {"ok", "phase", "path", "ocr", "node", "error", "warnings"}
     assert resultado["ok"] is True
     assert resultado["phase"] == "topologia"
     assert resultado["node"] == "PF1"
     assert resultado["error"] is None
+    assert resultado["warnings"] == []
     assert resultado["ocr"] == "Show interfaces"
     assert resultado["path"] == str(tmp_path / "04-topologia.png")
     assert Path(resultado["path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -114,7 +115,8 @@ def test_capture_phase_sin_pillow_conserva_ppm_y_lo_reporta(monkeypatch, tmp_pat
     assert resultado["path"] == str(tmp_path / "01-consola.ppm")
     assert Path(resultado["path"]).read_bytes() == PPM
     assert resultado["ocr"] == "texto"
-    assert "Pillow" in resultado["error"]
+    assert resultado["error"] is None
+    assert any("Pillow" in aviso for aviso in resultado["warnings"])
 
 
 def test_capture_phase_sin_tesseract_degrada_ocr_y_lo_reporta(monkeypatch, tmp_path):
@@ -125,7 +127,8 @@ def test_capture_phase_sin_tesseract_degrada_ocr_y_lo_reporta(monkeypatch, tmp_p
 
     assert resultado["ok"] is True
     assert resultado["ocr"] == ""
-    assert "tesseract" in resultado["error"].lower()
+    assert resultado["error"] is None
+    assert any("tesseract" in aviso.lower() for aviso in resultado["warnings"])
     assert Path(resultado["path"]).is_file()
 
 
@@ -223,6 +226,28 @@ def test_fallo_de_captura_no_cambia_exit_de_aplicar_deseado(monkeypatch, tmp_pat
     salida = capsys.readouterr().out
     assert "FALLO" in salida
     assert "fallo simulado de captura" in salida
+
+
+def test_aplicar_deseado_imprime_warnings_sin_marcar_fallo(monkeypatch, tmp_path, capsys):
+    especificacion = _spec_con_capturas()
+    monitor = MonitorFalso()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(labspec, "ejecutar", lambda argv, server=None: 0)
+    monkeypatch.setattr(labspec, "_monitor_captura", lambda *args: monitor)
+    monkeypatch.setattr(captures, "capture_phase", lambda *args: {
+        "ok": True, "phase": "topologia", "path": "/tmp/01-topologia.png",
+        "ocr": "", "node": "PF1", "error": None,
+        "warnings": ["tesseract no disponible; OCR vacio"],
+    })
+
+    rc = labspec.aplicar_deseado(especificacion, {}, None, True, captures=True)
+
+    assert rc == 0
+    salida = capsys.readouterr().out
+    assert "captura topologia: OK" in salida
+    assert "aviso: tesseract no disponible; OCR vacio" in salida
+    assert "captura topologia: FALLO" not in salida
 
 
 def test_aplicar_deseado_sin_captures_no_abre_monitor(monkeypatch):
