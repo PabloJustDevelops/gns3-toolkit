@@ -1,7 +1,7 @@
 ---
 name: gns3-lab-automation
 description: "Use when driving GNS3 2.2 labs from Hermes or extending the toolkit."
-version: 2.1.0
+version: 2.2.0
 author: Hermes (Pablo)
 license: MIT
 metadata:
@@ -101,6 +101,8 @@ gns3lab mon PF1 info status -p examen-kit    # HMP crudo
 gns3lab test examen-kit                      # PC↔PC, PC→gateway, PC→8.8.8.8
 gns3lab verify qemu examen-kit --node PF1    # checks de solo lectura del nodo
 gns3lab doctor --check-updates --json        # ¿hay versión nueva?
+gns3lab project ls -p examen-kit --prefix project-files/ --json
+gns3lab compute endpoint local --emulator qemu --remote-action binaries --json
 python3 scripts/labspec.py validate examples/lab-ejemplo.yaml
 python3 scripts/labspec.py plan examples/lab-ejemplo.yaml
 
@@ -132,6 +134,11 @@ usa sólo comandos existentes de la CLI. No borra proyectos ni nodos. Detalle:
 GitHub con caché de 24 h (`GNS3LAB_NO_UPDATE_CHECK=1` la desactiva), nunca auto-actualiza. Si
 no hay release ni tag, reporta `update_available: false` sin error. Detalle:
 [docs/UPDATES.md](https://github.com/PabloJustDevelops/gns3-toolkit/blob/master/docs/UPDATES.md).
+
+`gns3lab project ls` lista ficheros del proyecto en un compute (`--compute`, por defecto `local`),
+con `--prefix` opcional; `gns3_compute_endpoint` y `gns3lab compute endpoint ...` resuelven la URL
+directa del compute, pero **no descargan bytes** ni llaman a esa URL. Para lanzar el repo desde
+cinco harness distintos, consulta `docs/HARNESSES.md` y `scripts/harness_detect.py --json`.
 
 ## Trampas ya pagadas (no repetirlas)
 
