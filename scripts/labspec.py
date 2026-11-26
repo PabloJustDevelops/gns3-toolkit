@@ -3,7 +3,8 @@
 
 Sólo orquesta la CLI existente (`new`, `node add`, `node props`, `link add`,
 `up` para escribir; `status`, `link list`, `exec`, `pf detect` para leer).
-No habla con la API ni borra proyectos o nodos.
+Las capturas opcionales usan lecturas de la API para localizar el monitor HMP;
+no escriben en la API ni borran proyectos o nodos.
 """
 from __future__ import annotations
 
@@ -19,9 +20,14 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+import captures  # noqa: E402  (módulo raíz; Pillow se importa sólo al capturar)
+
 CLI = REPO / "cli" / "gns3lab"
 VERSION = 1
-CLAVES_TOP = {"version", "project", "nodes", "links", "expect", "warn"}
+CLAVES_TOP = {"version", "project", "nodes", "links", "expect", "warn", "captures"}
 CLAVES_NODO = {"name", "template", "adapter_type", "ip"}
 CLAVES_ENLACE = {"a", "b", "pa", "pb", "porta", "portb"}
 NOMBRE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -153,6 +159,11 @@ def validar(data: dict) -> list[str]:
             not isinstance(mensaje, str) or not mensaje.strip() for mensaje in warn):
         errores.append("warn: debe ser una lista de mensajes no vacíos")
 
+    try:
+        captures.phases_from_spec(data)
+    except ValueError as exc:
+        errores.append(str(exc))
+
     return errores
 
 
@@ -179,6 +190,8 @@ def normalizar(data: dict) -> dict:
               "nodes": nodos, "links": enlaces, "expect": expect}
     if "warn" in data:
         salida["warn"] = list(data["warn"])
+    if "captures" in data:
+        salida["captures"] = captures.phases_from_spec(data)
     return salida
 
 
@@ -368,7 +381,67 @@ def capturar(argv: list[str], server: str | None = None) -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
-def aplicar_deseado(deseado: dict, actual: dict, server: str | None, yes: bool) -> int:
+def _monitor_captura(server: str | None, project: str, node_name: str):
+    """Abre el HMP del nodo exacto; sólo lee la topología para localizarlo."""
+    from gns3core import Client, QemuMonitor
+
+    try:
+        cliente = Client.from_name(server or "local")
+        proyecto = cliente.resolve_project(project)
+        nodos = cliente.nodes(proyecto["project_id"])
+        nodo = next((n for n in nodos if n.get("name") == node_name), None)
+        if nodo is None:
+            raise RuntimeError(f"nodo {node_name!r} no está en el proyecto {project!r}")
+        if nodo.get("node_type") != "qemu":
+            raise RuntimeError(
+                f"nodo {node_name!r} no es QEMU ({nodo.get('node_type')}); no tiene monitor HMP")
+        disco = (nodo.get("properties") or {}).get("hda_disk_image")
+        return QemuMonitor.for_node(node_id=nodo["node_id"], disk=disco)
+    except SystemExit as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _capturar_fases(spec: dict, after: str, server: str | None) -> None:
+    """Ejecuta las capturas de una fase sin alterar el resultado del montaje."""
+    try:
+        fases = captures.phases_from_spec(spec)
+    except (ValueError, TypeError) as exc:
+        print(f"capturas tras {after}: FALLO ({exc})")
+        return
+    pendientes = [fase for fase in fases if fase["after"] == after]
+    if not pendientes:
+        return
+
+    outdir = Path.home() / "GNS3" / "captures" / spec["project"]
+    for fase in pendientes:
+        node_name = fase["node"] or spec["nodes"][0]["name"]
+        monitor = None
+        try:
+            monitor = _monitor_captura(server, spec["project"], node_name)
+            resultado = captures.capture_phase(
+                monitor, fase["phase"], str(outdir), fase["node"])
+            if not isinstance(resultado, dict):
+                raise RuntimeError("capture_phase devolvió un resultado inválido")
+        except (Exception, SystemExit) as exc:
+            resultado = {"ok": False, "error": str(exc)}
+        finally:
+            if monitor is not None:
+                try:
+                    monitor.close()
+                except Exception as exc:
+                    print(f"captura {fase['phase']}: aviso al cerrar monitor ({exc})")
+
+        if resultado.get("ok"):
+            print(f"captura {fase['phase']}: OK ({resultado.get('path') or '-'})")
+            if resultado.get("error"):
+                print(f"  aviso: {resultado['error']}")
+        else:
+            print(f"captura {fase['phase']}: FALLO "
+                  f"({resultado.get('error') or 'error desconocido'})")
+
+
+def aplicar_deseado(deseado: dict, actual: dict, server: str | None, yes: bool,
+                    captures: bool = False) -> int:
     cmds = plan(deseado, actual, server)
     if not yes:
         for argv in cmds:
@@ -383,6 +456,8 @@ def aplicar_deseado(deseado: dict, actual: dict, server: str | None, yes: bool) 
             print(f"falló con exit {rc}; no sigo. No se borra nada.", file=sys.stderr)
             return rc
     print(f"{deseado['project']}: aplicado ({len(cmds)} órdenes)")
+    if captures:
+        _capturar_fases(deseado, "apply", server)
     return 0
 
 
@@ -429,7 +504,7 @@ def _extremos(salida: str) -> set[tuple]:
     return pares
 
 
-def verificar(spec: dict, server: str | None) -> int:
+def verificar(spec: dict, server: str | None, captures: bool = False) -> int:
     proyecto = spec["project"]
     fallos = 0
 
@@ -511,6 +586,9 @@ def verificar(spec: dict, server: str | None) -> int:
             print(f"enlace {enlace['a']}:{enlace['pa']} <-> "
                   f"{enlace['b']}:{enlace['pb']}: FALLO (no existe o puertos distintos)")
             fallos += 1
+
+    if captures:
+        _capturar_fases(spec, "verify", server)
 
     print(f"RESULTADO: {'OK' if not fallos else 'FALLO'} "
           f"({len(spec['nodes'])} nodos, {len(spec['links'])} enlaces)")
