@@ -20,7 +20,7 @@ PNG_FIRMA = b"\x89PNG\r\n\x1a\n"
 
 def _error_inicial(phase: str, node: str | None, error: str) -> dict:
     return {"ok": False, "phase": phase, "path": None, "ocr": "",
-            "node": node, "error": error}
+            "node": node, "error": error, "warnings": []}
 
 
 def _validar_fase(phase: str) -> str:
@@ -112,7 +112,7 @@ def capture_phase(monitor, phase: str, outdir: str, node: str | None = None) -> 
         avisos.append("tesseract no disponible; OCR vacío")
 
     return {"ok": True, "phase": nombre_fase, "path": str(ruta), "ocr": texto,
-            "node": node, "error": "; ".join(avisos) if avisos else None}
+            "node": node, "error": None, "warnings": avisos}
 
 
 def _celda(valor, limite: int | None = None) -> str:

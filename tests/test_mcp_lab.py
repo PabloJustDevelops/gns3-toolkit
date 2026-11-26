@@ -17,7 +17,7 @@ LAB_RESOURCES = (
     "gns3://lab/actual",
     "gns3://lab/diff",
 )
-BASE_TOOLS = 48
+BASE_TOOLS = 49
 
 
 def _resources() -> dict[str, object]:
@@ -53,8 +53,8 @@ def test_list_resources_incluye_los_tres_recursos_de_lab():
 def test_list_tools_crece_en_uno_con_gns3_lab():
     tools = asyncio.run(server.mcp.list_tools())
 
-    assert len(tools) == BASE_TOOLS + 1
-    assert "gns3_lab" in {tool.name for tool in tools}
+    assert len(tools) == BASE_TOOLS + 1 == 50
+    assert {"gns3_lab", "gns3_capturas"} <= {tool.name for tool in tools}
 
 
 @requires_tool

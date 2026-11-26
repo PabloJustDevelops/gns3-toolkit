@@ -16,7 +16,7 @@ import httpx
 import gns3_mcp_server as server
 
 TOOLS_CONTRATO = {
-    "gns3_status", "gns3_projects", "gns3_pfsense", "gns3_templates", "gns3_template",
+    "gns3_status", "gns3_projects", "gns3_pfsense", "gns3_capturas", "gns3_templates", "gns3_template",
     "gns3_nodes", "gns3_nodes_bulk", "gns3_links", "gns3_link_edit", "gns3_topology",
     "gns3_console", "gns3_console_control", "gns3_capture", "gns3_nio",
     "gns3_port_capture", "gns3_snapshots", "gns3_images", "gns3_node_files",

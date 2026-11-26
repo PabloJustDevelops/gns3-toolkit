@@ -8,7 +8,7 @@ Secciones: Tres piezas, un núcleo · Qué hace cada clase de `gns3core.py` · E
                  gns3lab (CLI)                 gns3_mcp_server.py (FastMCP, stdio)
                  cli/gns3lab                   agente / Hermes
                       |                                  |
-            argparse + 48 subcomandos           49 tools (@mcp.tool)
+            argparse + 48 subcomandos           50 tools (@mcp.tool)
                       |                                  |
         +-------------+------------------+---------------+
         |                                |
@@ -104,7 +104,7 @@ Utilidades sueltas: `match_nodes`, `node_file_read/write` (el body va **en crudo
 
 `gns3_mcp_server.py` es un `FastMCP("gns3")` por stdio. Las credenciales salen de
 `~/.config/GNS3/2.2/gns3_server.conf` (`GNS3_URL`, `GNS3_USER`, `GNS3_PASSWORD` como override),
-así que no viajan en el prompt. Las 49 tools registradas, contadas con `mcp.list_tools()`:
+así que no viajan en el prompt. Las 50 tools registradas, contadas con `mcp.list_tools()`:
 
 | Grupo | Tools |
 |---|---|
@@ -112,7 +112,7 @@ así que no viajan en el prompt. Las 49 tools registradas, contadas con `mcp.lis
 | topología | `gns3_nodes`, `gns3_nodes_bulk`, `gns3_node_edit`, `gns3_node_action`, `gns3_links`, `gns3_link_get`, `gns3_link_edit`, `gns3_topology`, `gns3_drawings`, `gns3_drawing_get` |
 | catálogo y computes | `gns3_templates`, `gns3_template`, `gns3_images`, `gns3_upload`, `gns3_compute`, `gns3_compute_endpoint`, `gns3_compute_download`, `gns3_statistics`, `gns3_symbols`, `gns3_appliances`, `gns3_server_paths`, `gns3_command_line` |
 | dentro del nodo | `gns3_console`, `gns3_console_control`, `gns3_exec`, `gns3_monitor`, `gns3_node_files` |
-| red, captura y seguridad | `gns3_capture`, `gns3_nio`, `gns3_port_capture`, `gns3_snapshots` |
+| red, captura y seguridad | `gns3_capture`, `gns3_capturas`, `gns3_nio`, `gns3_port_capture`, `gns3_snapshots` |
 | admin y eventos | `gns3_gns3vm`, `gns3_iou_license`, `gns3_server`, `gns3_emulator`, `gns3_notifications`, `gns3_events_url`, `gns3_events` |
 | pfSense y lotes | `gns3_pfsense`, `gns3_batch` |
 
