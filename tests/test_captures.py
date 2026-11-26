@@ -88,6 +88,21 @@ def test_capture_phase_convierte_ppm_a_png_y_usa_ocr_x2_psm4(monkeypatch, tmp_pa
     assert monitor.dest is not None and not monitor.dest.parent.exists()
 
 
+def test_capture_phase_no_sobrescribe_fases_con_saltos_de_linea(monkeypatch, tmp_path):
+    monkeypatch.setattr(captures, "ocr", lambda path, psm=4: "texto")
+    monkeypatch.setattr(captures.shutil, "which", lambda nombre: "/usr/bin/tesseract")
+    fase = "fase\nsalto"
+
+    primero = captures.capture_phase(MonitorFalso(), fase, str(tmp_path))
+    assert primero["path"] == str(tmp_path / f"01-{fase}.png")
+    Path(primero["path"]).write_bytes(b"primero")
+
+    segundo = captures.capture_phase(MonitorFalso(), fase, str(tmp_path))
+
+    assert segundo["path"] == str(tmp_path / f"02-{fase}.png")
+    assert Path(primero["path"]).read_bytes() == b"primero"
+
+
 def test_capture_phase_sin_pillow_conserva_ppm_y_lo_reporta(monkeypatch, tmp_path):
     _sin_pillow(monkeypatch)
     monkeypatch.setattr(captures, "ocr", lambda path, psm=4: "texto")
@@ -176,6 +191,8 @@ def test_phases_from_spec_rechaza_mas_de_cinco_con_ruta():
 @pytest.mark.parametrize("entrada,ruta", [
     ({"after": "apply"}, "captures[0].phase"),
     ({"phase": "topologia", "after": "despues"}, "captures[0].after"),
+    ({"phase": "topologia", "after": []}, "captures[0].after"),
+    ({"phase": "topologia", "after": {}}, "captures[0].after"),
 ])
 def test_phases_from_spec_informa_la_ruta_del_campo(entrada, ruta):
     with pytest.raises(ValueError, match=ruta.replace("[", r"\[").replace("]", r"\]")):
@@ -252,6 +269,16 @@ def test_labspec_valida_y_normaliza_el_bloque_captures():
 
     especificacion["captures"][0]["after"] = "despues"
     assert any("captures[0].after" in error for error in labspec.validar(especificacion))
+
+
+@pytest.mark.parametrize("after", [[], {}])
+def test_labspec_validar_after_no_texto_reporta_ruta(after):
+    especificacion = _spec_con_capturas()
+    especificacion["captures"][0]["after"] = after
+
+    errores = labspec.validar(especificacion)
+
+    assert any("captures[0].after" in error for error in errores)
 
 
 def test_fallo_de_captura_no_cambia_exit_de_verificar(monkeypatch, capsys):

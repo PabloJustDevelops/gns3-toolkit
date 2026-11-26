@@ -35,7 +35,8 @@ def _validar_fase(phase: str) -> str:
 def _siguiente_numero(outdir: Path) -> int:
     numeros = []
     for ruta in outdir.iterdir():
-        coincidencia = re.match(r"^(\d+)-.+\.(?:png|ppm)$", ruta.name, re.IGNORECASE)
+        coincidencia = re.match(r"^(\d+)-.+\.(?:png|ppm)$", ruta.name,
+                                re.IGNORECASE | re.DOTALL)
         if coincidencia:
             numeros.append(int(coincidencia.group(1)))
     return max(numeros, default=0) + 1
@@ -170,7 +171,7 @@ def phases_from_spec(spec: dict) -> list[dict]:
             detalle = str(exc).removeprefix("phase: ")
             raise ValueError(f"{base}.phase: {detalle}") from exc
         after = entrada.get("after")
-        if after not in {"apply", "verify"}:
+        if not isinstance(after, str) or after not in {"apply", "verify"}:
             raise ValueError(f"{base}.after: debe ser 'apply' o 'verify'")
         node = entrada.get("node")
         if node is not None and (not isinstance(node, str) or not node.strip()):
