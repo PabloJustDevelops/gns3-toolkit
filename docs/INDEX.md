@@ -23,6 +23,7 @@ escribieron.
 | [MCP-VELOCIDAD.md](MCP-VELOCIDAD.md) | qué hace `gns3_batch`, qué paraleliza y cómo medirlo | `gns3_batch()` y `_batch_is_read_only()` | el bloque `Cómo medirlo` del documento |
 | [EXAMEN.md](EXAMEN.md) | guion ordenado del examen, con la salida que confirma cada paso | CLI, `pfsense.py` y `examen` | `gns3lab examen verify`; `gns3lab doctor` |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | síntoma literal, causa y arreglo | mensajes del código y de la API | `grep` del mensaje en el código; `gns3lab doctor` |
+| [HARNESSES.md](HARNESSES.md) | lanzar el repo desde Command Code, OpenCode, Hermes, freebuff o Codex: comandos, MCP y límites | `scripts/harness_detect.py` y `harnesses/*/AGENTS.md` | `pytest -q tests/test_harness_detect.py`; `scripts/harness_detect.py --json` |
 
 ## Documentos históricos (no se reescriben)
 
