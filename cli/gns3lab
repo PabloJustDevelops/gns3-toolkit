@@ -66,9 +66,17 @@ pfSense por config.xml (sin VNC; credenciales solo del entorno):
     gns3lab pf nat --if wan [--target IP] [--json]
     gns3lab pf ssh --port 22022 [--json]
 
+Laboratorio declarativo (spec YAML; nunca borra nada):
+
+    gns3lab lab validate|plan|apply|verify --spec lab.yaml [--json]
+    gns3lab lab diff --spec lab.yaml --topology topo.json [--json]
+    gns3lab lab export --project nombre [--out lab.yaml] [--json]
+                                    # --topology lee la topología de un JSON local
+
 `--json` antes del subcomando da salida parseable para cualquier comando, sin tocar los
 handlers: si lo capturado ya es JSON se imprime tal cual; si no, se envuelve como
 {"cmd", "ok", "output"}. `stderr` no se captura y el exit code se conserva.
+`lab` admite `--json` también detrás de la acción y devuelve {"ok", "action", "data"}.
 
 `examen informe` sólo lee el servidor con gns3core: escribe un Markdown con la topología,
 el estado, nodos, enlaces y comprobaciones reales en ~/GNS3/informes/ y devuelve la ruta
@@ -98,6 +106,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -4214,6 +4223,233 @@ def cmd_verify(args, conf) -> int:
     return 0 if result["ok"] else 1
 
 
+# --------------------------------------------------------------------------- #
+# laboratorio declarativo: subcomando `lab` (delega en scripts/labspec.py)
+# --------------------------------------------------------------------------- #
+def _lab_module():
+    """Carga `scripts/labspec.py` por ruta, sin tocar `sys.path` global.
+
+    La CLI ya añade la raíz del repo a `sys.path` para `gns3core`; `scripts/` no es
+    un paquete instalable y podría existir otro `labspec` en el PYTHONPATH. Cargar
+    el fichero por su ruta absoluta evita ampliar el path y fija el módulo correcto.
+    """
+    if getattr(_lab_module, "_cache", None) is None:
+        import importlib.util
+
+        ruta = CORE_DIR / "scripts" / "labspec.py"
+        spec = importlib.util.spec_from_file_location("gns3lab_labspec", ruta)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"no se puede importar {ruta}")
+        modulo = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(modulo)
+        _lab_module._cache = modulo
+    return _lab_module._cache
+
+
+def _lab_json(args) -> bool:
+    return bool(getattr(args, "global_json", False) or getattr(args, "lab_json", False))
+
+
+def _lab_out(args, accion: str, ok: bool, data, texto: str | None = None,
+             rc: int | None = None) -> int:
+    """Envoltorio {ok, action, data} con --json; texto sin él."""
+    if _lab_json(args):
+        _json_out({"ok": ok, "action": accion, "data": data})
+    elif texto is not None:
+        print(texto)
+    return rc if rc is not None else (0 if ok else 1)
+
+
+def _lab_spec(L, ruta: str) -> dict:
+    """Lee y valida el YAML deseado; devuelve la forma normalizada."""
+    datos = L.leer(ruta)
+    errores = L.validar(datos)
+    if errores:
+        raise ValueError(f"{ruta}: " + "; ".join(errores))
+    return L.normalizar(datos)
+
+
+def _lab_mostrar(L, cmd, server: str | None) -> str:
+    mostrar = getattr(L, "_mostrar", None)
+    if callable(mostrar):
+        return mostrar(cmd, server)
+    return "gns3lab " + shlex.join(cmd)
+
+
+def _lab_comandos(L, spec: dict, server: str | None) -> list[str]:
+    return [_lab_mostrar(L, cmd, server) for cmd in L.ordenes(spec)]
+
+
+def _lab_leer_json(ruta: str) -> dict:
+    try:
+        crudo = json.loads(Path(ruta).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{ruta}: topología JSON ilegible ({exc})") from exc
+    if not isinstance(crudo, dict):
+        raise ValueError(f"{ruta}: la topología debe ser un objeto JSON")
+    return crudo
+
+
+def _lab_actual(L, ruta: str) -> dict:
+    """Topología JSON local -> spec v1 mediante `labspec.export`.
+
+    Acepta también un spec v1 ya normalizado para no obligar a exportar dos veces.
+    """
+    crudo = _lab_leer_json(ruta)
+    enlaces = crudo.get("links") or []
+    crudo_topo = (any(isinstance(e, dict) and "ends" in e for e in enlaces)
+                  or any(isinstance(n, dict) and "node_type" in n
+                         for n in crudo.get("nodes") or []))
+    if not crudo_topo:
+        return _lab_spec(L, ruta) if "version" in crudo else L.normalizar(crudo)
+    exportar = getattr(L, "export", None)
+    if not callable(exportar):
+        raise RuntimeError("labspec no tiene export(): falta el carril dclcore")
+    return exportar(crudo)
+
+
+def _lab_topologia_servidor(args, conf) -> dict:
+    """Nodos y enlaces del proyecto leídos con gns3core.Client (solo lectura)."""
+    if core is None:
+        raise RuntimeError("falta gns3core para `lab export`: ejecuta ./scripts/install.sh")
+    c = _core_client(Server(args.server, conf))
+    if not c.alive():
+        raise ConnectionError(f"servidor {args.server} no responde")
+    proyecto = c.resolve_project(getattr(args, "project", None))
+    pid = proyecto["project_id"]
+    nodos = c.nodes(pid)
+    nombres = {n.get("node_id"): n.get("name") for n in nodos}
+    salida_nodos = []
+    for n in nodos:
+        nodo = {"name": n.get("name", ""), "node_type": n.get("node_type", "")}
+        props = n.get("properties") or {}
+        if isinstance(props, dict) and props.get("adapter_type"):
+            nodo["properties"] = {"adapter_type": props["adapter_type"]}
+        salida_nodos.append(nodo)
+    salida_enlaces = []
+    for enlace in c.links(pid):
+        extremos = enlace.get("nodes") or []
+        if len(extremos) != 2:
+            continue  # `labspec.export` omite los enlaces incompletos y los reporta
+        pares = []
+        for e in extremos:
+            nombre = nombres.get(e.get("node_id"))
+            if not nombre:
+                break
+            pares.append({"node": nombre, "adapter": e.get("adapter_number", 0)})
+        if len(pares) == 2:
+            salida_enlaces.append({"ends": pares})
+    return {"project": proyecto.get("name"), "nodes": salida_nodos,
+            "links": salida_enlaces}
+
+
+def cmd_lab(args, conf) -> int:
+    """Laboratorio declarativo: valida, planifica, aplica, verifica, compara, exporta."""
+    accion = args.lab_action
+    L = _lab_module()
+    errores = (getattr(L, "SpecError", ValueError), RuntimeError, ConnectionError,
+               OSError, ValueError)
+    server = args.server
+    try:
+        if accion == "validate":
+            spec = _lab_spec(L, args.spec)
+            datos = {"project": spec["project"], "nodes": len(spec["nodes"]),
+                     "links": len(spec["links"]), "valid": True}
+            return _lab_out(args, accion, True, datos,
+                            f"OK: {spec['project']} "
+                            f"({len(spec['nodes'])} nodos, {len(spec['links'])} enlaces)")
+
+        if accion == "plan":
+            spec = _lab_spec(L, args.spec)
+            comandos = _lab_comandos(L, spec, server)
+            datos = {"project": spec["project"], "plan": comandos}
+            return _lab_out(args, accion, True, datos, "\n".join(comandos))
+
+        if accion == "diff":
+            deseado = _lab_spec(L, args.spec)
+            actual = _lab_actual(L, args.topology)
+            dif = L.diff(deseado, actual) if callable(getattr(L, "diff", None)) else None
+            if dif is None:
+                raise RuntimeError("labspec no tiene diff(): falta el carril dclcore")
+            datos = dict(dif)
+            datos["project"] = deseado["project"]
+            lineas = [
+                f"crear nodos: {', '.join(n['name'] for n in dif['crear_nodos']) or '-'}",
+                f"crear enlaces: {len(dif['crear_enlaces'])}",
+                f"sobrantes (no se borran): {len(dif['sobrantes_nodos'])} nodos, "
+                f"{len(dif['sobrantes_enlaces'])} enlaces",
+                "sin cambios" if dif["sin_cambios"] else "hay cambios",
+            ]
+            return _lab_out(args, accion, True, datos, "\n".join(lineas))
+
+        if accion == "apply":
+            deseado = _lab_spec(L, args.spec)
+            actual = _lab_actual(L, args.topology) if getattr(args, "topology", None) else None
+            comandos = _lab_comandos(L, deseado, server)
+            if not args.yes:
+                datos = {"plan": comandos, "yes": False, "project": deseado["project"]}
+                if not _lab_json(args):
+                    print("\n".join(comandos))
+                    sys.stdout.flush()  # el aviso va a stderr: que no se adelante al plan
+                print("apply escribe en GNS3: repite con --yes (no se ha ejecutado nada)",
+                      file=sys.stderr)
+                return _lab_out(args, accion, False, datos, rc=2)
+            aplicar = getattr(L, "aplicar_deseado", None)
+            if callable(aplicar):
+                rc = aplicar(deseado, actual or {}, server, True)
+            else:
+                rc = L.aplicar(deseado, server, True)
+            datos = {"plan": comandos, "yes": True, "rc": rc,
+                     "project": deseado["project"]}
+            return _lab_out(args, accion, rc == 0, datos, rc=rc)
+
+        if accion == "verify":
+            spec = _lab_spec(L, args.spec)
+            import io
+
+            buf = io.StringIO() if _lab_json(args) else None
+            if buf is not None:
+                import contextlib
+
+                with contextlib.redirect_stdout(buf):
+                    rc = L.verificar(spec, server)
+            else:
+                rc = L.verificar(spec, server)
+            lineas = (buf.getvalue().rstrip("\n").splitlines() if buf is not None else [])
+            datos = {"project": spec["project"], "rc": rc, "lines": lineas}
+            return _lab_out(args, accion, rc == 0, datos,
+                            "\n".join(lineas) if buf is None else None, rc=rc)
+
+        if accion == "export":
+            topo = (_lab_actual_crudo(args.topology) if getattr(args, "topology", None)
+                    else _lab_topologia_servidor(args, conf))
+            exportar = getattr(L, "export", None)
+            if not callable(exportar):
+                raise RuntimeError("labspec no tiene export(): falta el carril dclcore")
+            spec = exportar(topo, project=getattr(args, "project", None))
+            import yaml
+
+            texto = yaml.safe_dump(spec, sort_keys=False, allow_unicode=True)
+            if getattr(args, "out", None):
+                destino = Path(args.out).expanduser()
+                destino.write_text(texto, encoding="utf-8")
+                datos = {"spec": spec, "yaml": texto, "out": str(destino)}
+                return _lab_out(args, accion, True, datos,
+                                f"guardado {destino} ({len(spec['nodes'])} nodos, "
+                                f"{len(spec['links'])} enlaces)")
+            datos = {"spec": spec, "yaml": texto, "out": None}
+            return _lab_out(args, accion, True, datos, texto)
+
+        raise ValueError(f"acción lab desconocida: {accion}")
+    except errores as exc:
+        return _lab_out(args, accion, False, {"error": str(exc)})
+
+
+def _lab_actual_crudo(ruta: str) -> dict:
+    """Lee un `--topology` sin normalizar: `labspec.export` lo espera crudo."""
+    return _lab_leer_json(ruta)
+
+
 def _run_handler(args, handler, conf) -> int:
     """Ejecuta el handler; con --json global normaliza su stdout.
 
@@ -4684,6 +4920,37 @@ def main() -> int:
     p.add_argument("--node", help="nodo concreto si hay varios del mismo tipo")
     p.add_argument("--json", action="store_true", help="salida estructurada")
 
+    # -- laboratorio declarativo (delega en scripts/labspec.py) --------------- #
+    p = sub.add_parser("lab", help="laboratorio declarativo: valida, planifica, aplica, "
+                       "verifica, compara y exporta una spec YAML")
+    p.add_argument("--json", action="store_true", dest="lab_json",
+                   default=argparse.SUPPRESS,
+                   help="salida {ok, action, data} (también va detrás de la acción)")
+    labsub = p.add_subparsers(dest="lab_action", required=True, metavar="acción")
+    for nombre, ayuda in (
+        ("validate", "valida el YAML y reporta errores"),
+        ("plan", "imprime las órdenes gns3lab sin ejecutarlas"),
+        ("diff", "compara la spec con una topología real sin borrar nada"),
+        ("apply", "crea el laboratorio con la CLI existente (exige --yes)"),
+        ("verify", "comprueba el laboratorio con lecturas de solo lectura"),
+        ("export", "exporta una topología real a spec YAML"),
+    ):
+        q = labsub.add_parser(nombre, help=ayuda)
+        q.add_argument("--json", action="store_true", dest="lab_json",
+                       default=argparse.SUPPRESS,
+                       help="salida {ok, action, data}")
+        if nombre in ("validate", "plan", "diff", "apply", "verify"):
+            q.add_argument("--spec", required=True, help="fichero YAML del laboratorio")
+        if nombre in ("diff", "export"):
+            q.add_argument("--topology",
+                           help="topología JSON local (sin hablar con el servidor)")
+        if nombre == "apply":
+            q.add_argument("--yes", action="store_true",
+                           help="obligatorio: confirma la escritura en GNS3")
+        if nombre == "export":
+            q.add_argument("--project", help="proyecto GNS3 (nombre o id)")
+            q.add_argument("--out", help="fichero YAML de salida (por defecto, stdout)")
+
     args = ap.parse_args()
     # La configuración se lee después de parsear: `--help` no toca disco.
     conf = load_conf()
@@ -4705,7 +4972,7 @@ def main() -> int:
         "shot": cmd_shot, "key": cmd_key, "type": cmd_type,
         "mon": cmd_mon, "new": cmd_new, "node": cmd_node, "upload": cmd_upload,
         "draw": cmd_draw, "link": cmd_link, "doctor": cmd_doctor,
-        "examen": cmd_examen, "pf": cmd_pf, "verify": cmd_verify,
+        "examen": cmd_examen, "pf": cmd_pf, "verify": cmd_verify, "lab": cmd_lab,
         "project": cmd_project, "gns3vm": cmd_gns3vm, "notify": cmd_notify,
         "symbol": cmd_symbol, "iou-license": cmd_iou_license,
         "server": cmd_server, "emulator": cmd_emulator,
