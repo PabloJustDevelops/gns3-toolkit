@@ -3932,8 +3932,108 @@ def _examen_informe(args, conf, c, name: str) -> int:
     return 0
 
 
+def _capturas_module():
+    """Carga el carril capcore con un error claro mientras no esté fusionado."""
+    try:
+        import captures  # noqa: E402
+    except ModuleNotFoundError as exc:
+        if exc.name != "captures":
+            raise RuntimeError(f"no se pudo cargar captures.py: {exc}") from exc
+        raise RuntimeError(
+            "el módulo de captura de consola está previsto en capcore: falta captures.py"
+        ) from exc
+    return captures
+
+
+def _capturas_outdir(args) -> str:
+    if getattr(args, "out", None):
+        return str(Path(args.out).expanduser())
+    phase = re.sub(r"[^A-Za-z0-9_-]+", "-", getattr(args, "phase", None) or "examen")
+    return str(Path.home() / "GNS3" / "captures" / (phase.strip("-") or "examen"))
+
+
+def _capturas_emit(args, result: dict) -> int:
+    """Imprime el resultado uniforme; la razón va a stderr para no romper JSON."""
+    reason = result.get("reason")
+    if reason:
+        print(reason, file=sys.stderr)
+    if getattr(args, "json", False):
+        _json_out(result)
+    else:
+        for item in result.get("captures") or []:
+            print(item.get("path") or item)
+        if result.get("path"):
+            print(result["path"])
+        if result.get("error"):
+            print(result["error"], file=sys.stderr)
+    return 0 if result.get("ok") else 1
+
+
+def _examen_capturas_consola(args, conf, reason: str | None = None) -> int:
+    """Delega una fase de HMP en capcore; un fallo de captura no lanza excepción."""
+    try:
+        captures = _capturas_module()
+    except RuntimeError as exc:
+        detail = f"{reason}; {exc}" if reason else str(exc)
+        return _capturas_emit(args, {
+            "ok": False, "captures": [], "reason": detail, "fallback": "consola",
+        })
+
+    phase = getattr(args, "phase", None) or "examen"
+    outdir = _capturas_outdir(args)
+    monitor = None
+    try:
+        server = Server(getattr(args, "server", "local"), conf)
+        monitor = _monitor(server, getattr(args, "name", None) or EXAMEN_NAME, "PF1")
+        data = captures.capture_phase(monitor, phase, outdir, node="PF1")
+    except SystemExit as exc:
+        data = {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        data = {"ok": False, "error": str(exc)}
+    finally:
+        if monitor is not None:
+            monitor.close()
+
+    result = dict(data)
+    result["reason"] = reason
+    result["fallback"] = "consola"
+    return _capturas_emit(args, result)
+
+
+def _examen_capturas(args, conf) -> int:
+    """Captura HMP o WebUI; esta última es solo evidencia visual."""
+    if not getattr(args, "webui", False):
+        return _examen_capturas_consola(args, conf)
+
+    try:
+        from webui_capture import WebUIUnavailable, WebUICapture
+    except ImportError as exc:
+        return _examen_capturas_consola(args, conf, str(exc))
+
+    try:
+        capture = WebUICapture.from_env(_capturas_outdir(args), host=getattr(args, "host", None))
+        available, reason = capture.available()
+    except WebUIUnavailable as exc:
+        return _examen_capturas_consola(args, conf, str(exc))
+
+    if not available:
+        return _examen_capturas_consola(args, conf, reason)
+
+    try:
+        result = capture.capture()
+    except (WebUIUnavailable, RuntimeError) as exc:
+        return _examen_capturas_consola(args, conf, str(exc))
+    if result.get("ok"):
+        return _capturas_emit(args, result)
+    return _examen_capturas_consola(
+        args, conf, result.get("reason") or "la captura WebUI no estuvo disponible",
+    )
+
+
 def cmd_examen(args, conf) -> int:
     """Monta, comprueba o reinicia el kit de examen sin tocar otros proyectos."""
+    if getattr(args, "action", None) == "capturas":
+        return _examen_capturas(args, conf)
     if getattr(args, "action", None) == "reset" and not getattr(args, "yes", False):
         print("reset exige --yes: no se toca ningún proyecto ni se consulta el servidor "
               "sin confirmación", file=sys.stderr)
@@ -4894,13 +4994,19 @@ def main() -> int:
     p.add_argument("--check-updates", action="store_true",
                    help="consulta si hay versión nueva (no bloqueante, caché 24 h)")
 
-    p = sub.add_parser("examen", help="monta, verifica o reinicia el kit de examen")
-    p.add_argument("action", choices=["setup", "verify", "reset", "informe"])
+    p = sub.add_parser("examen", help="monta, verifica, reinicia o captura el kit de examen")
+    p.add_argument("action", choices=["setup", "verify", "reset", "informe", "capturas"])
     p.add_argument("--name", help=f"nombre del proyecto (por defecto '{EXAMEN_NAME}')")
     p.add_argument("--from", dest="from_project",
                    help="setup: proyecto local del que tomar disco y adaptador")
+    p.add_argument("--webui", action="store_true",
+                   help="capturas: evidencia visual de pfSense con navegador headless")
+    p.add_argument("--host", help="capturas --webui: host WebUI (por defecto PFSENSE_HOST)")
+    p.add_argument("--out", help="capturas: directorio de salida (por defecto ~/GNS3/captures/)")
+    p.add_argument("--phase", default="examen",
+                   help="capturas: nombre de fase para la consola y el directorio por defecto")
     p.add_argument("--json", action="store_true",
-                   help="verify: salida JSON parseable; informe: {path, bytes, ok}")
+                   help="verify/informe/capturas: salida JSON parseable")
     p.add_argument("--dest", help="informe: ruta del Markdown (por defecto ~/GNS3/informes/)")
     p.add_argument("--idle", type=float, default=4.0,
                    help="verify: segundos de quietud para el ping (por defecto 4)")
