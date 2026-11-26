@@ -1061,6 +1061,32 @@ def gns3_links(
 
 
 @mcp.tool
+def gns3_link_get(
+    link_id: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Detalle de UN enlace (extremos, filtros y captura): sólo lectura. Úsala cuando ya
+    tienes el id y necesitas el objeto completo (p. ej. `capturing` o `capture_file_name`
+    antes de `gns3_capture`); para el listado usa `gns3_links` y para modificarlo
+    `gns3_link_edit`.
+
+    link_id — id completo tal como lo devuelve `gns3_links` (no admite prefijo).
+    El proyecto se resuelve por `project_id` o `project_name`; sin ninguno, el único abierto.
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    pid = proj["project_id"]
+    try:
+        st, res = client.link_get(pid, link_id)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    return res if st == 200 else _err_msg(st, res, "detalle del enlace")
+
+
+@mcp.tool
 def gns3_link_edit(
     action: str = "add",
     node_a: Optional[str] = None,
@@ -2237,6 +2263,31 @@ def gns3_drawings(
         return {"created": True, "drawing_id": (res or {}).get("drawing_id"), "text": text}
 
     return _unknown_action(action, ["list", "text", "rect", "update", "clear", "delete"])
+
+
+@mcp.tool
+def gns3_drawing_get(
+    drawing_id: str,
+    project_id: Optional[str] = None,
+    project_name: Optional[str] = None,
+) -> Any:
+    """Detalle de UN dibujo (posición, rotación y SVG): sólo lectura. Úsala cuando ya tienes
+    el id y necesitas el SVG completo, p. ej. para calcular tamaño o color antes de
+    actualizarlo; para el listado o el update usa `gns3_drawings`.
+
+    drawing_id — id completo tal como lo devuelve `gns3_drawings` (no admite prefijo).
+    El proyecto se resuelve por `project_id` o `project_name`; sin ninguno, el único abierto.
+    """
+    client = _client()
+    proj, err = _pid_or_error(client, project_id, project_name)
+    if err:
+        return err
+    pid = proj["project_id"]
+    try:
+        st, res = client.drawing_get(pid, drawing_id)
+    except ConnectionError as e:
+        return {"error": str(e)}
+    return res if st == 200 else _err_msg(st, res, "detalle del dibujo")
 
 
 @mcp.tool

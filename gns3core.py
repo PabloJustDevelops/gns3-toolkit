@@ -361,6 +361,10 @@ class Client:
         detail = self.node_detail(pid, nid)
         return detail.get("command_line", "") if isinstance(detail, dict) else ""
 
+    def link_get(self, pid: str, lid: str) -> tuple[int, Any]:
+        """Detalle de un enlace: extremos, filtros y estado de captura."""
+        return self.get(f"/v2/projects/{pid}/links/{lid}")
+
     def link_update(self, pid: str, lid: str, body: dict) -> tuple[int, Any]:
         return self.put(f"/v2/projects/{pid}/links/{lid}", body, timeout=120)
 
@@ -379,6 +383,10 @@ class Client:
         if action == "pcap":
             return self.get(f"/v2/projects/{pid}/links/{lid}/pcap", raw=True, timeout=180)
         raise ValueError(f"acción de captura desconocida: {action}")
+
+    def drawing_get(self, pid: str, did: str) -> tuple[int, Any]:
+        """Detalle de un dibujo: posición, rotación y SVG completo."""
+        return self.get(f"/v2/projects/{pid}/drawings/{did}")
 
     def drawing_update(self, pid: str, did: str, body: dict) -> tuple[int, Any]:
         return self.put(f"/v2/projects/{pid}/drawings/{did}", body, timeout=120)
