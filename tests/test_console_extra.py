@@ -98,8 +98,47 @@ def test_run_para_en_cuanto_aparece_el_expect(telnet_factory):
         res = con.run("go", expect="LISTO", timeout=5, idle=30)
 
     assert "LISTO" in res["output"]
+    assert res["ok"] is True
+    assert res["eof"] is False
+    assert res["matched"] is True
     assert res["timed_out"] is False
     assert time.time() - inicio < 2, "el expect no cortó la espera"
+
+
+def test_run_con_eof_no_cumple_expect_ni_es_exito(telnet_factory, stub_sock):
+    con = _open(telnet_factory(on_connect=BANNER))
+    con.sock = stub_sock(recv=[b""])
+
+    res = con.run("show ip", expect="LISTO", timeout=1, idle=0.01)
+
+    assert res["ok"] is False
+    assert res["eof"] is True
+    assert res["matched"] is False
+    assert res["timed_out"] is False
+
+
+def test_run_con_quietud_sin_expect_no_es_exito(telnet_factory, stub_sock):
+    con = _open(telnet_factory(on_connect=BANNER))
+    con.sock = stub_sock()
+
+    res = con.run("show ip", expect="LISTO", timeout=1, idle=0.01)
+
+    assert res["ok"] is False
+    assert res["eof"] is False
+    assert res["matched"] is False
+    assert res["timed_out"] is False
+
+
+def test_run_timeout_es_distinto_de_eof_y_expect_incumplido(telnet_factory, stub_sock):
+    con = _open(telnet_factory(on_connect=BANNER))
+    con.sock = stub_sock()
+
+    res = con.run("show ip", expect="LISTO", timeout=0.02, idle=30)
+
+    assert res["ok"] is False
+    assert res["eof"] is False
+    assert res["matched"] is False
+    assert res["timed_out"] is True
 
 
 def test_run_responde_al_prompt_de_password_una_sola_vez(telnet_factory):
@@ -163,6 +202,22 @@ def test_run_many_encadena_y_para_al_primer_timeout(telnet_factory):
     assert res[0]["timed_out"] is False
     assert res[1]["timed_out"] is True
     assert "tres" not in srv.lines, "siguió tras el timeout"
+
+
+def test_run_many_para_si_no_se_cumple_expect(telnet_factory):
+    def on_line(line):
+        return b"RESPUESTA UNO\r\nPC1> " if line == "uno" else b"PC1> "
+
+    srv = telnet_factory(on_connect=BANNER, on_line=on_line)
+    with _open(srv) as con:
+        assert con.wait_ready(timeout=5)["ready"] is True
+        res = con.run_many(["uno", "dos"], expect="LISTO", timeout=1, idle=0.01)
+
+    assert [r["cmd"] for r in res] == ["uno"]
+    assert res[0]["ok"] is False
+    assert res[0]["eof"] is False
+    assert res[0]["matched"] is False
+    assert "dos" not in srv.lines, "siguió tras no cumplir expect"
 
 
 def test_shell_es_alias_de_run(telnet_factory):

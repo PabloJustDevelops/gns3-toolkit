@@ -38,6 +38,24 @@ def test_node_file_read_devuelve_el_texto(fake_api):
     assert node_file_read(Client(fake_api.url), "p1", "n1", "startup.vpc") == CONTENIDO
 
 
+def test_node_file_read_codifica_caracteres_reservados(fake_api):
+    path = "/v2/projects/p1/nodes/n1/files/dir/100%25%20%231%3F.txt"
+    fake_api.route("GET", path, 200, CONTENIDO)
+
+    assert node_file_read(Client(fake_api.url), "p1", "n1", "/dir/100% #1?.txt") == CONTENIDO
+    assert fake_api.last("GET", path)
+
+
+def test_node_file_write_codifica_caracteres_reservados(fake_api):
+    path = "/v2/projects/p1/nodes/n1/files/dir/100%25%20%231%3F.txt"
+    fake_api.route("POST", path, 201, b"")
+
+    res = node_file_write(Client(fake_api.url), "p1", "n1", "/dir/100% #1?.txt", CONTENIDO)
+
+    assert res == {"status": 201, "ok": True, "error": None}
+    assert fake_api.last("POST", path)["body"] == CONTENIDO.encode()
+
+
 def test_node_file_read_quita_la_barra_inicial(fake_api):
     fake_api.route("GET", "/v2/projects/p1/nodes/n1/files/etc/hosts", 200, "127.0.0.1\n")
     assert node_file_read(Client(fake_api.url), "p1", "n1", "/etc/hosts") == "127.0.0.1\n"
