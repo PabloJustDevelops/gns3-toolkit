@@ -410,8 +410,8 @@ def gns3_status() -> dict:
         return {"running": False, "detail": info}
     compute_error = None
     try:
-        computes = _client().computes()
-    except ConnectionError as e:
+        computes = _client().json_list_or_die("/v2/computes", "computes")
+    except (ConnectionError, RuntimeError) as e:
         computes = []
         compute_error = str(e)
     projs = _projects()
@@ -1661,10 +1661,14 @@ def gns3_links(
     action = action.lower()
 
     if action == "list":
-        links = _api("GET", f"/v2/projects/{pid}/links") or []
+        client = _client()
+        try:
+            links = client.json_list_or_die(f"/v2/projects/{pid}/links", "enlaces")
+        except (ConnectionError, RuntimeError) as e:
+            return {"error": str(e)}
         nodes = {n["node_id"]: n["name"] for n in _nodes(pid)}
         out = []
-        for l in links if isinstance(links, list) else []:
+        for l in links:
             ends = []
             for e in l.get("nodes", []):
                 ends.append({
@@ -1793,9 +1797,13 @@ def gns3_link_edit(
                 for e in link.get("nodes", [])]
 
     if action == "list":
+        try:
+            links = client.json_list_or_die(f"/v2/projects/{pid}/links", "enlaces")
+        except (ConnectionError, RuntimeError) as e:
+            return {"error": str(e)}
         names = {n["node_id"]: n["name"] for n in client.nodes(pid)}
         return [{"link_id": l.get("link_id"), "ends": ends_of(l, names),
-                 "capturing": l.get("capturing")} for l in client.links(pid)]
+                 "capturing": l.get("capturing")} for l in links]
 
     if action == "add":
         if not (node_a and node_b):
@@ -1810,7 +1818,10 @@ def gns3_link_edit(
             bad = _endpoint_error(node, adapter, port, side)
             if bad:
                 return bad
-        links = client.links(pid)
+        try:
+            links = client.json_list_or_die(f"/v2/projects/{pid}/links", "enlaces")
+        except (ConnectionError, RuntimeError) as e:
+            return {"error": str(e)}
         names = {n["node_id"]: n["name"] for n in client.nodes(pid)}
         for l in links:
             ep = {(e.get("node_id"), e.get("adapter_number"), e.get("port_number"))
@@ -1846,7 +1857,10 @@ def gns3_link_edit(
                          {"node": b["name"], "adapter": adapter_b, "port": port_b}]}
 
     if action == "delete":
-        links = client.links(pid)
+        try:
+            links = client.json_list_or_die(f"/v2/projects/{pid}/links", "enlaces")
+        except (ConnectionError, RuntimeError) as e:
+            return {"error": str(e)}
         target = None
         if link_id:
             hits = [l for l in links if l.get("link_id") == link_id] or [
@@ -2283,13 +2297,9 @@ def gns3_snapshots(
 
     if action == "list":
         try:
-            snaps = client.snapshots(pid)
-        except ConnectionError as e:
+            snaps = client.json_list_or_die(f"/v2/projects/{pid}/snapshots", "snapshots")
+        except (ConnectionError, RuntimeError) as e:
             return {"error": str(e)}
-        snaps, list_error = _verified_list(client, f"/v2/projects/{pid}/snapshots",
-                                           snaps, "listar snapshots")
-        if list_error:
-            return list_error
         return [{"name": s.get("name"), "snapshot_id": s.get("snapshot_id"), "created_at": s.get("created_at")}
                 for s in snaps]
     if action == "create":
@@ -2306,15 +2316,10 @@ def gns3_snapshots(
     if action in ("restore", "delete"):
         if not snapshot_id:
             try:
-                snaps = client.snapshots(pid)
-            except ConnectionError as e:
+                snaps = client.json_list_or_die(f"/v2/projects/{pid}/snapshots", "snapshots")
+            except (ConnectionError, RuntimeError) as e:
                 restart_nodes()
                 return with_restart({"error": str(e)})
-            snaps, list_error = _verified_list(client, f"/v2/projects/{pid}/snapshots",
-                                               snaps, "listar snapshots")
-            if list_error:
-                restart_nodes()
-                return with_restart(list_error)
             match = next((s for s in snaps if str(s.get("name", "")).lower() == (name or "").lower()), None)
             if not match:
                 restart_nodes()
@@ -2348,15 +2353,12 @@ def gns3_images(emulator: str = "qemu", compute_id: str = "local") -> Any:
     discos hay antes de crear un nodo; las plantillas ya creadas salen en
     `gns3_templates`. **Lectura**."""
     client = _client()
-    try:
-        imgs = client.images(emulator, compute_id=compute_id)
-    except ConnectionError as e:
-        return {"error": str(e)}
     emulator = emulator.removesuffix("/images")
-    imgs, list_error = _verified_list(client, f"/v2/computes/{compute_id}/{emulator}/images",
-                                      imgs, "listar imágenes")
-    if list_error:
-        return list_error
+    try:
+        imgs = client.json_list_or_die(
+            f"/v2/computes/{compute_id}/{emulator}/images", "imágenes")
+    except (ConnectionError, RuntimeError) as e:
+        return {"error": str(e)}
     return [{"filename": i.get("filename"), "size_mb": round(i.get("filesize", 0) / 1048576, 1), "md5": i.get("md5sum")}
             for i in imgs if not i.get("filename", "").endswith(".md5sum")]
 
@@ -2844,22 +2846,16 @@ def gns3_drawings(
 
     if action == "list":
         try:
-            res = client.drawings(pid)
-        except ConnectionError as e:
+            res = client.json_list_or_die(f"/v2/projects/{pid}/drawings", "drawings")
+        except (ConnectionError, RuntimeError) as e:
             return {"error": str(e)}
-        res, list_error = _verified_list(client, f"/v2/projects/{pid}/drawings",
-                                         res, "listar drawings")
-        return list_error if list_error else res
+        return res
 
     if action == "clear":
         try:
-            res = client.drawings(pid)
-        except ConnectionError as e:
+            res = client.json_list_or_die(f"/v2/projects/{pid}/drawings", "drawings")
+        except (ConnectionError, RuntimeError) as e:
             return {"error": str(e)}
-        res, list_error = _verified_list(client, f"/v2/projects/{pid}/drawings",
-                                         res, "listar drawings")
-        if list_error:
-            return list_error
         borrados = 0
         for d in res:
             try:
@@ -3192,9 +3188,7 @@ def gns3_compute(
     client = _client()
     try:
         if action == "list":
-            computes = client.computes()
-            computes, list_error = _verified_list(client, "/v2/computes", computes, "listar computes")
-            return list_error if list_error else computes
+            return client.json_list_or_die("/v2/computes", "computes")
         if action == "info":
             info = client.compute(cid)
             if info:
@@ -3222,7 +3216,7 @@ def gns3_compute(
         else:
             st, res = client.compute_action(cid, emulator, operation, body)
             what = f"invocar {emulator}/{operation}"
-    except ConnectionError as e:
+    except (ConnectionError, RuntimeError) as e:
         return {"error": str(e)}
     ok = st in (200, 201, 204)
     return (res if res is not None else {"ok": True}) if ok else _err_msg(st, res, what)
@@ -3314,10 +3308,7 @@ def gns3_symbols(
     client = _client()
     try:
         if action == "list":
-            syms = client.symbols()
-            syms, list_error = _verified_list(client, "/v2/symbols", syms, "listar símbolos")
-            if list_error:
-                return list_error
+            syms = client.json_list_or_die("/v2/symbols", "símbolos")
             return [
                 {"filename": sym.get("filename"), "symbol_id": sym.get("symbol_id"),
                  "theme": sym.get("theme"), "builtin": sym.get("builtin")}
@@ -3355,7 +3346,7 @@ def gns3_symbols(
         else:
             data = content.encode("utf-8")
         st, res = client.symbol_raw_upload(symbol_id, data)
-    except (ConnectionError, OSError) as e:
+    except (ConnectionError, OSError, RuntimeError) as e:
         return {"error": str(e)}
     if st not in (200, 201, 204):
         return _err_msg(st, res, "subir símbolo")
@@ -3370,12 +3361,9 @@ def gns3_appliances(pattern: Optional[str] = None) -> Any:
     descripción a 300 caracteres."""
     client = _client()
     try:
-        apps = client.appliances()
-    except ConnectionError as e:
+        apps = client.json_list_or_die("/v2/appliances", "appliances")
+    except (ConnectionError, RuntimeError) as e:
         return {"error": str(e)}
-    apps, list_error = _verified_list(client, "/v2/appliances", apps, "listar appliances")
-    if list_error:
-        return list_error
     out = []
     for a in apps:
         if not any(_pat_match(a.get(k), pattern)

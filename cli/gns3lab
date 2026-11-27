@@ -2462,7 +2462,8 @@ def cmd_link(args, conf):
     c.ensure_open(pid)
     if args.action == "list":
         names = {n["node_id"]: n["name"] for n in c.nodes(pid)}
-        for l in c.links(pid):
+        enlaces = c.json_list_or_die(f"/v2/projects/{pid}/links", f"enlaces de {pid[:8]}")
+        for l in enlaces:
             ends = " <-> ".join(
                 f"{names.get(e['node_id'], '?')}:{e['adapter_number']}/{e['port_number']}"
                 for e in l.get("nodes", []))
@@ -2487,7 +2488,8 @@ def cmd_link(args, conf):
     if args.action in ("rm", "edit"):
         if not args.nodes:
             raise SystemExit(f"{args.action} exige el link_id")
-        enlace = _resolve_id(c.links(pid), args.nodes[0], "link_id", "enlace")
+        enlaces = c.json_list_or_die(f"/v2/projects/{pid}/links", f"enlaces de {pid[:8]}")
+        enlace = _resolve_id(enlaces, args.nodes[0], "link_id", "enlace")
         lid = enlace["link_id"]
         if args.action == "rm":
             st, res = c.link_delete(pid, lid)
@@ -2518,7 +2520,8 @@ def cmd_link(args, conf):
     if args.action == "filters":
         if not args.nodes:
             raise SystemExit("filters exige el link_id")
-        enlace = _resolve_id(c.links(pid), args.nodes[0], "link_id", "enlace")
+        enlaces = c.json_list_or_die(f"/v2/projects/{pid}/links", f"enlaces de {pid[:8]}")
+        enlace = _resolve_id(enlaces, args.nodes[0], "link_id", "enlace")
         st, res = _core_call(c.link_available_filters, pid, enlace["link_id"])
         if st != 200:
             print(f"filtros de {enlace['link_id'][:8]} -> [{st}] {_err(res)}",
@@ -3438,7 +3441,8 @@ def _examen_disk(c, preferred: str | None = None, en_uso: set[str] | None = None
     overlay del linked_clone si otro QEMU mantiene el archivo abierto.
     """
     candidatos = []
-    for img in c.qemu_images():
+    imagenes = c.json_list_or_die("/v2/computes/local/qemu/images", "imágenes QEMU")
+    for img in imagenes:
         filename = str(img.get("filename", "")) if isinstance(img, dict) else str(img)
         low = filename.lower()
         if "pfsense" in low and low.endswith(".qcow2") and not low.endswith(".roto-bak"):
@@ -3802,7 +3806,7 @@ def _examen_informe(args, conf, c, name: str) -> int:
         raise SystemExit(err)
     pid = proj["project_id"]
     nodes = c.nodes(pid)
-    links = c.links(pid)
+    links = c.json_list_or_die(f"/v2/projects/{pid}/links", f"enlaces de {pid[:8]}")
     nombres = {n["node_id"]: str(n.get("name") or "?") for n in nodes}
 
     def celda(v) -> str:
@@ -3811,8 +3815,9 @@ def _examen_informe(args, conf, c, name: str) -> int:
     def nid(nodo_id) -> str:
         return "n_" + str(nodo_id).replace("-", "_")
 
+    imagenes_qemu = c.json_list_or_die("/v2/computes/local/qemu/images", "imágenes QEMU")
     imagenes = sorted(
-        str(i.get("filename")) for i in c.qemu_images()
+        str(i.get("filename")) for i in imagenes_qemu
         if isinstance(i, dict) and i.get("filename"))
     try:
         version = str(c.version().get("version") or "?")

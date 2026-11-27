@@ -179,6 +179,13 @@ class Client:
             raise RuntimeError(f"{what}: [{st}] {body}")
         return body
 
+    def json_list_or_die(self, path: str, what: str, **kw) -> list:
+        """Lista JSON estricta: un fallo HTTP o una forma inválida nunca es una lista vacía."""
+        st, body = self.get(path, **kw)
+        if st != 200 or not isinstance(body, list):
+            raise RuntimeError(f"{what}: [{st}] {body}")
+        return body
+
     def alive(self) -> bool:
         try:
             st, body = self.get("/v2/version", timeout=6)
