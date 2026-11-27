@@ -294,3 +294,24 @@ def test_lecturas_concurrentes_usan_el_pool_sin_romperse(fake_api, monkeypatch):
 
     assert not errores
     assert len(fake_api.requests) == 8
+
+
+def test_drop_http_client_no_cierra_el_prestado(monkeypatch):
+    """Hallazgo 6: un reintento no cierra el cliente que otro hilo puede estar usando."""
+    monkeypatch.setattr(server, "_http_clients", {})
+
+    class ClienteVivo:
+        def __init__(self):
+            self.cerrado = False
+
+        def close(self):
+            self.cerrado = True
+
+    cliente = ClienteVivo()
+    key = ("http://127.0.0.1:9", ("u", "p"))
+    server._http_clients[key] = cliente
+
+    server._drop_http_client("http://127.0.0.1:9", ("u", "p"), cliente)
+
+    assert key not in server._http_clients  # retirado del pool bajo lock
+    assert cliente.cerrado is False         # no se cierra el prestado
