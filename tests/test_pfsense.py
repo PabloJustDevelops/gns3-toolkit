@@ -111,9 +111,9 @@ def test_render_config_exige_diccionario():
 @pytest.mark.parametrize(
     ("adapter", "expected"),
     [
-        ("e1000", {"wan": "em0", "lan": "em1"}),
-        ("e1000e", {"wan": "em0", "lan": "em1"}),
-        ("virtio-net-pci", {"wan": "vtnet0", "lan": "vtnet1"}),
+        ("e1000", {"wan": "em0", "lan": "em1", "adapter_type": "e1000"}),
+        ("e1000e", {"wan": "em0", "lan": "em1", "adapter_type": "e1000e"}),
+        ("virtio-net-pci", {"wan": "vtnet0", "lan": "vtnet1", "adapter_type": "virtio-net-pci"}),
     ],
 )
 def test_detect_ifnames_para_adaptadores_soportados(adapter, expected):
@@ -254,21 +254,43 @@ def test_status_aisla_errores_y_los_acumula(monkeypatch, client):
     assert result["errors"] == ["pfctl -sr: pfctl caído"]
 
 
+def test_get_config_conserva_el_xml_crudo_y_run_redacta_la_salida_publica(monkeypatch, client):
+    valor = f"antes-{PASSWORD}-despues"
+    xml = f"<pfsense><system/><desconocido><valor>{valor}</valor></desconocido></pfsense>"
+    monkeypatch.setattr(pfsense.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=xml, stderr="",
+    ))
+
+    doc = client.get_config()
+    resultado_publico = client.run("cat /conf/config.xml")
+
+    assert doc["desconocido"]["valor"] == valor
+    assert resultado_publico["output"] == xml.replace(PASSWORD, "***")
+    assert PASSWORD not in repr(resultado_publico)
+
+
 def test_get_config_parsea_xml_y_propaga_errores(monkeypatch, client):
-    monkeypatch.setattr(client, "run", lambda cmd, timeout=None: {
+    monkeypatch.setattr(client, "_run", lambda cmd, timeout=None: {
         "ok": True, "output": CONFIG_XML, "error": None,
     })
     assert client.get_config()["system"]["hostname"] == "fw"
 
-    monkeypatch.setattr(client, "run", lambda cmd, timeout=None: {
+    monkeypatch.setattr(client, "_run", lambda cmd, timeout=None: {
         "ok": False, "output": "", "error": "sin config.xml",
     })
     assert client.get_config() == {"ok": False, "error": "sin config.xml"}
 
-    monkeypatch.setattr(client, "run", lambda cmd, timeout=None: {
+    monkeypatch.setattr(client, "_run", lambda cmd, timeout=None: {
         "ok": True, "output": "<pfsense>", "error": None,
     })
     assert client.get_config()["ok"] is False
+
+    monkeypatch.setattr(client, "_run", lambda cmd, timeout=None: {
+        "ok": False, "output": "", "error": f"error con {PASSWORD}",
+    })
+    error = client.get_config()
+    assert error["error"] == "error con ***"
+    assert PASSWORD not in repr(error)
 
 
 def test_put_config_hace_backup_escribe_xml_y_recarga(monkeypatch, client):
@@ -404,6 +426,26 @@ def test_assign_propaga_fallo_de_ifconfig(monkeypatch, client):
     assert client.assign({"wan": "em0"}) == {"ok": False, "error": "ifconfig caído"}
 
 
+def test_assign_rechaza_interfaz_usada_por_un_rol_omitido(monkeypatch, client):
+    doc = _doc()
+    doc["interfaces"]["opt1"] = {"if": "em2"}
+    escrituras = []
+    monkeypatch.setattr(client, "run", lambda cmd, timeout=None: {
+        "ok": True, "output": IFCONFIG_OUTPUT, "error": None,
+    })
+    monkeypatch.setattr(client, "get_config", lambda: doc)
+    monkeypatch.setattr(client, "put_config", lambda documento: (
+        escrituras.append(documento) or {"ok": True}
+    ))
+
+    result = client.assign({"wan": "em2"})
+
+    assert result["ok"] is False
+    assert "em2" in result["detail"]
+    assert "opt1" in result["detail"]
+    assert escrituras == []
+
+
 def test_assign_actualiza_roles_y_elimina_opt1(monkeypatch, client):
     doc = _doc()
     doc["interfaces"]["opt1"] = {"if": "em2"}
@@ -421,16 +463,60 @@ def test_assign_actualiza_roles_y_elimina_opt1(monkeypatch, client):
     assert escrituras == [(doc, True)]
 
 
-def test_set_ip_normaliza_mascara_y_gateway(monkeypatch, client):
+def test_set_ip_normaliza_mascara_y_crea_gateway_nombrado(monkeypatch, client):
     doc = _doc()
     _captura_guardado(monkeypatch, client, doc)
 
-    result = client.set_ip("em1", "192.168.10.2", "24", "192.168.10.254")
+    result = client.set_ip("em0", "192.0.2.2", "24", "192.0.2.254")
 
     assert result["ok"] is True
-    assert doc["interfaces"]["lan"]["ipaddr"] == "192.168.10.2"
-    assert doc["interfaces"]["lan"]["subnet"] == "255.255.255.0"
-    assert doc["interfaces"]["lan"]["gateway"] == "192.168.10.254"
+    assert doc["interfaces"]["wan"]["ipaddr"] == "192.0.2.2"
+    assert doc["interfaces"]["wan"]["subnet"] == "24"
+    assert doc["interfaces"]["wan"]["gateway"] == "WANGW"
+    assert doc["gateways"]["defaultgw4"] == "WANGW"
+    assert doc["gateways"]["gateway_item"] == {
+        "interface": "wan", "gateway": "192.0.2.254", "ipprotocol": "inet",
+        "name": "WANGW", "descr": "", "weight": "", "gw_down_kill_states": "",
+    }
+    root = ET.fromstring(pfsense.render_config(doc))
+    assert root.findtext("interfaces/wan/gateway") == "WANGW"
+    assert root.findtext("gateways/gateway_item/gateway") == "192.0.2.254"
+    assert pfsense.parse_config(pfsense.render_config(doc))["gateways"] == doc["gateways"]
+
+
+def test_set_ip_conserva_gateway_existente_con_otro_nombre(monkeypatch, client):
+    doc = _doc()
+    existente = {"name": "UPSTREAM", "interface": "wan", "gateway": "192.0.2.254"}
+    doc["gateways"] = {"defaultgw4": "UPSTREAM", "gateway_item": existente}
+    _captura_guardado(monkeypatch, client, doc)
+
+    assert client.set_ip("em0", "192.0.2.2", "24", "192.0.2.254")["ok"] is True
+
+    assert doc["gateways"]["gateway_item"][0] == existente
+    assert [item["name"] for item in doc["gateways"]["gateway_item"]] == ["UPSTREAM", "WANGW"]
+
+
+def test_set_ip_en_lan_no_mueve_la_ruta_por_defecto(monkeypatch, client):
+    doc = _doc()
+    doc["gateways"] = {"defaultgw4": "WANGW"}
+    _captura_guardado(monkeypatch, client, doc)
+
+    assert client.set_ip("em1", "192.168.10.2", "24", "192.168.10.254")["ok"] is True
+
+    assert doc["interfaces"]["lan"]["gateway"] == "LANGW"
+    assert doc["gateways"]["defaultgw4"] == "WANGW"
+
+
+@pytest.mark.parametrize("mask", ["24", "255.255.255.0"])
+def test_set_ip_guarda_subnet_como_cidr(monkeypatch, client, mask):
+    doc = _doc()
+    _captura_guardado(monkeypatch, client, doc)
+
+    result = client.set_ip("em1", "192.168.10.2", mask)
+
+    assert result["ok"] is True
+    assert doc["interfaces"]["lan"]["subnet"] == "24"
+    assert ET.fromstring(pfsense.render_config(doc)).findtext("interfaces/lan/subnet") == "24"
 
 
 @pytest.mark.parametrize(
@@ -481,6 +567,50 @@ def test_dhcp_nombra_interfaz_logica_inexistente(monkeypatch, client):
     assert "em9" in result["detail"]
 
 
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("192.168.11.100", "192.168.11.200"),
+        ("192.168.10.100", "192.168.11.200"),
+    ],
+)
+def test_dhcp_rechaza_rango_fuera_de_la_red_sin_escribir(
+    monkeypatch, client, start, end,
+):
+    doc = _doc()
+    escrituras = []
+    monkeypatch.setattr(client, "get_config", lambda: doc)
+    monkeypatch.setattr(client, "put_config", lambda documento: (
+        escrituras.append(documento) or {"ok": True}
+    ))
+
+    result = client.dhcp("em1", start, end)
+
+    assert result["ok"] is False
+    assert "192.168.10.0/24" in result["detail"]
+    assert escrituras == []
+
+
+@pytest.mark.parametrize(
+    ("ifname", "interface"),
+    [
+        ("em1", {"if": "em1", "ipaddr": "dhcp", "subnet": ""}),
+        ("lan", "valor-no-diccionario"),
+    ],
+)
+def test_dhcp_rechaza_interfaz_sin_red_ipv4_estatica(
+    monkeypatch, client, ifname, interface,
+):
+    doc = {"interfaces": {"lan": interface}}
+    monkeypatch.setattr(client, "get_config", lambda: doc)
+    monkeypatch.setattr(client, "put_config", lambda *args, **kwargs: pytest.fail("no debe escribir"))
+
+    result = client.dhcp(ifname, "192.168.10.100", "192.168.10.200")
+
+    assert result["ok"] is False
+    assert "no se puede determinar la red IPv4" in result["detail"]
+
+
 def test_rule_inserta_antes_del_reject_existente(monkeypatch, client):
     doc = _doc()
     _captura_guardado(monkeypatch, client, doc)
@@ -508,15 +638,57 @@ def test_rule_crea_seccion_filter_sin_reglas(monkeypatch, client):
     assert doc["filter"]["rule"][0]["type"] == "pass"
 
 
+def test_rule_acepta_filter_vacio_parseado(monkeypatch, client):
+    doc = pfsense.parse_config(
+        "<pfsense><interfaces><lan><if>em1</if></lan></interfaces><filter/></pfsense>"
+    )
+    _captura_guardado(monkeypatch, client, doc)
+
+    result = client.rule()
+
+    assert result["ok"] is True
+    assert doc["filter"]["rule"][0]["type"] == "pass"
+    assert ET.fromstring(pfsense.render_config(doc)).find("filter/rule") is not None
+
+
+def test_rule_acepta_protocolo_sin_puerto_y_normaliza_minusculas(monkeypatch, client):
+    doc = {"interfaces": {"lan": {"if": "em1"}}}
+    _captura_guardado(monkeypatch, client, doc)
+
+    assert client.rule(proto="ICMP")["ok"] is True
+    assert doc["filter"]["rule"][0]["protocol"] == "icmp"
+
+
 @pytest.mark.parametrize(
     ("kwargs", "mensaje"),
     [({"action": "drop"}, "acción"), ({"proto": "any", "port": 80}, "port"),
-     ({"proto": "tcp", "port": 65536}, "port")],
+     ({"proto": "tcp", "port": 65536}, "port"), ({"proto": "nonsense"}, "protocolo")],
 )
-def test_rule_rechaza_accion_o_puerto_invalidos(client, kwargs, mensaje):
+def test_rule_rechaza_accion_puerto_o_protocolo_invalidos(client, kwargs, mensaje):
     result = client.rule(**kwargs)
     assert result["ok"] is False
     assert mensaje in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("src", "dst", "rechazado"),
+    [
+        ("no-es-ip", "any", "no-es-ip"),
+        ("any", "999.999.999.999/99", "999.999.999.999/99"),
+        ("any", "192.0.2.1/24", "192.0.2.1/24"),
+        ("2001:db8::1", "any", "2001:db8::1"),
+        ("", "any", "''"),
+    ],
+)
+def test_rule_rechaza_extremos_ipv4_o_cidr_invalidos_sin_leer_config(
+    monkeypatch, client, src, dst, rechazado,
+):
+    monkeypatch.setattr(client, "_run", lambda *args, **kwargs: pytest.fail("no debe leer config"))
+
+    result = client.rule(src=src, dst=dst)
+
+    assert result["ok"] is False
+    assert rechazado in result["error"]
 
 
 def test_rule_rechaza_interfaz_ausente_o_filter_no_diccionario(monkeypatch, client):
@@ -530,8 +702,26 @@ def test_rule_rechaza_interfaz_ausente_o_filter_no_diccionario(monkeypatch, clie
     assert "filter" in client.rule()["detail"]
 
 
+def test_nat_ida_y_vuelta_automatico_a_manual_no_deja_regla_sin_target(
+    monkeypatch, client,
+):
+    doc = {"interfaces": {"wan": {"if": "em0"}}}
+    _captura_guardado(monkeypatch, client, doc)
+
+    assert client.nat("wan")["ok"] is True
+    assert doc["nat"]["outbound"] == {"mode": "automatic"}
+
+    assert client.nat("wan", target="203.0.113.1")["ok"] is True
+    manual = doc["nat"]["outbound"]
+    assert manual["mode"] == "manual"
+    assert len(manual["rule"]) == 1
+    assert manual["rule"][0]["target"] == "203.0.113.1"
+    reparado = pfsense.parse_config(pfsense.render_config(doc))
+    assert reparado["nat"]["outbound"]["rule"]["target"] == "203.0.113.1"
+
+
 @pytest.mark.parametrize("target", [None, "203.0.113.1"])
-def test_nat_inserta_antes_del_reject_y_fija_modo(monkeypatch, client, target):
+def test_nat_fija_modo_y_solo_inserta_regla_manual(monkeypatch, client, target):
     doc = _doc()
     _captura_guardado(monkeypatch, client, doc)
 
@@ -539,10 +729,13 @@ def test_nat_inserta_antes_del_reject_y_fija_modo(monkeypatch, client, target):
 
     assert result["ok"] is True
     outbound = doc["nat"]["outbound"]
-    assert outbound["mode"] == ("manual" if target else "automatic")
-    assert outbound["rule"][0]["interface"] == "wan"
-    assert outbound["rule"][1]["type"] == "reject"
-    assert outbound["rule"][0].get("target") == target
+    assert outbound["mode"] == ("manual" if target is not None else "automatic")
+    if target is None:
+        assert outbound["rule"] == {"type": "reject", "interface": "wan"}
+    else:
+        assert outbound["rule"][0]["interface"] == "wan"
+        assert outbound["rule"][0]["target"] == target
+        assert outbound["rule"][1]["type"] == "reject"
 
 
 def test_nat_rechaza_target_interfaz_u_outbound_invalidos(monkeypatch, client):

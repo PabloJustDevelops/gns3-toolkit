@@ -177,13 +177,13 @@ def test_set_ip_reemplaza_interfaz_logica_no_diccionario(monkeypatch, client):
 
     assert result["ok"] is True
     assert doc["interfaces"]["lan"] == {
-        "ipaddr": "192.168.10.2", "subnet": "255.255.255.0",
+        "ipaddr": "192.168.10.2", "subnet": "24",
     }
 
 
 @pytest.mark.parametrize("dhcpd", [None, {"lan": "valor-no-diccionario"}])
 def test_dhcp_crea_dhcpd_o_valor_no_diccionario(monkeypatch, client, dhcpd):
-    doc = {"interfaces": {"lan": {"if": "em1"}}}
+    doc = {"interfaces": {"lan": {"if": "em1", "ipaddr": "192.168.10.1", "subnet": "24"}}}
     if dhcpd is not None:
         doc["dhcpd"] = dhcpd
     _captura_guardado(monkeypatch, client, doc)
@@ -206,8 +206,7 @@ def test_nat_crea_seccion_si_falta_o_no_es_diccionario(monkeypatch, client, nat)
     result = client.nat("wan")
 
     assert result["ok"] is True
-    assert doc["nat"]["outbound"]["mode"] == "automatic"
-    assert doc["nat"]["outbound"]["rule"][0]["interface"] == "wan"
+    assert doc["nat"]["outbound"] == {"mode": "automatic"}
 
 
 @pytest.mark.parametrize("system", [None, "valor-no-diccionario"])
