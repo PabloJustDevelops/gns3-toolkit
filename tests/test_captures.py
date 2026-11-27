@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import builtins
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,70 @@ def test_capture_phase_no_sobrescribe_fases_con_saltos_de_linea(monkeypatch, tmp
 
     assert segundo["path"] == str(tmp_path / f"02-{fase}.png")
     assert Path(primero["path"]).read_bytes() == b"primero"
+
+
+def test_capture_phase_reserva_el_nombre_antes_de_guardar(monkeypatch, tmp_path):
+    """Una lectura obsoleta del número no debe sobrescribir otra captura."""
+    (tmp_path / "01-fase.png").write_bytes(b"primero")
+    siguiente_original = captures._siguiente_numero
+    lecturas = []
+
+    def numero_obsoleto(directorio):
+        if not lecturas:
+            lecturas.append(1)
+            return 1
+        return siguiente_original(directorio)
+
+    monkeypatch.setattr(captures, "_siguiente_numero", numero_obsoleto)
+    monkeypatch.setattr(captures, "ocr", lambda path, psm=4: "texto")
+    monkeypatch.setattr(captures.shutil, "which", lambda nombre: "/usr/bin/tesseract")
+
+    resultado = captures.capture_phase(MonitorFalso(), "fase", str(tmp_path))
+
+    assert resultado["ok"] is True
+    assert resultado["path"] == str(tmp_path / "02-fase.png")
+    assert (tmp_path / "01-fase.png").read_bytes() == b"primero"
+
+
+def test_capturas_concurrentes_no_comparten_fichero(monkeypatch, tmp_path):
+    """Dos hilos que calculan el mismo número deben reservar nombres distintos."""
+    barrera = threading.Barrier(2, timeout=10)
+    resultados = []
+
+    class MonitorSincronizado(MonitorFalso):
+        def screendump(self, dest=None, scale=0):
+            # Ambos hilos ya han calculado el número antes de llegar aquí.
+            barrera.wait()
+            return super().screendump(dest, scale)
+
+    def capturar():
+        resultados.append(captures.capture_phase(
+            MonitorSincronizado(), "fase", str(tmp_path)))
+
+    monkeypatch.setattr(captures, "ocr", lambda path, psm=4: "texto")
+    monkeypatch.setattr(captures.shutil, "which", lambda nombre: "/usr/bin/tesseract")
+    hilos = [threading.Thread(target=capturar) for _ in range(2)]
+    for hilo in hilos:
+        hilo.start()
+    for hilo in hilos:
+        hilo.join(timeout=10)
+
+    assert all(not hilo.is_alive() for hilo in hilos)
+    assert all(resultado["ok"] is True for resultado in resultados)
+    rutas = sorted(Path(resultado["path"]).name for resultado in resultados)
+    assert rutas == ["01-fase.png", "02-fase.png"]
+
+
+def test_capture_phase_agota_reservas_sin_sobrescribir(monkeypatch, tmp_path):
+    (tmp_path / "01-fase.png").write_bytes(b"primero")
+    monkeypatch.setattr(captures, "_siguiente_numero", lambda directorio: 1)
+
+    resultado = captures.capture_phase(MonitorFalso(), "fase", str(tmp_path))
+
+    assert resultado["ok"] is False
+    assert resultado["path"] is None
+    assert "reservar" in resultado["error"]
+    assert (tmp_path / "01-fase.png").read_bytes() == b"primero"
 
 
 def test_capture_phase_sin_pillow_conserva_ppm_y_lo_reporta(monkeypatch, tmp_path):

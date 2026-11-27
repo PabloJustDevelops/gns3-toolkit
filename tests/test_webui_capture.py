@@ -24,6 +24,12 @@ sys.modules[SPEC.name] = cli
 LOADER.exec_module(cli)
 
 
+class FakeResponse:
+    def __init__(self, status=200, url=""):
+        self.status = status
+        self.url = url
+
+
 class FakeLocator:
     def __init__(self, page, selector):
         self.page = page
@@ -47,17 +53,25 @@ class FakeLocator:
 class FakePage:
     def __init__(self, screenshot_error: str | None = None, *,
                  login_rejected: bool = False, login_error: str | None = None,
-                 login_url: str | None = None):
+                 login_url: str | None = None, statuses=None, redirects=None,
+                 sin_respuesta=()):
         self.calls: list[tuple] = []
         self.screenshot_error = screenshot_error
         self.login_rejected = login_rejected
         self.login_error = login_error
         self.login_url = login_url
+        self.statuses = statuses or {}
+        self.redirects = redirects or {}
+        self.sin_respuesta = set(sin_respuesta)
         self.url = ""
 
     def goto(self, url, **kwargs):
-        self.url = url
         self.calls.append(("goto", url, kwargs))
+        if url in self.sin_respuesta:
+            self.url = url
+            return None
+        self.url = self.redirects.get(url, url)
+        return FakeResponse(self.statuses.get(url, 200), self.url)
 
     def fill(self, selector, value):
         self.calls.append(("fill", selector, value))
@@ -296,6 +310,85 @@ def test_capture_acepta_paginas_y_sanitiza_el_nombre(fake_playwright, tmp_path):
     assert result["ok"] is True
     assert Path(result["captures"][0]["path"]).name == "01-reglas-LAN.png"
     assert page.calls[-2][1] == "https://192.0.2.1:443/firewall_rules.php?view=lan"
+
+
+@pytest.mark.parametrize("estado", [404, 500])
+def test_capture_no_cuenta_pagina_con_error_http(fake_playwright, tmp_path, estado):
+    url = "https://192.0.2.1:443/interfaces.php"
+    page = FakePage(statuses={url: estado})
+    playwright, _ = fake_playwright(page)
+    capture = webui.WebUICapture("192.0.2.1", "admin", "clave-ficticia", str(tmp_path))
+
+    result = capture.capture()
+
+    assert result["ok"] is False
+    assert result["captures"] == []
+    assert result["fallback"] == "consola"
+    assert f"HTTP {estado}" in result["reason"]
+    assert url in result["reason"]
+    assert "clave-ficticia" not in result["reason"]
+    assert not any(call[0] == "screenshot" for call in page.calls)
+    assert playwright.chromium.context.closed is True
+    assert playwright.stopped is True
+
+
+def test_capture_no_cuenta_redirect_al_login(fake_playwright, tmp_path):
+    url = "https://192.0.2.1:443/interfaces.php"
+    page = FakePage(redirects={url: "https://192.0.2.1:443/login.php"})
+    playwright, _ = fake_playwright(page)
+    capture = webui.WebUICapture("192.0.2.1", "admin", "clave-ficticia", str(tmp_path))
+
+    result = capture.capture()
+
+    assert result["ok"] is False
+    assert result["captures"] == []
+    assert "login" in result["reason"]
+    assert not any(call[0] == "screenshot" for call in page.calls)
+    assert playwright.chromium.context.closed is True
+
+
+def test_capture_no_cuenta_url_inesperada(fake_playwright, tmp_path):
+    url = "https://192.0.2.1:443/interfaces.php"
+    page = FakePage(redirects={url: "https://192.0.2.1:443/error.php"})
+    fake_playwright(page)
+    capture = webui.WebUICapture("192.0.2.1", "admin", "ficticia", str(tmp_path))
+
+    result = capture.capture()
+
+    assert result["ok"] is False
+    assert "error.php" in result["reason"]
+    assert not any(call[0] == "screenshot" for call in page.calls)
+
+
+def test_capture_sin_respuesta_no_cuenta_la_navegacion(fake_playwright, tmp_path):
+    url = "https://192.0.2.1:443/interfaces.php"
+    page = FakePage(sin_respuesta=[url])
+    fake_playwright(page)
+    capture = webui.WebUICapture("192.0.2.1", "admin", "ficticia", str(tmp_path))
+
+    result = capture.capture()
+
+    assert result["ok"] is False
+    assert "sin respuesta" in result["reason"]
+    assert not any(call[0] == "screenshot" for call in page.calls)
+
+
+def test_capture_con_error_en_segunda_pagina_conserva_solo_la_valida(
+    fake_playwright, tmp_path,
+):
+    url = "https://192.0.2.1:443/firewall_rules.php"
+    page = FakePage(statuses={url: 503})
+    fake_playwright(page)
+    capture = webui.WebUICapture("192.0.2.1", "admin", "ficticia", str(tmp_path))
+
+    result = capture.capture()
+
+    assert result["ok"] is False
+    assert [Path(item["path"]).name for item in result["captures"]] == [
+        "01-interfaces.png",
+    ]
+    assert Path(result["captures"][0]["path"]).is_file()
+    assert "HTTP 503" in result["reason"]
 
 
 def test_capture_no_disponible_devuelve_fallback_sin_lanzar_navegador(
