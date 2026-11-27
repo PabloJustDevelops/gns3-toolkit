@@ -2924,8 +2924,10 @@ def cmd_doctor(args, conf):
     """Chequeo integral antes de dar un lab por bueno."""
     s = Server(args.server, conf)
     problemas: list[str] = []
+    warnings: list[str] = []
     lineas: list[str] = []
-    report: dict = {"server": {"name": s.name, "url": s.url}, "problems": problemas}
+    report: dict = {"server": {"name": s.name, "url": s.url},
+                    "problems": problemas, "warnings": warnings}
 
     def say(texto: str = "") -> None:
         lineas.append(texto)
@@ -3014,6 +3016,10 @@ def cmd_doctor(args, conf):
                                 "status": n.get("status"), "console": cons,
                                 "console_type": n.get("console_type"),
                                 "hda_disk_image": hda or None})
+        warning = core.pfsense_console_warning(n, target["name"])
+        if warning:
+            warnings.append(warning)
+            say(f"      AVISO: {warning}")
         if hda:
             discos.setdefault(hda, []).append(n["name"])
         if n.get("status") != "started":
@@ -3039,7 +3045,7 @@ def cmd_doctor(args, conf):
         report["ok"] = False
         _emit_doctor(report, lineas, args.json)
         return 1
-    say("    sin hallazgos")
+    say("    sin problemas" + (f"; {len(warnings)} aviso(s)" if warnings else ""))
     report["ok"] = True
     _emit_doctor(report, lineas, args.json)
     return 0
@@ -3487,6 +3493,9 @@ def _examen_source(args, conf):
 
 
 def _examen_setup(args, conf, c, name: str) -> int:
+    console_type = getattr(args, "console_type", "telnet")
+    if console_type not in ("telnet", "vnc", "spice"):
+        raise SystemExit(f"console_type no válido: {console_type!r}")
     # La existencia se comprueba antes de crear nada: si está, no se toca.
     previo = [p for p in c.projects() if p.get("name") == name]
     if previo:
@@ -3560,15 +3569,17 @@ def _examen_setup(args, conf, c, name: str) -> int:
         "qemu_path": _examen_qemu_path(c, tpl_fw),
     })
     props_fw.pop("mac_address", None)   # "" rompe el schema (minLength 1)
+    props_fw.pop("console_type", None)  # es un campo del nodo, no de properties
     st, res = c.post(f"/v2/projects/{pid}/nodes", {
         "name": "PF1", "compute_id": "local", "node_type": "qemu",
         "x": -250, "y": -120, "symbol": tpl_fw.get("symbol"),
-        "properties": props_fw,
+        "console_type": console_type, "properties": props_fw,
     })
     if st not in (200, 201) or not isinstance(res, dict) or not res.get("node_id"):
         raise SystemExit(f"no se pudo crear PF1: [{st}] {_err(res)}")
     pf = res["node_id"]
-    print(f"  + PF1 (qemu, {pf[:8]}) disco={disco}, linked_clone=True")
+    print(f"  + PF1 (qemu, {pf[:8]}) disco={disco}, linked_clone=True, "
+          f"console_type={console_type}")
     nat = add("nat", "NAT1", -560, -120)
     sw = add("switch", "SW1", 40, -120)
     vpcs = [add("vpcs", "PC1", 300, -230), add("vpcs", "PC2", 300, -30)]
@@ -4324,6 +4335,10 @@ def cmd_verify(args, conf) -> int:
         for check in result["checks"]:
             print(f"  [{'OK ' if check['ok'] else 'NO '}] "
                   f"{check['name']}: {check['detail']}")
+        if result.get("warnings"):
+            print("\nAVISOS:")
+            for warning in result["warnings"]:
+                print(f"  - {warning}")
         if result["problems"]:
             print("\nPROBLEMAS:")
             for problem in result["problems"]:
@@ -4999,6 +5014,8 @@ def main() -> int:
     p.add_argument("--name", help=f"nombre del proyecto (por defecto '{EXAMEN_NAME}')")
     p.add_argument("--from", dest="from_project",
                    help="setup: proyecto local del que tomar disco y adaptador")
+    p.add_argument("--console-type", choices=("telnet", "vnc", "spice"), default="telnet",
+                   help="setup: consola de pfSense (por defecto telnet)")
     p.add_argument("--webui", action="store_true",
                    help="capturas: evidencia visual de pfSense con navegador headless")
     p.add_argument("--host", help="capturas --webui: host WebUI (por defecto PFSENSE_HOST)")

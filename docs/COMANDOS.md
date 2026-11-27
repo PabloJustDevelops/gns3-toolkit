@@ -134,13 +134,15 @@ gns3lab version-v1
 ### `examen`
 
 ```text
-usage: gns3lab examen [-h] [--name NAME] [--from FROM_PROJECT] [--json]
+usage: gns3lab examen [-h] [--name NAME] [--from FROM_PROJECT]
+                      [--console-type {telnet,vnc,spice}] [--json]
                       [--dest DEST] [--idle IDLE] [--yes]
                       {setup,verify,reset,informe}
 ```
 
 - `setup`: monta el kit (pfSense, switch, NAT y clientes) desde plantillas e imágenes del
-  servidor. `--from` toma disco y adaptador de un proyecto local.
+  servidor. `--from` toma disco y adaptador de un proyecto local. PF1 usa telnet por defecto;
+  `--console-type vnc|spice` es la excepción para instalación inicial.
 - `verify`: comprueba nodos, enlaces y conectividad. `--idle` ajusta la quietud del ping.
 - `reset`: reinicia el kit; exige `--yes`.
 - `informe`: escribe un Markdown en `~/GNS3/informes/` con topología, estado y comprobaciones.

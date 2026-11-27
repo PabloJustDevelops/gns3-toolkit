@@ -1106,7 +1106,7 @@ def gns3_verify(component: str, project: Optional[str] = None,
     """Úsala para comprobar si qemu, pf o vpcs está listo antes de dar el laboratorio por bueno.
     **Lectura**: no abre proyectos, no arranca nodos y no escribe en pfSense.
 
-    Devuelve ``{component, project, ok, checks, problems}``. Para ``qemu`` comprueba estado,
+    Devuelve ``{component, project, ok, checks, problems, warnings}``. Para ``qemu`` comprueba estado,
     ``adapter_type``, el puerto HMP en ``/proc`` y ``info status``; para ``pf`` deduce
     interfaces sin SSH, lee ``/conf/config.xml`` y valida secciones, reglas, NAT y DHCP;
     para ``vpcs`` abre la consola telnet y exige ``show ip`` con IP y gateway coherentes.
@@ -1117,7 +1117,7 @@ def gns3_verify(component: str, project: Optional[str] = None,
         return core.verify_component(client, needle, component, node=node)
     except (ConnectionError, RuntimeError) as e:
         return {"component": component, "project": needle or "", "ok": False,
-                "checks": [], "problems": [str(e)]}
+                "checks": [], "problems": [str(e)], "warnings": []}
 
 
 def _lab_actual_for_action(labspec, topology: Optional[str | dict],
@@ -4100,6 +4100,10 @@ def _informe_doctor(status: Any, project: Optional[dict], selection_error: Optio
             disk = props.get("hda_disk_image") if isinstance(props, dict) else None
             if disk:
                 disks.setdefault(str(disk), []).append(name)
+            warning = core.pfsense_console_warning(
+                node, (project or {}).get("name") or (project or {}).get("project_id") or "")
+            if warning:
+                findings.append(f"AVISO: {warning}")
             if node.get("node_type") == "qemu" and node.get("status") == "started":
                 try:
                     monitor = core.find_monitor_port(node.get("node_id"), disk)

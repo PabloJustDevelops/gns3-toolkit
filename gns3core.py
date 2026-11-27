@@ -23,6 +23,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -1263,10 +1264,11 @@ def _vcheck(name: str, ok: bool, detail: str) -> dict:
     return {"name": name, "ok": bool(ok), "detail": str(detail)}
 
 
-def _vresult(component: str, project: str, checks: list[dict]) -> dict:
+def _vresult(component: str, project: str, checks: list[dict],
+             warnings: Optional[list[str]] = None) -> dict:
     problems = [f"{c['name']}: {c['detail']}" for c in checks if not c["ok"]]
     return {"component": component, "project": project, "ok": not problems,
-            "checks": checks, "problems": problems}
+            "checks": checks, "problems": problems, "warnings": list(warnings or [])}
 
 
 def _vlist(value: Any) -> list:
@@ -1282,6 +1284,20 @@ def _is_pfsense_node(node: dict) -> bool:
     props = node.get("properties") or {}
     text = f"{node.get('name', '')} {props.get('hda_disk_image', '')}".lower()
     return "pfsense" in text
+
+
+def pfsense_console_warning(node: dict, project: str) -> Optional[str]:
+    """Aviso accionable para pfSense QEMU con VNC/SPICE; nunca modifica el nodo."""
+    if str(node.get("node_type") or "").lower() != "qemu" or not _is_pfsense_node(node):
+        return None
+    console_type = str(node.get("console_type") or "").lower()
+    if console_type not in ("vnc", "spice"):
+        return None
+    name = str(node.get("name") or node.get("node_id") or "?")
+    command = (f"gns3lab node props {shlex.quote(name)} "
+               f"--set console_type=telnet -p {shlex.quote(str(project))}")
+    return (f"{name}: consola {console_type}; puede usar telnet. "
+            f"Cámbiala con el nodo parado: {command}")
 
 
 def _select_verify_node(nodes: list[dict], component: str,
@@ -1513,7 +1529,8 @@ def verify_component(client: Client, project: Optional[str], component: str,
     """Comprueba que un componente del laboratorio está listo, sin cambiar nada.
 
     Solo lectura: no abre proyectos, no arranca nodos y no escribe en pfSense.
-    Devuelve ``{component, project, ok, checks, problems}``.
+    Devuelve ``{component, project, ok, checks, problems, warnings}``; los avisos
+    no convierten un resultado verde en rojo.
     """
     component = str(component or "").lower()
     if component not in VERIFY_COMPONENTS:
@@ -1551,4 +1568,5 @@ def verify_component(client: Client, project: Optional[str], component: str,
         checks.extend(_verify_pf_checks(target))
     else:
         checks.extend(_verify_vpcs_checks(client, pid, target))
-    return _vresult(component, name, checks)
+    warning = pfsense_console_warning(target, name)
+    return _vresult(component, name, checks, [warning] if warning else [])
