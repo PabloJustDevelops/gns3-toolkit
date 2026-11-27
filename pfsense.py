@@ -110,6 +110,35 @@ def _as_text(value: str | bytes | None) -> str:
     return str(value)
 
 
+def _clean_ssh_warnings(text: str) -> str:
+    """Elimina solo los avisos conocidos de OpenSSH de una salida correcta."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if not re.search(r"post-quantum key exchange|known hosts", line, re.IGNORECASE)
+    )
+
+
+def _config_contains(expected: Any, actual: Any) -> bool:
+    """Comprueba que la configuración leída contiene lo solicitado, sin ruido añadido."""
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and _config_contains(value, actual[key])
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return False
+        index = 0
+        for value in expected:
+            while index < len(actual) and not _config_contains(value, actual[index]):
+                index += 1
+            if index == len(actual):
+                return False
+            index += 1
+        return True
+    return expected == actual
+
+
 def _normalize_mask(mask: str) -> str:
     """Acepta máscara punteada o prefijo CIDR y devuelve la forma de config.xml."""
     text = str(mask).strip()
@@ -225,7 +254,8 @@ class PfSense:
             detail = f"timeout tras {effective_timeout:g}s"
             stderr = self._redact(exc.stderr).strip()
             return {"cmd": self._redact(cmd), "output": self._redact(exc.stdout).rstrip("\n"),
-                    "ok": False, "error": f"{detail}: {stderr}" if stderr else detail}
+                    "ok": False, "error": f"{detail}: {stderr}" if stderr else detail,
+                    "timeout": True}
         except OSError as exc:
             return {"cmd": self._redact(cmd), "output": "", "ok": False,
                     "error": self._redact(str(exc))}
@@ -233,8 +263,11 @@ class PfSense:
         output = self._redact(completed.stdout).rstrip("\n")
         stderr = self._redact(completed.stderr).strip()
         ok = completed.returncode == 0
+        if ok:
+            stderr = _clean_ssh_warnings(stderr)
         error = None if ok else (stderr or f"ssh terminó con código {completed.returncode}")
-        return {"cmd": self._redact(cmd), "output": output, "ok": ok, "error": error}
+        return {"cmd": self._redact(cmd), "output": output, "ok": ok, "error": error,
+                "returncode": completed.returncode, "stderr": stderr}
 
     def status(self) -> dict:
         """Versión, interfaces, reglas y tabla de rutas del firewall."""
@@ -300,10 +333,28 @@ class PfSense:
             if not write["ok"]:
                 return {"ok": False, "backup": backup_path, "detail": write["error"]}
         reload_command = getattr(self, "_reload_command", "/etc/rc.reload_all")
-        reloaded = self.run(reload_command)
-        detail = reloaded["output"] if reloaded["ok"] else reloaded["error"]
-        return {"ok": reloaded["ok"], "backup": backup_path,
-                "detail": detail or "config.xml escrita y recargada"}
+        reloaded = self.run(reload_command, timeout=max(self.timeout, 180))
+        if reloaded["ok"]:
+            detail = "\n".join(
+                part for part in (reloaded.get("output", ""), reloaded.get("stderr", "")) if part
+            )
+            return {"ok": True, "backup": backup_path,
+                    "detail": detail or "config.xml escrita y recargada"}
+
+        reload_error = reloaded["error"]
+        if reloaded.get("timeout") or str(reload_error).startswith("timeout tras "):
+            verified = self.get_config()
+            if verified.get("ok") is False:
+                detail = f"{reload_error}; verificación fallida: {verified['error']}"
+            elif not _config_contains(parse_config(xml), verified):
+                detail = (f"{reload_error}; verificación fallida: config.xml no contiene "
+                          "la configuración solicitada")
+            else:
+                return {"ok": True, "reload": "timeout", "backup": backup_path,
+                        "detail": f"{reload_error}; config.xml verificado con la configuración solicitada"}
+            return {"ok": False, "backup": backup_path, "detail": detail}
+
+        return {"ok": False, "backup": backup_path, "detail": reload_error}
 
     def _load_and_save(self, change: Callable[[dict], None]) -> dict:
         doc = self.get_config()
