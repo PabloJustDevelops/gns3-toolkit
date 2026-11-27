@@ -17,7 +17,7 @@
 - **Reproducir/verificar:**
   ```python
   import pfsense
-  pf = pfsense.PfSense(password="x")
+  pf = pfsense.PfSense(password=os.environ["PFSENSE_PASSWORD"])
   doc = pfsense.parse_config("<pfsense><system/><interfaces><lan><if>em1</if></lan></interfaces><filter/></pfsense>")
   # OJO: con <filter/> vacío cae en hallazgo 5; usa <filter><rule/></filter> o sin <filter>
   doc = pfsense.parse_config("<pfsense><system/><interfaces><lan><if>em1</if></lan></interfaces><filter><rule/></filter></pfsense>")
@@ -127,7 +127,7 @@
 - `docs/PFSENSE-NATIVO.md:55-65` lista `PFSENSE_HOST/PORT/USER/PASSWORD`; `PfSense.from_env` lee esos 4 y `PFSENSE_PORT or "22022"`. **`PFSENSE_TIMEOUT` no se lee** aunque `tests/test_pfsense.py` lo limpia en `limpia_entorno_pfsense`. `PfSense.timeout=20`. **Observación**.
 
 ## Verificación de reproducibilidad
-- Todos los snippets usan `.venv/bin/python` en este worktree, `import pfsense`, `PfSense(password="x")`, `get_config=lambda: doc`, `put_config=lambda d, backup=True: {"ok": True}`. No se ha llamado a `PfSense.run` real, no se ha usado `sshpass`, no se ha contactado un pfSense.
+- Todos los snippets usan `.venv/bin/python` en este worktree, `import pfsense`, `PfSense(password=os.environ["PFSENSE_PASSWORD"])`, `get_config=lambda: doc`, `put_config=lambda d, backup=True: {"ok": True}`. No se ha llamado a `PfSense.run` real, no se ha usado `sshpass`, no se ha contactado un pfSense.
 - `pfsense.PfSense.run` real requiere `sshpass` + SSH y `PFSENSE_PASSWORD`; no disponible/no probado en esta sesión. Las afirmaciones sobre pfSense aplicando/leyendo `config.xml` se marcan explícitamente **no verificadas contra firewall vivo**.
 - `python -m py_compile pfsense.py` no se ha ejecutado como gate separado; `pytest` y `scripts/verify.py` sí. No se han modificado ficheros del repo excepto este informe.
 
