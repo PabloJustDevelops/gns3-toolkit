@@ -35,7 +35,7 @@ def _put_con_reload(monkeypatch, client, reload_response, effective_doc=DOC):
             return _response()
         raise AssertionError(f"comando inesperado: {cmd}")
 
-    monkeypatch.setattr(client, "run", fake_run)
+    monkeypatch.setattr(client, "_run", fake_run)
     return llamadas
 
 

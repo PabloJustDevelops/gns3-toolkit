@@ -1,4 +1,5 @@
 """Spec declarativo: validación, plan y guardas de escritura de scripts/labspec.py."""
+import json
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import labspec  # noqa: E402  (módulo sin dependencias del servidor)
+import pfsense  # noqa: E402
 
 EJEMPLO = REPO / "examples" / "lab-ejemplo.yaml"
 
@@ -126,6 +128,29 @@ def test_verify_ok_parsea_status_enlaces_y_expect(monkeypatch, capsys):
     salida = capsys.readouterr().out
     assert "pc1" in salida and "sw1" in salida
     assert "RESULTADO: OK" in salida
+
+
+def test_verify_usa_adapter_type_devuelto_por_pf_detect(monkeypatch, capsys):
+    nodo = {"name": "fw", "properties": {"adapter_type": "e1000"}}
+    spec = {
+        "version": 1, "project": "p", "links": [], "expect": {},
+        "nodes": [{"name": "fw", "template": "pfSense", "adapter_type": "e1000"}],
+    }
+
+    def falso(argv, server=None):
+        if argv[0] == "status":
+            return 0, " * p abierto abcd1234\n      fw qemu started telnet:5000\n"
+        if argv[:2] == ["pf", "detect"]:
+            data = {"project": "p", "node": "fw", **pfsense.detect_ifnames(nodo)}
+            return 0, json.dumps({"ok": True, "data": data})
+        if argv[:2] == ["link", "list"]:
+            return 0, ""
+        raise AssertionError(f"orden inesperada: {argv}")
+
+    monkeypatch.setattr(labspec, "capturar", falso)
+
+    assert labspec.verificar(spec, None) == 0
+    assert "adapter_type=e1000" in capsys.readouterr().out
 
 
 def test_verify_detecta_nodo_no_arrancado(monkeypatch, capsys):

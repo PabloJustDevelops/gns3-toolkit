@@ -92,13 +92,14 @@ def render_config(doc: dict) -> str:
 
 
 def detect_ifnames(node: dict) -> dict:
-    """Deduce WAN/LAN del tipo de adaptador QEMU usado por el nodo GNS3."""
+    """Deduce WAN/LAN y devuelve el adaptador QEMU usado por el nodo GNS3."""
     properties = node.get("properties", {}) if isinstance(node, dict) else {}
-    adapter = str(properties.get("adapter_type", "")).lower()
+    adapter_type = str(properties.get("adapter_type", ""))
+    adapter = adapter_type.lower()
     if adapter in ("e1000", "e1000e"):
-        return {"wan": "em0", "lan": "em1"}
+        return {"wan": "em0", "lan": "em1", "adapter_type": adapter_type}
     if adapter.startswith("virtio"):
-        return {"wan": "vtnet0", "lan": "vtnet1"}
+        return {"wan": "vtnet0", "lan": "vtnet1", "adapter_type": adapter_type}
     raise PfSenseError(f"adapter_type no soportado o ausente: {adapter or '(vacío)'}")
 
 
@@ -140,19 +141,17 @@ def _config_contains(expected: Any, actual: Any) -> bool:
 
 
 def _normalize_mask(mask: str) -> str:
-    """Acepta máscara punteada o prefijo CIDR y devuelve la forma de config.xml."""
+    """Acepta máscara punteada o prefijo y devuelve el CIDR usado por config.xml."""
     text = str(mask).strip()
     try:
-        return str(ipaddress.IPv4Address(text))
-    except ipaddress.AddressValueError:
-        pass
-    try:
-        prefix = int(text)
-        if not 0 <= prefix <= 32:
-            raise ValueError
-        return str(ipaddress.IPv4Network(f"0.0.0.0/{prefix}").netmask)
+        return str(ipaddress.IPv4Network(f"0.0.0.0/{text}").prefixlen)
     except ValueError as exc:
         raise PfSenseError(f"máscara IPv4 no válida: {mask}") from exc
+
+
+def _display_mask(mask: str) -> str:
+    """Convierte un prefijo CIDR en la máscara punteada de ``ifconfig``."""
+    return str(ipaddress.IPv4Network(f"0.0.0.0/{_normalize_mask(mask)}").netmask)
 
 
 def _parse_ifconfig(output: str) -> dict[str, dict[str, str]]:
@@ -169,8 +168,9 @@ def _parse_ifconfig(output: str) -> dict[str, dict[str, str]]:
         if current and address:
             ip, mask = address.groups()
             try:
-                mask = (str(ipaddress.IPv4Address(int(mask, 16)))
-                        if mask.lower().startswith("0x") else _normalize_mask(mask))
+                if mask.lower().startswith("0x"):
+                    mask = str(ipaddress.IPv4Address(int(mask, 16)))
+                mask = _display_mask(mask)
             except (PfSenseError, ValueError):
                 continue
             interfaces[current].update(ip=ip, mask=mask)
@@ -191,12 +191,22 @@ def _insert_rule(container: dict, rule: dict) -> None:
     container["rule"] = rules
 
 
+_RULE_PROTOCOLS = frozenset({
+    "any", "tcp", "udp", "tcp/udp", "icmp", "esp", "ah", "gre", "igmp",
+    "ipv6", "carp", "pfsync", "ospf", "pim", "sctp",
+})
+
+
 def _endpoint(value: str) -> dict:
     text = str(value).strip()
     if text.lower() == "any":
         return {"any": ""}
-    key = "network" if "/" in text else "address"
-    return {key: text}
+    try:
+        if "/" in text:
+            return {"network": str(ipaddress.IPv4Network(text, strict=True))}
+        return {"address": str(ipaddress.IPv4Address(text))}
+    except ValueError as exc:
+        raise PfSenseError(f"extremo de regla IPv4/CIDR no válido: {value!r}") from exc
 
 
 class PfSense:
@@ -228,8 +238,8 @@ class PfSense:
         text = _as_text(value)
         return text.replace(self.password, "***") if self.password else text
 
-    def run(self, cmd: str, timeout=None) -> dict:
-        """Ejecuta un comando remoto y devuelve ``{cmd, output, ok, error}``."""
+    def _run(self, cmd: str, timeout=None) -> dict:
+        """Ejecuta SSH sin redactar; reservado para lecturas internas de datos."""
         if not self.password:
             return {"cmd": cmd, "output": "", "ok": False,
                     "error": "falta la variable de entorno PFSENSE_PASSWORD"}
@@ -240,7 +250,7 @@ class PfSense:
             if effective_timeout <= 0:
                 raise ValueError
         except (TypeError, ValueError):
-            return {"cmd": self._redact(cmd), "output": "", "ok": False,
+            return {"cmd": cmd, "output": "", "ok": False,
                     "error": f"timeout no válido: {timeout}"}
         # `sshpass -e` lee SSHPASS del entorno: con `-p` la contraseña aparece en
         # argv y cualquiera la ve con `ps` mientras dura la conexión.
@@ -252,22 +262,29 @@ class PfSense:
                                        timeout=effective_timeout, env=env)
         except subprocess.TimeoutExpired as exc:
             detail = f"timeout tras {effective_timeout:g}s"
-            stderr = self._redact(exc.stderr).strip()
-            return {"cmd": self._redact(cmd), "output": self._redact(exc.stdout).rstrip("\n"),
+            stderr = _as_text(exc.stderr).strip()
+            return {"cmd": cmd, "output": _as_text(exc.stdout).rstrip("\n"),
                     "ok": False, "error": f"{detail}: {stderr}" if stderr else detail,
                     "timeout": True}
         except OSError as exc:
-            return {"cmd": self._redact(cmd), "output": "", "ok": False,
-                    "error": self._redact(str(exc))}
+            return {"cmd": cmd, "output": "", "ok": False, "error": str(exc)}
 
-        output = self._redact(completed.stdout).rstrip("\n")
-        stderr = self._redact(completed.stderr).strip()
+        output = _as_text(completed.stdout).rstrip("\n")
+        stderr = _as_text(completed.stderr).strip()
         ok = completed.returncode == 0
         if ok:
             stderr = _clean_ssh_warnings(stderr)
         error = None if ok else (stderr or f"ssh terminó con código {completed.returncode}")
-        return {"cmd": self._redact(cmd), "output": output, "ok": ok, "error": error,
+        return {"cmd": cmd, "output": output, "ok": ok, "error": error,
                 "returncode": completed.returncode, "stderr": stderr}
+
+    def run(self, cmd: str, timeout=None) -> dict:
+        """Ejecuta un comando y redacta solo el resultado presentado al usuario."""
+        result = self._run(cmd, timeout)
+        for key in ("cmd", "output", "error", "stderr"):
+            if key in result and result[key] is not None:
+                result[key] = self._redact(result[key])
+        return result
 
     def status(self) -> dict:
         """Versión, interfaces, reglas y tabla de rutas del firewall."""
@@ -291,9 +308,9 @@ class PfSense:
 
     def get_config(self) -> dict:
         """Lee y parsea ``/conf/config.xml``; devuelve el documento o un error."""
-        response = self.run("cat /conf/config.xml")
+        response = self._run("cat /conf/config.xml")
         if not response["ok"]:
-            return {"ok": False, "error": response["error"]}
+            return {"ok": False, "error": self._redact(response["error"])}
         try:
             return parse_config(response["output"])
         except PfSenseError as exc:
@@ -395,7 +412,7 @@ class PfSense:
             configured_ip = str(values.get("ipaddr", ""))
             configured_mask = str(values.get("subnet", ""))
             try:
-                mask = _normalize_mask(configured_mask) if configured_mask else ""
+                mask = _display_mask(configured_mask) if configured_mask else ""
             except PfSenseError:
                 mask = configured_mask
             dhcp = configured_ip.lower() == "dhcp"
@@ -433,6 +450,16 @@ class PfSense:
             if not isinstance(interfaces, dict):
                 interfaces = {}
                 doc["interfaces"] = interfaces
+            existing = {
+                str(values["if"]): str(role)
+                for role, values in interfaces.items()
+                if role not in mapping and isinstance(values, dict) and values.get("if")
+            }
+            for ifname in mapping.values():
+                if ifname is not None and ifname in existing:
+                    raise PfSenseError(
+                        f"la interfaz {ifname} ya está asignada al rol {existing[ifname]}"
+                    )
             for role, ifname in mapping.items():
                 if ifname is None:
                     interfaces.pop(role, None)
@@ -443,7 +470,10 @@ class PfSense:
                         interfaces[role] = values
                     values["if"] = ifname
 
-        return self._load_and_save(change)
+        try:
+            return self._load_and_save(change)
+        except PfSenseError as exc:
+            return {"ok": False, "backup": None, "detail": str(exc)}
 
     def set_ip(self, ifname, ip, mask, gateway=None) -> dict:
         """Configura IPv4 estática en la interfaz lógica asociada a ``ifname``."""
@@ -466,7 +496,28 @@ class PfSense:
             values["ipaddr"] = address
             values["subnet"] = netmask
             if gateway is not None:
-                values["gateway"] = gateway
+                # El instalador oficial enlaza interfaces/<rol>/gateway con un
+                # gateway_item nombrado: pfsense/pfsense, config.console.inc.
+                name = f"{role.upper()}GW"
+                gateways = doc.get("gateways")
+                if not isinstance(gateways, dict):
+                    gateways = {}
+                    doc["gateways"] = gateways
+                existing = gateways.get("gateway_item", [])
+                items = (list(existing) if isinstance(existing, list)
+                         else ([] if existing in (None, "") else [existing]))
+                items = [
+                    item for item in items
+                    if not (isinstance(item, dict) and item.get("name") == name)
+                ]
+                items.append({
+                    "interface": role, "gateway": gateway, "ipprotocol": "inet",
+                    "name": name, "descr": "", "weight": "", "gw_down_kill_states": "",
+                })
+                gateways["gateway_item"] = items[0] if len(items) == 1 else items
+                if role == "wan":
+                    gateways["defaultgw4"] = name
+                values["gateway"] = name
 
         try:
             return self._load_and_save(change)
@@ -490,6 +541,23 @@ class PfSense:
             role = self._logical_interface(doc, ifname)
             if role is None:
                 raise PfSenseError(f"no hay interfaz lógica asignada a {ifname}")
+            interface = doc.get("interfaces", {}).get(role)
+            try:
+                if not isinstance(interface, dict):
+                    raise ValueError
+                address = ipaddress.IPv4Address(str(interface.get("ipaddr", "")))
+                network = ipaddress.IPv4Network(
+                    f"{address}/{interface.get('subnet', '')}", strict=False,
+                )
+            except ValueError as exc:
+                raise PfSenseError(
+                    f"no se puede determinar la red IPv4 de la interfaz {ifname}"
+                ) from exc
+            if first not in network or last not in network:
+                raise PfSenseError(
+                    f"rango DHCP {first}-{last} fuera de la red {network} "
+                    f"de la interfaz {ifname}"
+                )
             dhcpd = doc.get("dhcpd")
             if not isinstance(dhcpd, dict):
                 dhcpd = {}
@@ -514,6 +582,8 @@ class PfSense:
         action, proto = str(action).lower(), str(proto).lower()
         if action not in ("pass", "block", "reject"):
             return {"ok": False, "error": f"acción de filtro no válida: {action}"}
+        if proto not in _RULE_PROTOCOLS:
+            return {"ok": False, "error": f"protocolo de filtro no válido: {proto}"}
         if port is not None:
             try:
                 number = int(port)
@@ -521,18 +591,25 @@ class PfSense:
                     raise ValueError
             except ValueError:
                 return {"ok": False, "error": "port requiere un puerto 1-65535 y proto tcp o udp"}
+        try:
+            source = _endpoint(src)
+            destination = _endpoint(dst)
+        except PfSenseError as exc:
+            return {"ok": False, "error": str(exc)}
 
         def change(doc):
             role = self._logical_interface(doc, ifname)
             if role is None:
                 raise PfSenseError(f"no hay interfaz lógica asignada a {ifname}")
-            destination = _endpoint(dst)
             if port is not None:
                 destination["port"] = str(port)
             rule = {"type": action, "interface": role, "ipprotocol": "inet",
-                    "protocol": proto, "source": _endpoint(src), "destination": destination}
-            filters = doc.setdefault("filter", {})
-            if not isinstance(filters, dict):
+                    "protocol": proto, "source": source, "destination": destination}
+            filters = doc.get("filter")
+            if filters is None or (isinstance(filters, str) and not filters.strip()):
+                filters = {}
+                doc["filter"] = filters
+            elif not isinstance(filters, dict):
                 raise PfSenseError("la sección <filter> no es un diccionario")
             _insert_rule(filters, rule)
 
@@ -562,10 +639,10 @@ class PfSense:
                 outbound = {}
                 nat["outbound"] = outbound
             outbound["mode"] = "manual" if target is not None else "automatic"
-            rule = {"interface": role, "source": {"any": ""}, "destination": {"any": ""}}
             if target is not None:
-                rule["target"] = target
-            _insert_rule(outbound, rule)
+                rule = {"interface": role, "source": {"any": ""},
+                        "destination": {"any": ""}, "target": target}
+                _insert_rule(outbound, rule)
 
         try:
             return self._load_and_save(change)
