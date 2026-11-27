@@ -259,10 +259,18 @@ class ClienteExamenFalso:
                 {"template_id": "tpl-sw", "template_type": "ethernet_switch", "name": "SW1"},
                 {"template_id": "tpl-pc", "template_type": "vpcs", "name": "VPCS"},
             ]
+        if path == "/v2/computes/local/qemu/images":
+            return 200, self.qemu_images()
         if "/nodes/" in path:
             nid = path.split("/nodes/", 1)[1]
             return 200, next(n for n in self._nodes if n["node_id"] == nid)
         return 404, {"message": f"sin ruta: {path}"}
+
+    def json_list_or_die(self, path, what, **kwargs):
+        st, body = self.get(path, **kwargs)
+        if st != 200 or not isinstance(body, list):
+            raise RuntimeError(f"{what}: [{st}] {body}")
+        return body
 
     def qemu_images(self):
         return [{"filename": "pfSense.qcow2"}]
