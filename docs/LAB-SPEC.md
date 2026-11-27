@@ -37,6 +37,48 @@ comprueba con `show ip` cuando es VPCS. `porta` y `portb` son opcionales: si fal
 `export` los omite cuando el puerto real es 0, `diff` los compara y `plan` añade `--ppa/--ppb`
 sólo cuando están declarados.
 
+## Perfil de pfSense
+
+El bloque opcional `pfsense:` describe la instancia de pfSense del laboratorio. Es el contrato
+que consume `gns3lab pf profile` (carril core) y que ya lee la puerta WebUI de este árbol:
+
+```yaml
+pfsense:
+  node: PF1
+  lan_cidr: 192.168.1.0/24
+  pfsense_ip: 192.168.1.1
+  dhcp_from: 192.168.1.100
+  dhcp_to: 192.168.1.200
+  wan: NAT1
+  adapter_type: e1000
+  console_type: telnet
+  bridge: br-gns3-ejemplo-a
+  host_ip: 192.168.1.254
+  webui_name: pfsense-ejemplo-a
+```
+
+`webui_name` es el nombre estable con el que se abre la WebUI y `pfsense_ip` la dirección real
+del firewall. `webui_port` es opcional (443 por defecto). No se escriben credenciales: la
+contraseña sigue viniendo de `PFSENSE_PASSWORD`.
+
+Los dos ejemplos de `examples/pf-perfiles/` usan subredes distintas
+(`192.168.1.0/24` y `192.168.10.0/24`) y nombres distintos
+(`pfsense-ejemplo-a`, `pfsense-ejemplo-b`), así que pueden convivir. Una sola puerta local los
+publica:
+
+```bash
+env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python scripts/pf_webui_proxy.py \
+  examples/pf-perfiles/ --port 8080
+# http://127.0.0.1:8080/pfsense-ejemplo-a/
+# http://127.0.0.1:8080/pfsense-ejemplo-b/
+```
+
+El proxy sólo acepta el certificado autofirmado del firewall; el núcleo no relaja TLS. La
+consola telnet sigue siendo la vía para configurar (`gns3lab pf`), y la WebUI del controller GNS3
+—`GET /v2/servers` → `404` en 2.2.61— es un problema separado que este perfil no toca. En este
+árbol `scripts/labspec.py` todavía no interpreta el bloque `pfsense:`: lo aplica el comando
+`pf profile` del carril core.
+
 ## Comandos
 
 ```bash

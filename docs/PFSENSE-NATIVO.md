@@ -1,6 +1,6 @@
 # pfSense nativo: de la consola a `config.xml`
 
-Secciones: Estado en este árbol · 1. Detectar los nombres de interfaz · 2. Credenciales: sólo variables de entorno · 3. Orden de la configuración nativa · 4. El menú: sólo cuando aún no hay SSH · 5. Verificación con salida real · 6. Errores literales y su causa.
+Secciones: Estado en este árbol · 1. Detectar los nombres de interfaz · 2. Credenciales: sólo variables de entorno · 3. Orden de la configuración nativa · 4. El menú: sólo cuando aún no hay SSH · 5. WebUI por nombre: una sola puerta local · 6. Verificación con salida real · 7. Errores literales y su causa.
 
 La vía nativa habla el formato que pfSense entiende de verdad: `/conf/config.xml` y sus
 comandos (`pfctl`, `ifconfig`, `easyrule`, `/etc/rc.reload_all`) por SSH. El VNC sólo hace falta
@@ -24,7 +24,8 @@ Los comandos `gns3lab pf` y el módulo `pfsense.py` existen y están cubiertos p
 `pfsense.py` (`PfSense.*`) y de `gns3lab pf <acción> --help`; las que no se han ejecutado contra
 un firewall real se marcan como tales. `gns3lab shot/type/key`, `exec`, `node props` y `doctor`
 también están en el árbol. Comprueba siempre `gns3lab pf --help` antes de dar un comando por
-bueno.
+bueno. La puerta WebUI por nombre vive en `scripts/pf_webui_proxy.py` y se prueba en
+`tests/test_pf_webui_proxy.py` (sección 5).
 
 ## 1. Detectar los nombres de interfaz
 
@@ -141,7 +142,40 @@ shift`; OCR a escala x2 y `--psm 4`, porque a x1 confunde `w` con `u`; `screendu
 PPM con extensión `.png` y `shot` lo convierte. Una vez que SSH responde, el menú ya no hace
 falta: `gns3lab pf ssh` y los órdenes de la sección 3 lo sustituyen.
 
-## 5. Verificación con salida real
+## 5. WebUI por nombre: una sola puerta local
+
+La WebUI de pfSense no se abre por la IP del invitado: el bridge del laboratorio puede estar
+`DOWN` y el host no tiene ruta hasta `192.168.1.1`. En vez de configurar una URL distinta por
+proyecto, `scripts/pf_webui_proxy.py` publica todas las WebUI detrás de nombres estables en
+`127.0.0.1`:
+
+```bash
+env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python scripts/pf_webui_proxy.py \
+  examples/pf-perfiles/ --port 8080
+# WebUI de pfSense en http://127.0.0.1:8080/
+#   /pfsense-ejemplo-a/
+#   /pfsense-ejemplo-b/
+```
+
+Cada perfil YAML declara `pfsense.webui_name`, `pfsense.pfsense_ip` y, si hace falta,
+`pfsense.webui_port` (por defecto 443):
+
+- `http://127.0.0.1:8080/pfsense-ejemplo-a/` → WebUI del firewall de `192.168.1.0/24`.
+- `http://127.0.0.1:8080/pfsense-ejemplo-b/` → WebUI del firewall de `192.168.10.0/24`.
+
+Los dos ejemplos viven en `examples/pf-perfiles/` con subredes distintas y sin credenciales. El
+proxy acepta `--host` sólo si es loopback; para cambiar el puerto local, `--port`. Un nombre que no
+está en ningún perfil devuelve `404`, y un redirect del firewall hacia otro host devuelve `502`:
+la puerta no lo sigue. El certificado autofirmado se acepta **sólo aquí**; el núcleo y
+`pfsense.py` mantienen la verificación TLS normal.
+
+Esta puerta es independiente de la WebUI del controller GNS3: la UI 2.2.58 pide
+`GET /v2/servers` y el controller 2.2.61 responde `404`, por lo que la lista de servidores queda
+vacía. Es un problema aparte que no se arregla con este proxy. Para configurar el firewall, la vía
+sigue siendo la consola telnet y los comandos `gns3lab pf` de la sección 3; la WebUI sólo sirve
+para mirar el panel.
+
+## 6. Verificación con salida real
 
 ```bash
 gns3lab pf status                       # versión, ifconfig, pfctl -sr y rutas desde el firewall
@@ -153,7 +187,7 @@ La prueba de red es `0% packet loss` en el ping y una IP distinta de `0.0.0.0` e
 `gns3lab test examen-kit` comprueba además PC↔PC, PC→gateway y PC→`8.8.8.8`. Un `200 OK` de la
 API no prueba conectividad.
 
-## 6. Errores literales y su causa
+## 7. Errores literales y su causa
 
 Salidas tomadas de [TROUBLESHOOTING.md](TROUBLESHOOTING.md) y [EXAMEN.md](EXAMEN.md). Las dos
 últimas son mensajes de `pfsense.py`; no se han reproducido contra un firewall real.
