@@ -10,9 +10,9 @@ mano por VNC cuesta 40 minutos y pierde teclas.
 |---|---|
 | `gns3core.py` | Núcleo sin dependencias de terceros: `Client` (API REST v2), `Console` (consola telnet leída por prompt), `QemuMonitor` (canal HMP), `ocr`. |
 | `gns3_mcp_server.py` | Servidor MCP (fastmcp) con **50 tools**, 3 resources + 1 template y 2 prompts. Importa `gns3core`. |
-| `cli/gns3lab` | CLI de **47 comandos**, `--json` global y subcomandos `pf` y `verify`. Añade la raíz del repo a `sys.path`. |
+| `cli/gns3lab` | CLI de **48 comandos**, `--json` global y subcomandos `pf` y `verify`. Añade la raíz del repo a `sys.path`. |
 | `pfsense.py` | Integración nativa de pfSense: parsea/renderiza `/conf/config.xml` sin perder secciones; credenciales solo por entorno. |
-| `tests/` | pytest: **700 tests**, dobles de HTTP/telnet/HMP, 100 % de `gns3core.py` y 100 % de `pfsense.py`. |
+| `tests/` | pytest: **931 tests**, dobles de HTTP/telnet/HMP, 100 % de `gns3core.py` y 100 % de `pfsense.py`. |
 
 ## Reglas duras
 
@@ -42,7 +42,7 @@ mano por VNC cuesta 40 minutos y pierde teclas.
 ./scripts/install.sh                 # venv + deps + symlinks (idempotente)
 gns3lab doctor                       # ¿está todo en pie?
 source .venv/bin/activate            # para trabajar en el código
-pytest -q                            # los tests no necesitan servidor GNS3
+python -m pytest -q                  # los tests no necesitan servidor GNS3
 python -m py_compile gns3core.py gns3_mcp_server.py cli/gns3lab
 ```
 

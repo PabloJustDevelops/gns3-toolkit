@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 
 CODIGO = ("gns3core.py", "gns3_mcp_server.py", "cli/gns3lab")
-DOCUMENTOS = ("README.md", "PROJECT.md", "docs/GUI-PORTADA.md")
-OBLIGATORIOS = CODIGO + DOCUMENTOS + ("scripts/install.sh",)
+DOCUMENTOS = ("AGENTS.md", "README.md", "PROJECT.md", "docs/GUI-PORTADA.md")
+OBLIGATORIOS = CODIGO + ("README.md", "PROJECT.md", "docs/GUI-PORTADA.md", "scripts/install.sh")
 SKILL_REAL = Path.home() / ".hermes/skills/devops/gns3-lab-automation/SKILL.md"
 SKILL_REPO = Path("skill-sync/SKILL.md")
 
@@ -178,7 +178,7 @@ def check(root: Path) -> tuple[list[str], dict[str, set[str]]]:
     simbolos = symbols_code(root)
     reales = {clave: len(valores) for clave, valores in simbolos.items()}
     hallazgos = []
-    documentos = [root / nombre for nombre in DOCUMENTOS]
+    documentos = [root / nombre for nombre in DOCUMENTOS if (root / nombre).is_file()]
     documentos += sorted(root.glob("docs/**/*.md"))
     documentos += [p for p in (SKILL_REAL, root / SKILL_REPO) if p.is_file()]
     for ruta in dict.fromkeys(documentos):
