@@ -3,14 +3,16 @@
 version: 1
 project: ejemplo-b
 pfsense:
+  project: ejemplo-b
   node: PF1
   lan_cidr: 192.168.10.0/24
   pfsense_ip: 192.168.10.1
   dhcp_from: 192.168.10.100
   dhcp_to: 192.168.10.200
   wan: NAT1
+  disk: pfSense-minitest.qcow2
   adapter_type: e1000
   console_type: telnet
-  bridge: br-gns3-ejemplo-b
+  bridge: br-gns3-ejemb
   host_ip: 192.168.10.254
   webui_name: pfsense-ejemplo-b
