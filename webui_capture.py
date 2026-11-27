@@ -145,6 +145,27 @@ class WebUICapture:
             return "login rechazado por pfSense: sigue visible el formulario de acceso"
         return None
 
+    @staticmethod
+    def _comprobar_respuesta(response, url: str) -> None:
+        """Playwright devuelve la respuesta final; ``None`` no permite validarla."""
+        if response is None:
+            raise WebUIUnavailable(f"sin respuesta al abrir {url}")
+        estado = getattr(response, "status", None)
+        if estado is not None and int(estado) >= 400:
+            raise WebUIUnavailable(f"HTTP {estado} al abrir {url}")
+
+    @classmethod
+    def _validar_navegacion(cls, page, response, url: str) -> None:
+        """Descarta error HTTP, redirect al login y páginas distintas de la pedida."""
+        cls._comprobar_respuesta(response, url)
+        final = urlsplit(str(getattr(page, "url", "")))
+        if final.path.lower().rstrip("/").rsplit("/", 1)[-1] in {"login", "login.php"}:
+            raise WebUIUnavailable(f"navegación a {url} redirigida al login de pfSense")
+        esperado = urlsplit(url)
+        if final.path != esperado.path or (final.netloc and final.netloc != esperado.netloc):
+            raise WebUIUnavailable(
+                f"navegación inesperada al abrir {url}: {final.geturl() or 'sin URL'}")
+
     def capture(self, pages: list[tuple[str, str]] | None = None) -> dict:
         """Hace login una vez y captura las páginas; cualquier fallo cae a consola."""
         available, reason = self.available()
@@ -169,8 +190,10 @@ class WebUICapture:
                         )
                         context.set_default_timeout(timeout_ms)
                         page = context.pages[0] if context.pages else context.new_page()
-                        page.goto(self._base_url() + "/", wait_until="domcontentloaded",
-                                  timeout=timeout_ms)
+                        inicio = self._base_url() + "/"
+                        respuesta = page.goto(inicio, wait_until="domcontentloaded",
+                                              timeout=timeout_ms)
+                        self._comprobar_respuesta(respuesta, inicio)
                         page.fill("#usernamefld", self.user)
                         page.fill("#passwordfld", self.password)
                         page.click(
@@ -183,8 +206,10 @@ class WebUICapture:
                             raise WebUIUnavailable(login_failure)
 
                         for index, (name, path) in enumerate(selected, 1):
-                            page.goto(self._page_url(path), wait_until="domcontentloaded",
-                                      timeout=timeout_ms)
+                            url = self._page_url(path)
+                            respuesta = page.goto(url, wait_until="domcontentloaded",
+                                                  timeout=timeout_ms)
+                            self._validar_navegacion(page, respuesta, url)
                             destination = outdir / self._filename(index, name)
                             page.screenshot(path=str(destination), full_page=True)
                             captures.append({"page": name, "path": str(destination)})

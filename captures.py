@@ -6,6 +6,7 @@ opcional y su ausencia deja el OCR vacío sin romper la captura.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 from gns3core import ocr
 
 MAX_FASES = 5
+MAX_RESERVAS = 100
 OCR_MAX = 160
 PNG_FIRMA = b"\x89PNG\r\n\x1a\n"
 
@@ -40,6 +42,26 @@ def _siguiente_numero(outdir: Path) -> int:
         if coincidencia:
             numeros.append(int(coincidencia.group(1)))
     return max(numeros, default=0) + 1
+
+
+def _reservar_destino(directorio: Path, numero: int, nombre_fase: str,
+                      extension: str) -> Path:
+    """Reserva el nombre con creación exclusiva antes de escribir la imagen.
+
+    Dos capturas concurrentes pueden leer el mismo número del directorio. La
+    reserva con ``O_EXCL`` decide quién se queda el nombre; quien llegue tarde
+    vuelve a leer el directorio y reserva el siguiente libre.
+    """
+    for _ in range(MAX_RESERVAS):
+        destino = directorio / f"{numero:02d}-{nombre_fase}.{extension}"
+        try:
+            descriptor = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            numero = _siguiente_numero(directorio)
+            continue
+        os.close(descriptor)
+        return destino
+    raise OSError(f"no se pudo reservar un nombre libre para {nombre_fase}")
 
 
 def capture_phase(monitor, phase: str, outdir: str, node: str | None = None) -> dict:
@@ -79,6 +101,8 @@ def capture_phase(monitor, phase: str, outdir: str, node: str | None = None) -> 
         try:
             from PIL import Image
         except ImportError as exc:
+            Image = None
+            aviso_pillow = f"Pillow no disponible ({exc})"
             try:
                 with origen.open("rb") as fichero:
                     firma = fichero.read(len(PNG_FIRMA))
@@ -86,22 +110,32 @@ def capture_phase(monitor, phase: str, outdir: str, node: str | None = None) -> 
                 return _error_inicial(
                     nombre_fase, node, f"no se pudo leer la captura temporal: {error}")
             extension = "png" if firma == PNG_FIRMA else "ppm"
-            destino = directorio / f"{numero:02d}-{nombre_fase}.{extension}"
+        else:
+            aviso_pillow = None
+            extension = "png"
+
+        try:
+            destino = _reservar_destino(directorio, numero, nombre_fase, extension)
+        except OSError as exc:
+            return _error_inicial(nombre_fase, node, f"no se pudo reservar la captura: {exc}")
+
+        if Image is None:
             try:
                 shutil.copyfile(origen, destino)
             except OSError as error:
+                destino.unlink(missing_ok=True)
                 return _error_inicial(
                     nombre_fase, node, f"no se pudo conservar la captura: {error}")
-            ruta = destino
-            avisos.append(f"Pillow no disponible ({exc}); se conserva {extension.upper()}")
+            avisos.append(f"{aviso_pillow}; se conserva {extension.upper()}")
         else:
-            destino = directorio / f"{numero:02d}-{nombre_fase}.png"
             try:
-                with Image.open(origen) as imagen:
-                    imagen.convert("L").save(destino)
+                with Image.open(origen) as contenido:
+                    contenido.convert("L").save(destino)
             except Exception as exc:
-                return _error_inicial(nombre_fase, node, f"Pillow no pudo convertir la captura: {exc}")
-            ruta = destino
+                destino.unlink(missing_ok=True)
+                return _error_inicial(
+                    nombre_fase, node, f"Pillow no pudo convertir la captura: {exc}")
+        ruta = destino
 
     try:
         texto = ocr(str(ruta), psm=4) or ""
