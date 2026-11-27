@@ -85,7 +85,8 @@ en cobertura:
 
 ## Top 5 de candidatos
 
-De esta lista ya están implementados 1, 2 y 4; el 3 queda parcial y el 5 sigue pendiente en CLI.
+De esta lista ya están implementados 1, 2, 4 y 5 (2 y 5 en núcleo y MCP, sin verbo `get`
+en la CLI); el 3 queda parcial.
 
 1. **Listado de ficheros de proyecto** (`GET /v2/compute/projects/{id}/files` directo, o el
    proxy `GET /v2/computes/{cid}/projects/{id}/files`). **Hecho**: `project_file_list`,

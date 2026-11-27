@@ -4,25 +4,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import labspec  # noqa: E402  (módulo sin dependencias del servidor)
 
-requires_export = pytest.mark.skipif(
-    not hasattr(labspec, "export"),
-    reason="BRIEF-dclcore pendiente: falta export(topology)",
-)
-requires_diff_plan = pytest.mark.skipif(
-    not all(hasattr(labspec, nombre) for nombre in ("diff", "plan")),
-    reason="BRIEF-dclcore pendiente: faltan diff(deseado, actual) y plan",
-)
-requires_aplicar_deseado = pytest.mark.skipif(
-    not hasattr(labspec, "aplicar_deseado"),
-    reason="BRIEF-dclcore pendiente: falta aplicar_deseado(deseado, actual, server, yes)",
-)
+
+def test_contrato_api_de_labspec_presente():
+    for nombre in ("export", "diff", "plan", "aplicar_deseado"):
+        assert callable(getattr(labspec, nombre, None)), f"falta labspec.{nombre}"
 
 
 def _spec(nodes, links=()) -> dict:
@@ -35,7 +25,6 @@ def _spec(nodes, links=()) -> dict:
     }
 
 
-@requires_export
 def test_export_valido_omite_enlaces_rotos_y_no_inventa_ip_ni_expect():
     topologia = {
         "project": "p",
@@ -72,8 +61,6 @@ def test_export_valido_omite_enlaces_rotos_y_no_inventa_ip_ni_expect():
     assert "links[1]" in str(especificacion["warn"])
 
 
-@requires_export
-@requires_diff_plan
 def test_export_diff_y_plan_conservan_los_puertos_del_enlace():
     topologia = {
         "project": "p",
@@ -107,7 +94,6 @@ def test_export_diff_y_plan_conservan_los_puertos_del_enlace():
     ]]
 
 
-@requires_diff_plan
 def test_diff_detecta_nodos_y_enlaces_nuevos_y_sobrantes():
     deseado = _spec(
         [
@@ -139,7 +125,6 @@ def test_diff_detecta_nodos_y_enlaces_nuevos_y_sobrantes():
     assert resultado["sin_cambios"] is False
 
 
-@requires_diff_plan
 def test_diff_y_plan_son_idempotentes():
     especificacion = _spec(
         [
@@ -153,7 +138,6 @@ def test_diff_y_plan_son_idempotentes():
     assert labspec.plan(especificacion, especificacion) == []
 
 
-@requires_diff_plan
 def test_plan_solo_arranca_al_crear_el_proyecto():
     deseado = _spec([{"name": "pc1", "template": "VPCS"}])
     existente = _spec([])
@@ -163,7 +147,6 @@ def test_plan_solo_arranca_al_crear_el_proyecto():
     assert labspec.plan(deseado, {}) == [["new", "p"], nodo, ["up", "p"]]
 
 
-@requires_aplicar_deseado
 def test_aplicar_deseado_sin_yes_no_ejecuta(monkeypatch):
     def prohibido(*_args, **_kwargs):
         raise AssertionError("sin --yes no se debe ejecutar ninguna orden")
@@ -175,8 +158,6 @@ def test_aplicar_deseado_sin_yes_no_ejecuta(monkeypatch):
     ) == 2
 
 
-@requires_aplicar_deseado
-@requires_diff_plan
 def test_aplicar_deseado_con_yes_ejecuta_el_plan_en_orden(monkeypatch):
     deseado = _spec(
         [
@@ -204,8 +185,6 @@ def test_aplicar_deseado_con_yes_ejecuta_el_plan_en_orden(monkeypatch):
     ]
 
 
-@requires_aplicar_deseado
-@requires_diff_plan
 def test_aplicar_deseado_con_yes_para_en_el_primer_fallo(monkeypatch):
     deseado = _spec(
         [

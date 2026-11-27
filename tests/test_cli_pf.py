@@ -10,12 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-try:
-    import pfsense
-except ModuleNotFoundError as exc:
-    if exc.name != "pfsense":
-        raise
-    pfsense = None
+import pfsense
 
 CLI_PATH = Path(__file__).resolve().parents[1] / "cli" / "gns3lab"
 LOADER = SourceFileLoader("gns3lab_pftests", str(CLI_PATH))
@@ -25,10 +20,13 @@ cli = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = cli
 LOADER.exec_module(cli)
 
-pytestmark = pytest.mark.skipif(
-    not callable(getattr(cli, "cmd_pf", None)) or pfsense is None,
-    reason="BRIEF-pfcli/pfcore pendientes: falta cmd_pf o el módulo pfsense.py",
-)
+
+def test_contrato_cmd_pf_y_modulo_pfsense_presentes():
+    assert callable(getattr(cli, "cmd_pf", None))
+    for nombre in (
+        "PfSense", "PfSenseError", "parse_config", "render_config", "detect_ifnames",
+    ):
+        assert hasattr(pfsense, nombre), f"falta pfsense.{nombre}"
 
 
 @pytest.fixture(autouse=True)

@@ -18,11 +18,9 @@ cli = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = cli
 LOADER.exec_module(cli)
 
-EXAM_READY = callable(getattr(cli, "cmd_examen", None))
-requires_exam = pytest.mark.skipif(
-    not EXAM_READY,
-    reason="BRIEF-examcli pendiente: falta el handler cmd_examen",
-)
+
+def test_contrato_handler_examen_presente():
+    assert callable(getattr(cli, "cmd_examen", None))
 
 
 @pytest.fixture
@@ -62,7 +60,6 @@ def _args(action: str, **overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-@requires_exam
 def test_examen_verify_json_devuelve_ok_y_problems(exam_conf, fake_api, capsys):
     try:
         cli.cmd_examen(_args("verify", json=True), exam_conf)
@@ -77,7 +74,6 @@ def test_examen_verify_json_devuelve_ok_y_problems(exam_conf, fake_api, capsys):
     assert payload["problems"]
 
 
-@requires_exam
 def test_examen_reset_sin_yes_se_rechaza_antes_de_tocar_servidor(
     exam_conf, fake_api, capsys
 ):

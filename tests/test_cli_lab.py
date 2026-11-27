@@ -46,10 +46,9 @@ def _handler_names() -> list[str]:
     raise AssertionError("cli/gns3lab no declara el dict `handlers`")
 
 
-requires_lab = pytest.mark.skipif(
-    "lab" not in _handler_names() or not hasattr(cli, "cmd_lab"),
-    reason="BRIEF-dclcli pendiente: falta el subcomando lab y su handler",
-)
+def test_contrato_subcomando_lab_y_handler_presentes():
+    assert "lab" in _handler_names()
+    assert callable(getattr(cli, "cmd_lab", None))
 
 
 @pytest.fixture
@@ -70,7 +69,6 @@ def run_main(monkeypatch, tmp_path):
     return run
 
 
-@requires_lab
 def test_lab_help_incluye_las_seis_acciones():
     proc = subprocess.run(
         [sys.executable, str(CLI_PATH), "lab", "--help"],
@@ -86,7 +84,6 @@ def test_lab_help_incluye_las_seis_acciones():
         assert any(linea.startswith(accion + " ") for linea in lineas)
 
 
-@requires_lab
 def test_lab_validate_json_acepta_el_ejemplo(run_main, capsys):
     rc = run_main(["lab", "validate", "--spec", str(EJEMPLO), "--json"])
 
@@ -95,7 +92,6 @@ def test_lab_validate_json_acepta_el_ejemplo(run_main, capsys):
     assert payload["ok"] is True
 
 
-@requires_lab
 def test_lab_apply_sin_yes_no_ejecuta_nada(run_main, monkeypatch, tmp_path, capsys):
     topologia = tmp_path / "topologia.json"
     topologia.write_text(json.dumps({
@@ -122,7 +118,6 @@ def test_lab_apply_sin_yes_no_ejecuta_nada(run_main, monkeypatch, tmp_path, caps
     assert payload["data"]["plan"]
 
 
-@requires_lab
 def test_lab_apply_con_topologia_idempotente(run_main, monkeypatch, tmp_path, capsys):
     topologia = tmp_path / "topologia.json"
     topologia.write_text(json.dumps({
@@ -161,7 +156,6 @@ def test_lab_apply_con_topologia_idempotente(run_main, monkeypatch, tmp_path, ca
     assert payload["data"]["yes"] is False
 
 
-@requires_lab
 def test_lab_apply_sin_topologia_consulta_y_acepta_proyecto_inexistente(
     run_main, monkeypatch, capsys
 ):
@@ -196,7 +190,6 @@ def test_lab_apply_sin_topologia_consulta_y_acepta_proyecto_inexistente(
     assert any("up lab-ejemplo" in cmd for cmd in payload["data"]["plan"])
 
 
-@requires_lab
 def test_lab_apply_sin_topologia_proyecto_vacio_no_arranca(
     run_main, monkeypatch, capsys
 ):
@@ -225,7 +218,6 @@ def test_lab_apply_sin_topologia_proyecto_vacio_no_arranca(
     assert not any("up lab-ejemplo" in cmd for cmd in payload["data"]["plan"])
 
 
-@requires_lab
 def test_lab_diff_con_topologia_local_no_habla_con_el_servidor(
     run_main, monkeypatch, tmp_path, capsys
 ):
@@ -254,7 +246,6 @@ def test_lab_diff_con_topologia_local_no_habla_con_el_servidor(
     assert len(payload["data"]["crear_nodos"]) == 3
 
 
-@requires_lab
 def test_registro_de_handlers_conserva_el_orden_existente():
     nombres = _handler_names()
 

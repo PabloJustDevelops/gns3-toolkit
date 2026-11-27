@@ -10,16 +10,12 @@ import pytest
 
 import gns3_mcp_server as server
 
-BATCH_READY = callable(getattr(server, "gns3_batch", None))
-INFORME_READY = callable(getattr(server, "gns3_informe", None))
-requires_batch = pytest.mark.skipif(
-    not BATCH_READY,
-    reason="BRIEF-batchmcp pendiente: falta la tool gns3_batch",
-)
-requires_informe = pytest.mark.skipif(
-    not INFORME_READY,
-    reason="BRIEF-batchmcp pendiente: falta la tool gns3_informe",
-)
+
+def test_contrato_tools_batch_e_informe_presentes():
+    tools = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+    for nombre in ("gns3_batch", "gns3_informe"):
+        assert callable(getattr(server, nombre, None)), f"falta la tool {nombre}"
+        assert nombre in tools
 
 
 def _call(fn, *args, **kwargs):
@@ -96,7 +92,6 @@ def batch_api(monkeypatch, fake_api):
     return fake_api
 
 
-@requires_batch
 def test_batch_dos_lecturas_indexa_resultados_y_tiempos(batch_api):
     result = _call(server.gns3_batch, [
         {"tool": "gns3_status", "args": {}},
@@ -116,7 +111,6 @@ def test_batch_dos_lecturas_indexa_resultados_y_tiempos(batch_api):
     assert result["results"][1]["result"]["links"] == ["PC1:0/0 <-> SW1:0/0"]
 
 
-@requires_batch
 def test_batch_error_no_detiene_las_demas_operaciones(batch_api):
     result = _call(server.gns3_batch, [
         {"tool": "gns3_topology", "args": {"project_name": "no-existe"}},
@@ -136,7 +130,6 @@ def test_batch_error_no_detiene_las_demas_operaciones(batch_api):
     assert batch_api.last("GET", "/v2/version")["path"] == "/v2/version"
 
 
-@requires_batch
 def test_batch_stop_on_error_detiene_la_ejecucion(batch_api):
     result = _call(server.gns3_batch, [
         {"tool": "gns3_topology", "args": {"project_name": "no-existe"}},
@@ -149,7 +142,6 @@ def test_batch_stop_on_error_detiene_la_ejecucion(batch_api):
     assert all(req["path"] != "/v2/version" for req in batch_api.requests)
 
 
-@requires_batch
 def test_batch_rechaza_mas_de_20_operaciones_sin_ejecutarlas(batch_api):
     operations = [
         {"tool": "gns3_projects", "args": {"action": "list"}}
@@ -165,7 +157,6 @@ def test_batch_rechaza_mas_de_20_operaciones_sin_ejecutarlas(batch_api):
     assert batch_api.requests == []
 
 
-@requires_batch
 def test_batch_bloquea_tool_destructiva_sin_confirm(batch_api):
     result = _call(server.gns3_batch, [
         {
@@ -185,7 +176,6 @@ def test_batch_bloquea_tool_destructiva_sin_confirm(batch_api):
     assert batch_api.requests == []
 
 
-@requires_batch
 def test_batch_ejecuta_tool_destructiva_confirmada_sobre_el_doble(
     batch_api, monkeypatch
 ):
@@ -213,7 +203,6 @@ def test_batch_ejecuta_tool_destructiva_confirmada_sobre_el_doble(
     batch_api.last("POST", f"/v2/projects/{project_id}/nodes/nodo-pc1/stop")
 
 
-@requires_informe
 def test_informe_devuelve_path_bytes_y_contenido_sin_exponer_datos(
     batch_api, tmp_path
 ):
@@ -241,7 +230,6 @@ def test_informe_devuelve_path_bytes_y_contenido_sin_exponer_datos(
     assert not re.search(r"\bbasic\s+[a-z0-9+/=]{8,}", folded)
 
 
-@requires_informe
 def test_informe_refleja_como_error_literal_un_dato_ilegible(batch_api, tmp_path):
     batch_api.route("GET", "/v2/version", 500, {"message": "fallo literal de version"})
     dest = tmp_path / "informe-error.md"

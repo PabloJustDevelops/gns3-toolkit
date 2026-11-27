@@ -6,8 +6,6 @@ import inspect
 import json
 from pathlib import Path
 
-import pytest
-
 import gns3_mcp_server as server
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,22 +32,17 @@ def _payload(value):
     return json.loads(value) if isinstance(value, str) else value
 
 
-requires_resources = pytest.mark.skipif(
-    bool(set(LAB_RESOURCES) - _resources().keys()),
-    reason="BRIEF-dclmcp pendiente: faltan resources gns3://lab/desired|actual|diff",
-)
-requires_tool = pytest.mark.skipif(
-    not hasattr(server, "gns3_lab"),
-    reason="BRIEF-dclmcp pendiente: falta la tool gns3_lab",
-)
+def test_contrato_resources_y_tool_de_lab_presentes():
+    assert set(LAB_RESOURCES) <= _resources().keys()
+    tools = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+    assert "gns3_lab" in tools
+    assert callable(getattr(server, "gns3_lab", None))
 
 
-@requires_resources
 def test_list_resources_incluye_los_tres_recursos_de_lab():
     assert set(LAB_RESOURCES) <= _resources().keys()
 
 
-@requires_tool
 def test_list_tools_crece_en_uno_con_gns3_lab():
     tools = asyncio.run(server.mcp.list_tools())
 
@@ -57,7 +50,6 @@ def test_list_tools_crece_en_uno_con_gns3_lab():
     assert {"gns3_lab", "gns3_capturas"} <= {tool.name for tool in tools}
 
 
-@requires_tool
 def test_gns3_lab_apply_sin_yes_no_escribe(monkeypatch):
     labspec = server._labspec_module()
 
@@ -74,7 +66,6 @@ def test_gns3_lab_apply_sin_yes_no_escribe(monkeypatch):
     assert "yes" in resultado["error"].lower()
 
 
-@requires_tool
 def test_gns3_lab_apply_rechaza_un_servidor_ajeno():
     resultado = server.gns3_lab(action="apply", spec=str(EJEMPLO), server="otro")
 
@@ -86,7 +77,6 @@ def test_gns3_lab_apply_rechaza_un_servidor_ajeno():
     assert "plan" not in resultado
 
 
-@requires_tool
 def test_lab_action_error_redacta_detail_anidado(monkeypatch):
     secreto = "clave-falsa-dclfix-9f4c2a"
     monkeypatch.setenv("GNS3_PASSWORD", secreto)
@@ -107,7 +97,6 @@ def test_lab_action_error_redacta_detail_anidado(monkeypatch):
     assert resultado["detail"]["attempts"][1] == ("[redactado]",)
 
 
-@requires_tool
 def test_gns3_lab_diff_funciona_sin_gns3_lab_spec(monkeypatch):
     monkeypatch.delenv("GNS3_LAB_SPEC", raising=False)
 
@@ -127,7 +116,6 @@ def test_gns3_lab_diff_funciona_sin_gns3_lab_spec(monkeypatch):
     assert [nodo["name"] for nodo in datos["crear_nodos"]] == ["pc1", "pc2", "sw1"]
 
 
-@requires_resources
 def test_resource_desired_sin_variable_devuelve_error_y_hint(monkeypatch):
     monkeypatch.delenv("GNS3_LAB_SPEC", raising=False)
     recurso = _resources()["gns3://lab/desired"]

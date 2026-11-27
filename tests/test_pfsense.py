@@ -9,17 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-try:
-    import pfsense
-except ModuleNotFoundError as exc:
-    if exc.name != "pfsense":
-        raise
-    pfsense = None
+import pfsense
 
-pytestmark = pytest.mark.skipif(
-    pfsense is None,
-    reason="BRIEF-pfcore pendiente: falta el módulo pfsense.py",
-)
+
+def test_contrato_api_publica_de_pfsense_presente():
+    for nombre in (
+        "PfSense", "PfSenseError", "parse_config", "render_config", "detect_ifnames",
+    ):
+        assert hasattr(pfsense, nombre), f"falta pfsense.{nombre}"
+
 
 PASSWORD = "clave-secreta-de-prueba"
 CONFIG_XML = """<pfsense>
