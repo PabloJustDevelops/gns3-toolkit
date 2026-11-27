@@ -1512,13 +1512,14 @@ def gns3_nodes(
     template: Optional[str] = None,
     x: int = 0,
     y: int = 0,
+    symbol: Optional[str] = None,
 ) -> Any:
     """Nodos: action=list|add|start|stop|reload|suspend|delete. Úsala para listar o añadir
     nodos y para acciones masivas por patrón; para un solo nodo con estado verificado usa
     `gns3_node_action` y para propiedades o discos `gns3_node_edit`.
     **Mixta**: list lee; add/start/stop/reload/suspend/delete escriben.
     `node` acepta nombre, patrón (*, Router*, R[12]) o node_id; `template` es nombre o
-    template_id."""
+    template_id. En add, `symbol` sobrescribe el símbolo de la plantilla."""
     pid, _ = _resolve_project(project_id, project_name)
     if not pid:
         return _project_missing(project_id, project_name)
@@ -1547,8 +1548,27 @@ def gns3_nodes(
         if not tpl:
             return {"error": f"plantilla no encontrada: {template}",
                     "available": [t.get("name") for t in tpls]}
+        if symbol is not None:
+            symbols = _api("GET", "/v2/symbols")
+            if not isinstance(symbols, list):
+                return {"error": "listar símbolos falló", "detail": symbols}
+            problema = core.symbol_error(symbols, symbol)
+            if problema:
+                return problema
         res = _api("POST", f"/v2/projects/{pid}/templates/{tpl['template_id']}", {"x": x, "y": y})
-        return _node_summary(res) if isinstance(res, dict) else res
+        if not isinstance(res, dict):
+            return res
+        if res.get("error"):
+            return res
+        if symbol is not None:
+            updated = _api("PUT", f"/v2/projects/{pid}/nodes/{res['node_id']}",
+                           {"symbol": symbol})
+            if isinstance(updated, dict) and updated.get("error"):
+                return updated
+            res = updated if isinstance(updated, dict) else {**res, "symbol": symbol}
+        out = _node_summary(res)
+        out["symbol"] = res.get("symbol")
+        return out
 
     nodes = _nodes(pid)
     if not nodes:
@@ -2622,6 +2642,7 @@ def gns3_node_edit(
     pid = proj["project_id"]
 
     if action == "create":
+        chosen_symbol = symbol
         if template:
             tpls = _mcp_templates(client)
             tpl = next((t for t in tpls
@@ -2630,22 +2651,42 @@ def gns3_node_edit(
             if not tpl:
                 return {"error": f"plantilla no encontrada: {template}",
                         "available": [t.get("name") for t in tpls]}
-            st, res = client.post(f"/v2/projects/{pid}/templates/{tpl['template_id']}",
-                                  {"x": x, "y": y, "compute_id": "local"})
         else:
             if not (node_type and properties):
                 return {"error": "create sin plantilla exige node_type y properties"}
             body = {"name": name or f"{node_type}-{int(time.time())%10000}",
                     "node_type": node_type, "compute_id": "local", "x": x, "y": y,
                     "properties": properties}
-            st, res = client.post(f"/v2/projects/{pid}/nodes", body, timeout=120)
+        if chosen_symbol is not None:
+            problema = core.symbol_error(client.symbols(), chosen_symbol)
+            if problema:
+                return problema
+        if template:
+            st, res = client.post(f"/v2/projects/{pid}/templates/{tpl['template_id']}",
+                                  {"x": x, "y": y, "compute_id": "local"})
+        else:
+            st, res = client.node_create(pid, body, symbol=symbol)
         if st not in (200, 201):
             msg = res.get("message") if isinstance(res, dict) else res
             return {"error": f"no se pudo crear: [{st}] {msg}"}
-        if name and isinstance(res, dict) and res.get("name") != name:
-            client.put(f"/v2/projects/{pid}/nodes/{res['node_id']}", {"name": name})
-            res["name"] = name
-        return core.node_summary(res)
+        cambios: dict = {}
+        if template and name and isinstance(res, dict) and res.get("name") != name:
+            cambios["name"] = name
+        if template and chosen_symbol is not None:
+            cambios["symbol"] = chosen_symbol
+        if cambios:
+            st2, res2 = client.put(f"/v2/projects/{pid}/nodes/{res['node_id']}", cambios)
+            if st2 not in (200, 201):
+                msg = res2.get("message") if isinstance(res2, dict) else res2
+                return {"error": f"nodo {res['node_id']} creado, pero no se pudo "
+                                 f"configurar: [{st2}] {msg}"}
+            if isinstance(res2, dict):
+                res = res2
+            else:
+                res.update(cambios)
+        out = core.node_summary(res)
+        out["symbol"] = res.get("symbol")
+        return out
 
     if not node:
         return {"error": f"action={action} exige node"}

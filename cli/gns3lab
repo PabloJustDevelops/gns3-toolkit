@@ -2189,11 +2189,17 @@ def cmd_node(args, conf):
     if act == "add":
         if not args.template:
             raise SystemExit("add exige --template")
+        requested_symbol = getattr(args, "symbol", None)
         tpl = next((t for t in _templates_or_die(c)
                     if t.get("template_id") == args.template
                     or str(t.get("name", "")).lower() == args.template.lower()), None)
         if not tpl:
             raise SystemExit(f"plantilla no encontrada: {args.template}")
+        if requested_symbol is not None:
+            problema = core.symbol_error(_core_call(c.symbols), requested_symbol)
+            if problema:
+                print(problema["error"], file=sys.stderr)
+                return 1
         st, body = c.post(f"/v2/projects/{pid}/templates/{tpl['template_id']}",
                           {"x": args.x, "y": args.y, "compute_id": "local"})
         if st not in (200, 201):
@@ -2204,9 +2210,23 @@ def cmd_node(args, conf):
                       "`sudo systemctl start libvirtd` y reintenta", file=sys.stderr)
             return 1
         nid = body["node_id"]
+        cambios: dict = {}
         if args.name:
-            c.put(f"/v2/projects/{pid}/nodes/{nid}", {"name": args.name})
-        print(f"{args.name or body['name']} ({nid[:8]}) tipo={body.get('node_type')}")
+            cambios["name"] = args.name
+        if requested_symbol is not None:
+            cambios["symbol"] = requested_symbol
+        if cambios:
+            st_put, body_put = c.put(f"/v2/projects/{pid}/nodes/{nid}", cambios)
+            if st_put not in (200, 201):
+                print(f"nodo {nid} creado, pero no se pudo configurar: "
+                      f"[{st_put}] {_err(body_put)}", file=sys.stderr)
+                return 1
+            if isinstance(body_put, dict):
+                body = body_put
+            else:
+                body.update(cambios)
+        print(f"{args.name or body['name']} ({nid[:8]}) tipo={body.get('node_type')} "
+              f"symbol={body.get('symbol') or 'sin asignar'}")
         return 0
 
     if not args.node:
@@ -4948,6 +4968,7 @@ def main() -> int:
                    help="idlepc: propuestas en vez de auto_idlepc")
     p.add_argument("--json", action="store_true", help="links/idlepc: salida JSON")
     p.add_argument("--template", help="add: nombre o id de plantilla")
+    p.add_argument("--symbol", help="add: id o nombre del símbolo del nodo")
     p.add_argument("--name", help="nombre nuevo (dup/add/disk)")
     p.add_argument("--set", action="append", help="props: clave=valor (repetible)")
     p.add_argument("--port", action="append", default=[],

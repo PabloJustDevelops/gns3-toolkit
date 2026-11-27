@@ -64,6 +64,31 @@ def _redact(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
 
 
+def default_symbol(node_type: str) -> str | None:
+    """Símbolo inequívoco por tipo; QEMU necesita uno explícito según el disco."""
+    return {"cloud": "cloud.svg", "nat": "nat.svg"}.get(str(node_type or "").lower())
+
+
+def symbol_error(symbols: list[dict], symbol: str) -> dict | None:
+    """Error con los ids disponibles si el servidor no reconoce el símbolo pedido."""
+    available = sorted({
+        str(item.get("symbol_id") or item.get("filename"))
+        for item in symbols if isinstance(item, dict)
+        and (item.get("symbol_id") or item.get("filename"))
+    })
+    filename = symbol.rsplit("/", 1)[-1]
+    for item in symbols:
+        if not isinstance(item, dict):
+            continue
+        symbol_id = str(item.get("symbol_id") or "")
+        item_filename = str(item.get("filename") or "")
+        if symbol in (symbol_id, item_filename) or filename == item_filename:
+            return None
+    return {"error": f"símbolo no encontrado: {symbol!r}. Disponibles: "
+                     f"{', '.join(available) or '(ninguno)'}",
+            "available": available}
+
+
 # ─────────────────────────── configuración de servidores ───────────────────────────
 def local_auth() -> Optional[tuple[str, str]]:
     """Usuario/contraseña del servidor local, del conf de la GUI de GNS3."""
@@ -264,6 +289,20 @@ class Client:
 
     def node_detail(self, pid: str, nid: str) -> dict:
         return self.json_or_die(f"/v2/projects/{pid}/nodes/{nid}", f"nodo {nid[:8]}")
+
+    def node_create(self, pid: str, body: dict, symbol: str | None = None,
+                    timeout: float = 120) -> tuple[int, Any]:
+        """Crea un nodo y añade el símbolo por defecto sólo cuando es inequívoco."""
+        payload = dict(body)
+        if symbol is not None:
+            payload["symbol"] = symbol
+        elif payload.get("symbol") is None:
+            chosen = default_symbol(payload.get("node_type"))
+            if chosen is None:
+                payload.pop("symbol", None)
+            else:
+                payload["symbol"] = chosen
+        return self.post(f"/v2/projects/{pid}/nodes", payload, timeout=timeout)
 
 
     # ── superficie v2 ampliada (paridad CLI/MCP) ──────────────────────────────
