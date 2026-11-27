@@ -27,10 +27,18 @@ import captures  # noqa: E402  (módulo raíz; Pillow se importa sólo al captur
 
 CLI = REPO / "cli" / "gns3lab"
 VERSION = 1
-CLAVES_TOP = {"version", "project", "nodes", "links", "expect", "warn", "captures"}
+CLAVES_TOP = {"version", "project", "nodes", "links", "expect", "warn", "captures",
+              "pfsense"}
 CLAVES_NODO = {"name", "template", "adapter_type", "ip"}
 CLAVES_ENLACE = {"a", "b", "pa", "pb", "porta", "portb"}
+CLAVES_PFSENSE = {
+    "project", "node", "lan_cidr", "pfsense_ip", "dhcp_from", "dhcp_to",
+    "wan", "disk", "adapter_type", "console_type", "bridge", "host_ip",
+    "webui_name",
+}
 NOMBRE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+BRIDGE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+WEBUI_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
 
 class SpecError(Exception):
@@ -55,7 +63,118 @@ def _es_entero(valor) -> bool:
     return isinstance(valor, int) and not isinstance(valor, bool)
 
 
-def validar(data: dict) -> list[str]:
+def _ipv4_perfil(valor, campo: str, errores: list[str]):
+    try:
+        return ipaddress.IPv4Address(str(valor))
+    except ValueError:
+        errores.append(f"{campo}: IPv4 inválida {valor!r}")
+        return None
+
+
+def _red_perfil(perfil) -> ipaddress.IPv4Network | None:
+    if not isinstance(perfil, dict):
+        return None
+    try:
+        red = ipaddress.ip_network(str(perfil.get("lan_cidr")), strict=False)
+    except ValueError:
+        return None
+    return red if red.version == 4 else None
+
+
+def _validar_pfsense(data: dict, errores: list[str]) -> None:
+    """Valida el bloque `pfsense:` sin inventar valores por defecto."""
+    if "pfsense" not in data:
+        return
+    perfil = data["pfsense"]
+    if not isinstance(perfil, dict):
+        errores.append("pfsense: debe ser un mapa")
+        return
+    for clave in perfil:
+        if clave not in CLAVES_PFSENSE:
+            errores.append(f"pfsense.{clave}: clave desconocida")
+
+    for campo in ("project", "node", "wan", "disk", "adapter_type",
+                  "console_type", "bridge", "host_ip", "webui_name"):
+        valor = perfil.get(campo)
+        if not isinstance(valor, str) or not valor.strip():
+            errores.append(f"pfsense.{campo}: obligatorio y no vacío")
+
+    if perfil.get("adapter_type") not in (None, "e1000"):
+        errores.append("pfsense.adapter_type: debe ser e1000")
+    if perfil.get("console_type") not in (None, "telnet"):
+        errores.append("pfsense.console_type: debe ser telnet")
+
+    bridge = perfil.get("bridge")
+    if isinstance(bridge, str) and bridge.strip() and not BRIDGE_RE.match(bridge):
+        errores.append("pfsense.bridge: nombre de bridge Linux inválido (máx. 15)")
+    webui = perfil.get("webui_name")
+    if isinstance(webui, str) and webui.strip() and not WEBUI_RE.match(webui):
+        errores.append("pfsense.webui_name: nombre DNS inválido")
+
+    red_raw = perfil.get("lan_cidr")
+    if not isinstance(red_raw, str) or not red_raw.strip():
+        errores.append("pfsense.lan_cidr: obligatorio y no vacío")
+        red = None
+    else:
+        try:
+            red = ipaddress.ip_network(red_raw, strict=False)
+            if red.version != 4:
+                raise ValueError
+        except ValueError:
+            errores.append(f"pfsense.lan_cidr: red IPv4 inválida {red_raw!r}")
+            red = None
+
+    direcciones = {}
+    for campo in ("pfsense_ip", "dhcp_from", "dhcp_to", "host_ip"):
+        valor = perfil.get(campo)
+        if not isinstance(valor, str) or not valor.strip():
+            errores.append(f"pfsense.{campo}: obligatorio y no vacío")
+            direcciones[campo] = None
+        else:
+            direcciones[campo] = _ipv4_perfil(valor, f"pfsense.{campo}", errores)
+
+    if red is not None:
+        for campo, direccion in direcciones.items():
+            if direccion is not None and direccion not in red:
+                errores.append(f"pfsense.{campo}: {direccion} no está en {red}")
+
+    inicio, fin = direcciones.get("dhcp_from"), direcciones.get("dhcp_to")
+    if inicio is not None and fin is not None and inicio > fin:
+        errores.append("pfsense.dhcp_from: no puede ser mayor que dhcp_to")
+    pfsense_ip, host_ip = direcciones.get("pfsense_ip"), direcciones.get("host_ip")
+    if pfsense_ip is not None and host_ip is not None and pfsense_ip == host_ip:
+        errores.append("pfsense.host_ip: no puede ser igual a pfsense_ip")
+
+
+def _nombre_vecino(vecino: dict) -> str:
+    return str(vecino.get("nombre") or vecino.get("name")
+               or vecino.get("project") or "?")
+
+
+def perfiles_vecinos(ruta: str) -> list[dict]:
+    """Perfiles `pfsense:` del mismo directorio, para detectar solapes de subred."""
+    origen = Path(ruta).resolve()
+    vecinos = []
+    for candidato in sorted(origen.parent.glob("*.y*ml")):
+        if candidato.resolve() == origen:
+            continue
+        try:
+            datos = leer(str(candidato))
+        except SpecError:
+            continue
+        perfil = datos.get("pfsense")
+        if not isinstance(perfil, dict):
+            continue
+        red = _red_perfil(perfil)
+        if red is None:
+            continue
+        vecinos.append({"nombre": candidato.stem,
+                        "project": datos.get("project"),
+                        "lan_cidr": str(red)})
+    return vecinos
+
+
+def validar(data: dict, vecinos: list[dict] | None = None) -> list[str]:
     """Devuelve todos los errores con la ruta del campo; vacío si es válido."""
     errores: list[str] = []
 
@@ -75,9 +194,13 @@ def validar(data: dict) -> list[str]:
 
     nombres: list[str] = []
     nodos = data.get("nodes")
-    if not isinstance(nodos, list) or not nodos:
-        errores.append("nodes: lista no vacía obligatoria")
+    if nodos is None and "pfsense" in data:
         nodos = []
+    if not isinstance(nodos, list):
+        errores.append("nodes: debe ser una lista")
+        nodos = []
+    elif not nodos and "pfsense" not in data:
+        errores.append("nodes: lista no vacía obligatoria")
     for i, nodo in enumerate(nodos):
         base = f"nodes[{i}]"
         if not isinstance(nodo, dict):
@@ -159,6 +282,24 @@ def validar(data: dict) -> list[str]:
             not isinstance(mensaje, str) or not mensaje.strip() for mensaje in warn):
         errores.append("warn: debe ser una lista de mensajes no vacíos")
 
+    _validar_pfsense(data, errores)
+    red = _red_perfil(data.get("pfsense"))
+    if red is not None:
+        for vecino in vecinos or []:
+            if not isinstance(vecino, dict):
+                continue
+            try:
+                otra = ipaddress.ip_network(str(vecino.get("lan_cidr")), strict=False)
+            except ValueError:
+                continue
+            if otra.version != red.version:
+                continue
+            if red.overlaps(otra):
+                errores.append(
+                    f"pfsense.lan_cidr: se solapa con el perfil "
+                    f"'{_nombre_vecino(vecino)}' ({otra}); usa otra subred "
+                    f"o un namespace de red")
+
     try:
         captures.phases_from_spec(data)
     except ValueError as exc:
@@ -170,7 +311,7 @@ def validar(data: dict) -> list[str]:
 def normalizar(data: dict) -> dict:
     """Forma canónica que usan plan, apply y verify (sólo tras validar)."""
     nodos = []
-    for nodo in data["nodes"]:
+    for nodo in data.get("nodes") or []:
         limpio = {k: nodo[k] for k in ("name", "template")}
         if nodo.get("adapter_type"):
             limpio["adapter_type"] = nodo["adapter_type"]
@@ -192,6 +333,10 @@ def normalizar(data: dict) -> dict:
         salida["warn"] = list(data["warn"])
     if "captures" in data:
         salida["captures"] = captures.phases_from_spec(data)
+    if isinstance(data.get("pfsense"), dict):
+        salida["pfsense"] = {clave: data["pfsense"][clave]
+                             for clave in CLAVES_PFSENSE
+                             if clave in data["pfsense"]}
     return salida
 
 
@@ -307,7 +452,7 @@ def diff(deseado: dict, actual: dict) -> dict:
             "sin_cambios": sin_cambios}
 
 
-def ordenes(spec: dict) -> list[list[str]]:
+def ordenes(spec: dict, spec_path: str | None = None) -> list[list[str]]:
     """Órdenes gns3lab, sólo con subcomandos existentes y sin borrar nada."""
     proyecto = spec["project"]
     cmds = [["new", proyecto]]
@@ -327,6 +472,8 @@ def ordenes(spec: dict) -> list[list[str]]:
         cmd.extend(["-p", proyecto])
         cmds.append(cmd)
     cmds.append(["up", proyecto])
+    if spec.get("pfsense") and spec_path:
+        cmds.append(["pf", "profile", "apply", str(spec_path), "--yes"])
     return cmds
 
 
@@ -504,7 +651,8 @@ def _extremos(salida: str) -> set[tuple]:
     return pares
 
 
-def verificar(spec: dict, server: str | None, captures: bool = False) -> int:
+def verificar(spec: dict, server: str | None, captures: bool = False,
+              spec_path: str | None = None) -> int:
     proyecto = spec["project"]
     fallos = 0
 
@@ -590,6 +738,16 @@ def verificar(spec: dict, server: str | None, captures: bool = False) -> int:
     if captures:
         _capturar_fases(spec, "verify", server)
 
+    if spec.get("pfsense") and spec_path:
+        rc, salida = capturar(["pf", "profile", "status", str(spec_path)], server)
+        if rc != 0:
+            print(f"perfil pfSense: FALLO (exit {rc})")
+            for linea in salida.strip().splitlines():
+                print(f"  {linea}")
+            fallos += 1
+        else:
+            print("perfil pfSense: OK")
+
     print(f"RESULTADO: {'OK' if not fallos else 'FALLO'} "
           f"({len(spec['nodes'])} nodos, {len(spec['links'])} enlaces)")
     return 0 if not fallos else 1
@@ -660,7 +818,7 @@ def main(argv=None) -> int:
         except SpecError as exc:
             print(f"ERROR: {exc}")
             return 1
-        errores = validar(data)
+        errores = validar(data, perfiles_vecinos(args.spec))
         if errores:
             for error in errores:
                 print(f"{args.spec}: {error}")
@@ -680,7 +838,7 @@ def main(argv=None) -> int:
         print(f"ERROR: {exc}")
         return 1
 
-    errores = validar(data)
+    errores = validar(data, perfiles_vecinos(args.spec))
     if errores:
         for error in errores:
             print(f"{args.spec}: {error}")
@@ -693,7 +851,7 @@ def main(argv=None) -> int:
               f"{len(spec['links'])} enlaces)")
         return 0
     if args.cmd == "plan":
-        for argv_cmd in ordenes(spec):
+        for argv_cmd in ordenes(spec, args.spec):
             print(_mostrar(argv_cmd, args.server))
         return 0
     if not CLI.is_file():
@@ -701,7 +859,7 @@ def main(argv=None) -> int:
         return 2
     if args.cmd == "apply":
         return aplicar(spec, args.server, args.yes)
-    return verificar(spec, args.server)
+    return verificar(spec, args.server, spec_path=args.spec)
 
 
 if __name__ == "__main__":

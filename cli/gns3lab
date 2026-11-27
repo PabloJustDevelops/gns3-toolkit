@@ -104,6 +104,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import json
 import os
 import re
@@ -4458,11 +4459,433 @@ def _pf_config(args, pf, pfs, xml_put: str | None = None) -> int:
                    f"config.xml escrito; backup={backup or '-'}")
 
 
+def _pf_profile_spec(ruta: str) -> dict:
+    """Lee el YAML, valida el bloque `pfsense:` y rechaza solapes del directorio."""
+    L = _lab_module()
+    datos = L.leer(ruta)
+    errores = L.validar(datos, L.perfiles_vecinos(ruta))
+    if errores:
+        raise ValueError(f"{ruta}: " + "; ".join(errores))
+    perfil = L.normalizar(datos).get("pfsense")
+    if not isinstance(perfil, dict):
+        raise ValueError(f"{ruta}: no tiene bloque pfsense")
+    return perfil
+
+
+def _pf_profile_prefix(perfil: dict) -> int:
+    return ipaddress.ip_network(str(perfil["lan_cidr"]), strict=False).prefixlen
+
+
+def _pf_profile_plan(perfil: dict) -> tuple[list[list[str]], list[list[str]]]:
+    """Órdenes que ejecutaría el perfil: host primero y luego los `pf` existentes."""
+    bridge = perfil["bridge"]
+    host_ip = f"{perfil['host_ip']}/{_pf_profile_prefix(perfil)}"
+    host = [
+        ["ip", "link", "show", "dev", bridge],
+        ["ip", "link", "add", "name", bridge, "type", "bridge"],
+        ["ip", "link", "set", bridge, "up"],
+        ["ip", "-4", "-o", "addr", "show", "dev", bridge],
+        ["ip", "addr", "add", host_ip, "dev", bridge],
+    ]
+    pf = [
+        ["pf", "assign", "--wan", "em0", "--lan", "em1"],
+        ["pf", "ip", "em1", str(perfil["pfsense_ip"]),
+         str(_pf_profile_prefix(perfil))],
+        ["pf", "dhcp", "em1", str(perfil["dhcp_from"]), str(perfil["dhcp_to"])],
+        ["pf", "rule", "pass", "--if", "lan", "--proto", "any",
+         "--src", "any", "--dst", "any"],
+        ["pf", "nat", "--if", "wan"],
+        ["pf", "ssh", "--port", os.environ.get("PFSENSE_PORT", "22022")],
+    ]
+    return host, pf
+
+
+def _pf_ip_run(argv: list[str]) -> tuple[int, str]:
+    """Ejecuta `ip` y devuelve (exit, stdout+stderr); inyectable en tests."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except OSError as exc:
+        return 1, str(exc)
+
+
+def _pf_host_estado(perfil: dict) -> list[str]:
+    """Deriva del bridge/IP del host sin escribir nada."""
+    bridge = perfil["bridge"]
+    direccion = f"{perfil['host_ip']}/{_pf_profile_prefix(perfil)}"
+    problemas = []
+    rc, salida = _pf_ip_run(["ip", "link", "show", "dev", bridge])
+    if rc != 0:
+        return [f"bridge {bridge}: no existe"]
+    if "state DOWN" in salida:
+        problemas.append(f"bridge {bridge}: está DOWN")
+    rc, salida = _pf_ip_run(["ip", "-4", "-o", "addr", "show", "dev", bridge])
+    if rc != 0 or direccion not in salida:
+        problemas.append(f"bridge {bridge}: falta {direccion}")
+    return problemas
+
+
+def _pf_host_asegurar(perfil: dict) -> list[str]:
+    """Crea/levanta el bridge y añade la IP del host; devuelve las órdenes ejecutadas."""
+    bridge = perfil["bridge"]
+    direccion = f"{perfil['host_ip']}/{_pf_profile_prefix(perfil)}"
+    hechas = []
+    rc, salida = _pf_ip_run(["ip", "link", "show", "dev", bridge])
+    if rc != 0:
+        for argv in (["ip", "link", "add", "name", bridge, "type", "bridge"],
+                     ["ip", "link", "set", bridge, "up"]):
+            rc, salida = _pf_ip_run(argv)
+            if rc != 0:
+                raise RuntimeError(f"{shlex.join(argv)} falló: {salida.strip()}")
+            hechas.append(shlex.join(argv))
+    elif "state DOWN" in salida:
+        argv = ["ip", "link", "set", bridge, "up"]
+        rc, salida = _pf_ip_run(argv)
+        if rc != 0:
+            raise RuntimeError(f"{shlex.join(argv)} falló: {salida.strip()}")
+        hechas.append(shlex.join(argv))
+
+    rc, salida = _pf_ip_run(["ip", "-4", "-o", "addr", "show", "dev", bridge])
+    if rc != 0:
+        raise RuntimeError(f"no se puede leer la IP de {bridge}: {salida.strip()}")
+    if direccion not in salida:
+        argv = ["ip", "addr", "add", direccion, "dev", bridge]
+        rc, salida = _pf_ip_run(argv)
+        if rc != 0:
+            raise RuntimeError(f"{shlex.join(argv)} falló: {salida.strip()}")
+        hechas.append(shlex.join(argv))
+    return hechas
+
+
+def _pf_profile_contiene(actual, deseado) -> bool:
+    if isinstance(deseado, dict):
+        return isinstance(actual, dict) and all(
+            clave in actual and _pf_profile_contiene(actual[clave], valor)
+            for clave, valor in deseado.items())
+    if isinstance(deseado, list):
+        return isinstance(actual, list) and all(
+            any(_pf_profile_contiene(item, valor) for item in actual)
+            for valor in deseado)
+    return actual == deseado
+
+
+def _pf_profile_gns3_deseado(perfil: dict, nodo: dict, cloud: dict | None):
+    """Cambios de nodo y cloud; vacío cuando ya coinciden (idempotencia)."""
+    cuerpo: dict = {}
+    if str(nodo.get("console_type") or "").lower() != perfil["console_type"]:
+        cuerpo["console_type"] = perfil["console_type"]
+    props = nodo.get("properties") or {}
+    if not isinstance(props, dict):
+        props = {}
+    cambios_props: dict = {}
+    if props.get("adapter_type") != perfil["adapter_type"]:
+        cambios_props["adapter_type"] = perfil["adapter_type"]
+    disco = perfil.get("disk")
+    if disco and os.path.basename(str(props.get("hda_disk_image") or "")) != os.path.basename(disco):
+        cambios_props.update({"hda_disk_image": disco,
+                              "hda_disk_image_md5sum": ""})
+    if cambios_props:
+        cuerpo["properties"] = cambios_props
+
+    cuerpo_cloud = None
+    if cloud is not None and cloud.get("node_type") == "cloud":
+        props_cloud = cloud.get("properties") or {}
+        if not isinstance(props_cloud, dict):
+            props_cloud = {}
+        mapping = [dict(p) for p in (props_cloud.get("ports_mapping") or [])
+                   if isinstance(p, dict)]
+        entrada = next((p for p in mapping if p.get("port_number") == 0), None)
+        deseada = dict(entrada or {"name": "eth0", "port_number": 0})
+        deseada.update({"port_number": 0, "type": "ethernet",
+                        "interface": perfil["bridge"]})
+        if entrada is None or any(entrada.get(clave) != valor
+                                  for clave, valor in deseada.items()):
+            if entrada is None:
+                mapping.append(deseada)
+            else:
+                mapping = [deseada if p is entrada else p for p in mapping]
+            cuerpo_cloud = {"properties": {"ports_mapping": mapping}}
+    return cuerpo, cuerpo_cloud
+
+
+def _pf_profile_cliente(perfil: dict):
+    """PfSense con host del perfil salvo que PFSENSE_HOST lo sobrescriba."""
+    pfs = _pf_module()
+    pf = pfs.PfSense.from_env()
+    if not os.environ.get("PFSENSE_HOST"):
+        try:
+            pf.host = perfil["pfsense_ip"]
+        except (AttributeError, TypeError):
+            pass
+    return pfs, pf
+
+
+def _pf_profile_pf_drift(doc: dict, perfil: dict, ssh_port: int) -> list[str]:
+    """Acciones `pf` necesarias para que config.xml coincida con el perfil."""
+    interfaces = doc.get("interfaces") if isinstance(doc, dict) else {}
+    if not isinstance(interfaces, dict):
+        interfaces = {}
+
+    def rol(ifname: str):
+        if ifname in interfaces:
+            return ifname
+        for nombre, valores in interfaces.items():
+            if isinstance(valores, dict) and valores.get("if") == ifname:
+                return nombre
+        return None
+
+    wan_rol, lan_rol = rol("em0"), rol("em1")
+    acciones: list[str] = []
+    if wan_rol != "wan" or lan_rol != "lan":
+        acciones.append("assign")
+        lan_rol = "lan"
+    else:
+        lan_rol = lan_rol or "lan"
+
+    valores = interfaces.get(lan_rol) if isinstance(interfaces.get(lan_rol), dict) else {}
+    prefijo = str(_pf_profile_prefix(perfil))
+    if (str(valores.get("ipaddr", "")) != str(perfil["pfsense_ip"])
+            or str(valores.get("subnet", "")) != prefijo):
+        acciones.append("ip")
+
+    dhcpd = doc.get("dhcpd") if isinstance(doc, dict) else {}
+    dhcp_lan = dhcpd.get(lan_rol) if isinstance(dhcpd, dict) else None
+    rango = dhcp_lan.get("range") if isinstance(dhcp_lan, dict) else None
+    if (not isinstance(dhcp_lan, dict) or "enable" not in dhcp_lan
+            or not isinstance(rango, dict)
+            or str(rango.get("from")) != str(perfil["dhcp_from"])
+            or str(rango.get("to")) != str(perfil["dhcp_to"])):
+        acciones.append("dhcp")
+
+    regla = {"type": "pass", "interface": lan_rol, "ipprotocol": "inet",
+             "protocol": "any", "source": {"any": ""}, "destination": {"any": ""}}
+    filtro = doc.get("filter") if isinstance(doc, dict) else {}
+    reglas = filtro.get("rule") if isinstance(filtro, dict) else []
+    if not isinstance(reglas, list) or not any(
+            _pf_profile_contiene(item, regla) for item in reglas):
+        acciones.append("rule")
+
+    nat = doc.get("nat") if isinstance(doc, dict) else {}
+    outbound = nat.get("outbound") if isinstance(nat, dict) else {}
+    if not isinstance(outbound, dict) or outbound.get("mode") != "automatic":
+        acciones.append("nat")
+
+    system = doc.get("system") if isinstance(doc, dict) else {}
+    ssh = system.get("ssh") if isinstance(system, dict) else {}
+    enable = str(ssh.get("enable", "")).lower() if isinstance(ssh, dict) else ""
+    if (not isinstance(ssh, dict) or enable not in ("", "on", "yes", "1")
+            or str(ssh.get("port", "")) != str(ssh_port)):
+        acciones.append("ssh")
+    return acciones
+
+
+def _pf_profile_pf_aplicar(pf, acciones: list[str], perfil: dict,
+                          ssh_port: int) -> None:
+    """Ejecuta sólo las acciones con deriva, con los métodos de `pf` existentes."""
+    if "assign" in acciones:
+        _pf_profile_resultado("assign", pf.assign({"wan": "em0", "lan": "em1"}))
+    if "ip" in acciones:
+        _pf_profile_resultado("ip", pf.set_ip(
+            "em1", perfil["pfsense_ip"], _pf_profile_prefix(perfil)))
+    if "dhcp" in acciones:
+        _pf_profile_resultado("dhcp", pf.dhcp(
+            "em1", perfil["dhcp_from"], perfil["dhcp_to"]))
+    if "rule" in acciones:
+        _pf_profile_resultado("rule", pf.rule(
+            action="pass", ifname="lan", proto="any", src="any", dst="any"))
+    if "nat" in acciones:
+        _pf_profile_resultado("nat", pf.nat("wan"))
+    if "ssh" in acciones:
+        _pf_profile_resultado("ssh", pf.enable_ssh(port=ssh_port))
+
+
+def _pf_profile_resultado(accion: str, data) -> None:
+    if isinstance(data, dict) and data.get("ok") is False:
+        detalle = data.get("detail") or data.get("error") or data
+        raise RuntimeError(f"pf {accion}: {detalle}")
+
+
+def _pf_profile_redactar(texto) -> str:
+    secreto = os.environ.get("PFSENSE_PASSWORD")
+    texto = str(texto)
+    return texto.replace(secreto, "***") if secreto else texto
+
+
+def _pf_profile_imprimir_plan(perfil: dict, server: str | None) -> None:
+    host, pf = _pf_profile_plan(perfil)
+    prefijo = f"gns3lab --server {server} " if server else "gns3lab "
+    print(f"perfil pfSense {perfil['project']}/{perfil['node']} (dry-run):")
+    print("  host:")
+    for argv in host:
+        print(f"    $ {shlex.join(argv)}")
+    print("  GNS3:")
+    print(f"    {perfil['node']}: console_type=telnet, adapter_type=e1000"
+          + (f", disk={perfil['disk']}" if perfil.get("disk") else ""))
+    print(f"    {perfil['wan']}: puerto 0 -> bridge {perfil['bridge']}")
+    print("  pfSense:")
+    for argv in pf:
+        print(f"    $ {prefijo}{shlex.join(argv)}")
+    print(f"  WebUI: https://{perfil['webui_name']}.local -> "
+          f"https://{perfil['pfsense_ip']}/")
+
+
+def _pf_profile_apply(args, conf) -> int:
+    try:
+        perfil = _pf_profile_spec(args.spec)
+    except Exception as exc:
+        return _pf_error(args, _pf_profile_redactar(exc))
+    if getattr(args, "dry_run", False):
+        if getattr(args, "json", False):
+            host, pf = _pf_profile_plan(perfil)
+            return _pf_out(args, True, {
+                "dry_run": True,
+                "profile": perfil,
+                "host": [shlex.join(argv) for argv in host],
+                "pf": [shlex.join(argv) for argv in pf],
+                "webui": f"https://{perfil['webui_name']}.local",
+            })
+        _pf_profile_imprimir_plan(perfil, getattr(args, "server", None))
+        return 0
+    if not getattr(args, "yes", False):
+        _pf_profile_imprimir_plan(perfil, getattr(args, "server", None))
+        print("pf profile apply escribe en el host y en GNS3: repite con --yes "
+              "(no se ha ejecutado nada)", file=sys.stderr)
+        return 2
+
+    falta = _pf_env_error()
+    if falta:
+        return _pf_error(args, falta)
+    if core is None:
+        return _pf_error(args, "falta el núcleo gns3core para leer el nodo")
+
+    s = Server(getattr(args, "server", "local"), conf)
+    c = _core_client(s)
+    if not c.alive():
+        return _pf_error(args, f"servidor {s.name} ({s.url}) no responde")
+    try:
+        proj = c.resolve_project(perfil["project"])
+        nodos = c.nodes(proj["project_id"])
+    except (SystemExit, Exception) as exc:
+        return _pf_error(args, _pf_profile_redactar(exc))
+    nodo = next((n for n in nodos if n.get("name") == perfil["node"]), None)
+    if nodo is None:
+        return _pf_error(args, f"nodo {perfil['node']!r} no encontrado en "
+                               f"{proj['name']}; hay: {', '.join(n['name'] for n in nodos)}")
+    if nodo.get("node_type") != "qemu":
+        return _pf_error(args, f"{perfil['node']} no es QEMU ({nodo.get('node_type')})")
+    cloud = next((n for n in nodos if n.get("name") == perfil["wan"]), None)
+    if cloud is None:
+        return _pf_error(args, f"nodo WAN {perfil['wan']!r} no encontrado en {proj['name']}")
+
+    cambios = []
+    try:
+        hechas = _pf_host_asegurar(perfil)
+        cambios.extend(hechas)
+        cuerpo, cuerpo_cloud = _pf_profile_gns3_deseado(perfil, nodo, cloud)
+        for nid, body in ((nodo["node_id"], cuerpo),
+                          (cloud["node_id"], cuerpo_cloud)):
+            if not body:
+                continue
+            st, respuesta = c.put(f"/v2/projects/{proj['project_id']}/nodes/{nid}",
+                                  body, timeout=120)
+            if st not in (200, 201):
+                raise RuntimeError(f"no se pudo actualizar el nodo {nid[:8]}: "
+                                   f"[{st}] {_err(respuesta)}")
+            cambios.append(f"{nid[:8]}: {sorted(body)}")
+        _, pf = _pf_profile_cliente(perfil)
+        doc = pf.get_config()
+        if isinstance(doc, dict) and doc.get("ok") is False:
+            raise RuntimeError(doc.get("error") or "no se pudo leer config.xml")
+        ssh_port = int(os.environ.get("PFSENSE_PORT", "22022"))
+        acciones = _pf_profile_pf_drift(doc, perfil, ssh_port)
+        _pf_profile_pf_aplicar(pf, acciones, perfil, ssh_port)
+        cambios.extend(f"pf {accion}" for accion in acciones)
+    except Exception as exc:
+        return _pf_error(args, _pf_profile_redactar(exc))
+
+    url = f"https://{perfil['webui_name']}.local"
+    if getattr(args, "json", False):
+        return _pf_out(args, True, {
+            "project": perfil["project"], "node": perfil["node"],
+            "bridge": perfil["bridge"], "webui": url,
+            "changes": cambios,
+        })
+    if cambios:
+        for cambio in cambios:
+            print(f"  + {cambio}")
+    else:
+        print("sin cambios")
+    print(f"{perfil['project']}/{perfil['node']}: perfil aplicado; "
+          f"WebUI {url} -> https://{perfil['pfsense_ip']}/")
+    return 0
+
+
+def _pf_profile_status(args, conf) -> int:
+    try:
+        perfil = _pf_profile_spec(args.spec)
+    except Exception as exc:
+        return _pf_error(args, _pf_profile_redactar(exc))
+    problemas = _pf_host_estado(perfil)
+    if core is None:
+        problemas.append("falta el núcleo gns3core para leer el nodo")
+    else:
+        s = Server(getattr(args, "server", "local"), conf)
+        c = _core_client(s)
+        if not c.alive():
+            problemas.append(f"servidor {s.name} ({s.url}) no responde")
+        else:
+            try:
+                proj = c.resolve_project(perfil["project"])
+                nodos = c.nodes(proj["project_id"])
+            except (SystemExit, Exception) as exc:
+                problemas.append(_pf_profile_redactar(exc))
+                nodos = []
+            nodo = next((n for n in nodos if n.get("name") == perfil["node"]), None)
+            cloud = next((n for n in nodos if n.get("name") == perfil["wan"]), None)
+            if nodo is None:
+                problemas.append(f"nodo {perfil['node']!r}: no está en el proyecto")
+            else:
+                cuerpo, cuerpo_cloud = _pf_profile_gns3_deseado(perfil, nodo, cloud)
+                if cuerpo:
+                    problemas.append(f"nodo {perfil['node']}: deriva en "
+                                     f"{', '.join(sorted(cuerpo))}")
+                if cuerpo_cloud:
+                    problemas.append(f"nodo {perfil['wan']}: deriva en ports_mapping")
+    if os.environ.get("PFSENSE_PASSWORD"):
+        try:
+            _, pf = _pf_profile_cliente(perfil)
+            doc = pf.get_config()
+            if isinstance(doc, dict) and doc.get("ok") is False:
+                problemas.append(f"pf: {doc.get('error') or 'no se pudo leer config.xml'}")
+            else:
+                acciones = _pf_profile_pf_drift(
+                    doc, perfil, int(os.environ.get("PFSENSE_PORT", "22022")))
+                if acciones:
+                    problemas.append("pf: deriva en " + ", ".join(acciones))
+        except Exception as exc:
+            problemas.append(f"pf: {_pf_profile_redactar(exc)}")
+    else:
+        print("pfSense: omitido (falta PFSENSE_PASSWORD)", file=sys.stderr)
+
+    texto = "\n".join(problemas) if problemas else "sin deriva"
+    if getattr(args, "json", False):
+        return _pf_out(args, not problemas, {
+            "profile": perfil, "drift": problemas,
+            "webui": f"https://{perfil['webui_name']}.local",
+        })
+    print(f"{perfil['project']}/{perfil['node']}: {texto}")
+    return 0 if not problemas else 1
+
+
 def cmd_pf(args, conf) -> int:
     """Comandos pfSense: detect lee GNS3; el resto habla config.xml por SSH."""
     act = args.pf_action
     if act == "detect":
         return _pf_detect(args, conf)
+    if act == "profile":
+        if getattr(args, "profile_action", None) == "apply":
+            return _pf_profile_apply(args, conf)
+        return _pf_profile_status(args, conf)
 
     falta = _pf_env_error()
     if falta:
@@ -4641,7 +5064,11 @@ def _progreso_a_stderr():
 def _lab_spec(L, ruta: str) -> dict:
     """Lee y valida el YAML deseado; devuelve la forma normalizada."""
     datos = L.leer(ruta)
-    errores = L.validar(datos)
+    vecinos = getattr(L, "perfiles_vecinos", None)
+    try:
+        errores = L.validar(datos, vecinos(ruta) if callable(vecinos) else None)
+    except TypeError:
+        errores = L.validar(datos)
     if errores:
         raise ValueError(f"{ruta}: " + "; ".join(errores))
     return L.normalizar(datos)
@@ -4654,8 +5081,14 @@ def _lab_mostrar(L, cmd, server: str | None) -> str:
     return "gns3lab " + shlex.join(cmd)
 
 
-def _lab_comandos(L, spec: dict, server: str | None) -> list[str]:
-    return [_lab_mostrar(L, cmd, server) for cmd in L.ordenes(spec)]
+def _lab_comandos(L, spec: dict, server: str | None,
+                  ruta: str | None = None) -> list[str]:
+    ordenes = getattr(L, "ordenes")
+    try:
+        cmds = ordenes(spec, ruta)
+    except TypeError:
+        cmds = ordenes(spec)
+    return [_lab_mostrar(L, cmd, server) for cmd in cmds]
 
 
 def _lab_leer_json(ruta: str) -> dict:
@@ -4759,7 +5192,7 @@ def cmd_lab(args, conf) -> int:
 
         if accion == "plan":
             spec = _lab_spec(L, args.spec)
-            comandos = _lab_comandos(L, spec, server)
+            comandos = _lab_comandos(L, spec, server, args.spec)
             datos = {"project": spec["project"], "plan": comandos}
             return _lab_out(args, accion, True, datos, "\n".join(comandos))
 
@@ -4833,14 +5266,20 @@ def cmd_lab(args, conf) -> int:
             spec = _lab_spec(L, args.spec)
             import io
 
+            def verificar():
+                try:
+                    return L.verificar(spec, server, spec_path=args.spec)
+                except TypeError:
+                    return L.verificar(spec, server)
+
             buf = io.StringIO() if _lab_json(args) else None
             if buf is not None:
                 import contextlib
 
                 with contextlib.redirect_stdout(buf):
-                    rc = L.verificar(spec, server)
+                    rc = verificar()
             else:
-                rc = L.verificar(spec, server)
+                rc = verificar()
             lineas = (buf.getvalue().rstrip("\n").splitlines() if buf is not None else [])
             datos = {"project": spec["project"], "rc": rc, "lines": lineas}
             return _lab_out(args, accion, rc == 0, datos,
@@ -5350,6 +5789,17 @@ def main() -> int:
     q = pfsub.add_parser("ssh", help="habilitar el servidor SSH de pfSense")
     q.add_argument("--port", type=int, default=22022, help="puerto (por defecto 22022)")
     q.add_argument("--json", action="store_true", help="salida {ok, data}")
+
+    q = pfsub.add_parser("profile", help="perfil pfSense declarativo por proyecto")
+    profsub = q.add_subparsers(dest="profile_action", required=True, metavar="acción")
+    r = profsub.add_parser("apply", help="asegura host, nodo, cloud y config.xml")
+    r.add_argument("spec", help="fichero YAML del laboratorio con bloque pfsense")
+    r.add_argument("--dry-run", action="store_true", help="plan sin escribir nada")
+    r.add_argument("--yes", action="store_true", help="confirma la escritura")
+    r.add_argument("--json", action="store_true", help="salida {ok, data}")
+    r = profsub.add_parser("status", help="estado y deriva del perfil")
+    r.add_argument("spec", help="fichero YAML del laboratorio con bloque pfsense")
+    r.add_argument("--json", action="store_true", help="salida {ok, data}")
 
     # -- verificación por componente (solo lectura) -------------------------- #
     p = sub.add_parser("verify", help="comprueba que un componente del laboratorio está listo")
