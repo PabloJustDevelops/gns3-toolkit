@@ -39,16 +39,6 @@ def _registrations():
 
 
 REGISTERED_RESOURCES, REGISTERED_PROMPTS = _registrations()
-MISSING_RESOURCES = tuple(sorted(set(RESOURCE_URIS) - REGISTERED_RESOURCES.keys()))
-MISSING_PROMPTS = tuple(sorted(set(PROMPT_NAMES) - REGISTERED_PROMPTS.keys()))
-requires_resources = pytest.mark.skipif(
-    bool(MISSING_RESOURCES),
-    reason="BRIEF-mcpres pendiente: faltan resources " + ", ".join(MISSING_RESOURCES),
-)
-requires_prompts = pytest.mark.skipif(
-    bool(MISSING_PROMPTS),
-    reason="BRIEF-mcpres pendiente: faltan prompts " + ", ".join(MISSING_PROMPTS),
-)
 
 
 def _call(fn, *args, **kwargs):
@@ -139,8 +129,6 @@ def mcp_api(monkeypatch, fake_api):
     return fake_api
 
 
-@requires_resources
-@requires_prompts
 def test_uris_y_nombres_esperados_estan_registrados():
     assert set(RESOURCE_URIS) <= REGISTERED_RESOURCES.keys()
     assert set(PROMPT_NAMES) <= REGISTERED_PROMPTS.keys()
@@ -159,7 +147,6 @@ def test_uris_y_nombres_esperados_estan_registrados():
         ("gns3://templates", {}, ("pfSense", "VPCS")),
     ],
 )
-@requires_resources
 def test_resources_devuelven_datos_legibles_sin_imprimir(
     uri, kwargs, expected, mcp_api, capsys
 ):
@@ -173,7 +160,6 @@ def test_resources_devuelven_datos_legibles_sin_imprimir(
         assert value in text
 
 
-@requires_resources
 def test_topologia_inexistente_devuelve_error_con_proyectos_disponibles(mcp_api):
     result = _call(
         REGISTERED_RESOURCES["gns3://project/{project}/topology"].fn,
@@ -206,7 +192,6 @@ def test_topologia_inexistente_devuelve_error_con_proyectos_disponibles(mcp_api)
         ),
     ],
 )
-@requires_prompts
 def test_prompts_no_incluyen_credenciales_ni_rutas_de_usuario(
     name, kwargs, required, monkeypatch
 ):

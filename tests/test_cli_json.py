@@ -19,16 +19,10 @@ sys.modules[SPEC.name] = cli
 LOADER.exec_module(cli)
 
 
-def _has_global_json() -> bool:
-    """Comprueba el contrato sin ejecutar `main()` ni tocar la configuración real."""
+def test_contrato_main_declara_json_global():
+    """El contrato se comprueba sin ejecutar `main()` ni tocar la configuración real."""
     source = inspect.getsource(cli.main).split("add_subparsers", 1)[0]
-    return '"--json"' in source or "'--json'" in source
-
-
-requires_global_json = pytest.mark.skipif(
-    not _has_global_json(),
-    reason="BRIEF-jsoncli pendiente: main() no declara --json global",
-)
+    assert '"--json"' in source or "'--json'" in source
 
 
 @pytest.fixture
@@ -50,7 +44,6 @@ def run_cli(monkeypatch, tmp_path):
     return run
 
 
-@requires_global_json
 def test_json_valido_se_pasa_tal_cual(run_cli, capsys):
     raw = '{\n  "version": "2.2.61",\n  "ok": true\n}\n'
 
@@ -67,7 +60,6 @@ def test_json_valido_se_pasa_tal_cual(run_cli, capsys):
     assert captured.err == ""
 
 
-@requires_global_json
 @pytest.mark.parametrize("rc", [0, 7])
 def test_texto_se_envuelve_y_se_conserva_el_exit_code(run_cli, capsys, rc):
     def handler(args, conf):
@@ -87,7 +79,6 @@ def test_texto_se_envuelve_y_se_conserva_el_exit_code(run_cli, capsys, rc):
     assert captured.err == ""
 
 
-@requires_global_json
 def test_stderr_no_se_captura(run_cli, capsys):
     def handler(args, conf):
         print("salida normal")
@@ -106,7 +97,6 @@ def test_stderr_no_se_captura(run_cli, capsys):
     assert captured.err == "aviso por stderr\n"
 
 
-@requires_global_json
 def test_system_exit_conserva_su_codigo(run_cli, capsys):
     def handler(args, conf):
         print("no se pudo completar")
@@ -124,7 +114,6 @@ def test_system_exit_conserva_su_codigo(run_cli, capsys):
     assert captured.err == ""
 
 
-@requires_global_json
 def test_json_local_no_se_convierte_en_doble_json(run_cli, capsys):
     raw = '{"ok":false,"problems":["sin VPCS"]}\n'
 

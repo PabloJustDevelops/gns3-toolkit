@@ -5,18 +5,13 @@ import asyncio
 import inspect
 import threading
 
-import pytest
-
 import gns3_mcp_server as server
 
-BATCH_SOURCE = inspect.getsource(server.gns3_batch)
-PARALLEL_READY = all(token in BATCH_SOURCE for token in (
-    "ThreadPoolExecutor", '"parallel"', '"wall_ms"',
-))
-requires_parallel = pytest.mark.skipif(
-    not PARALLEL_READY,
-    reason="BRIEF-pfmcp pendiente: gns3_batch no expone ejecución paralela ni wall_ms",
-)
+
+def test_contrato_batch_expone_paralelismo_y_wall_ms():
+    source = inspect.getsource(server.gns3_batch)
+    for token in ("ThreadPoolExecutor", '"parallel"', '"wall_ms"'):
+        assert token in source
 
 
 def _call(fn, *args, **kwargs):
@@ -24,7 +19,6 @@ def _call(fn, *args, **kwargs):
     return asyncio.run(result) if inspect.isawaitable(result) else result
 
 
-@requires_parallel
 def test_batch_cinco_lecturas_conserva_orden_y_reporta_paralelo(monkeypatch):
     barrier = threading.Barrier(5, timeout=1)
 
@@ -86,7 +80,6 @@ def test_batch_una_operacion_con_error_no_rompe_las_demas(monkeypatch):
     assert result["results"][2]["result"]["nodes_total"] == 2
 
 
-@requires_parallel
 def test_batch_efectos_secundarios_no_se_paralelizan(monkeypatch):
     barrier = threading.Barrier(2, timeout=0.2)
     lock = threading.Lock()
