@@ -2,7 +2,9 @@
 """Guard de deriva entre docs, skill y código. Solo lectura, sin servidor.
 
 Los conteos se sacan del AST del código; las cifras escritas a mano en la
-documentación se contrastan con ellos. No modifica ningún fichero.
+documentación se contrastan con ellos. AGENTS.md se audita además contra la
+suite real (`pytest --collect-only -q`) y contra el pytest que arranca.
+No modifica ningún fichero.
 """
 from __future__ import annotations
 
@@ -25,6 +27,8 @@ CIFRA_RE = re.compile(r"(?<![\w/.-])(\d{1,3})\s*(áreas|area|areas|tools|comando
 TOOL_RE = re.compile(r"\bgns3_[a-z0-9_]+\b")
 CLI_RE = re.compile(r"\bgns3lab\s+([a-z][a-z0-9-]*)")
 ENLACE_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)")
+TESTS_RE = re.compile(r"(?<![\w/.-])(\d{1,5})\s+tests?\b", re.I)
+PYTEST_Q_RE = re.compile(r"(?<![\w.-])pytest\s+-q")
 SECRETO_RE = re.compile(r"\b(password|api_key|apikey|token|secret)\b\s*[:=]\s*['\"]([^'\"]{1,80})['\"]", re.I)
 SALTAR_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".coverage"}
 
@@ -86,6 +90,49 @@ def symbols_code(root: Path) -> dict[str, set[str]]:
 def count_all(root: Path) -> dict[str, int]:
     """Cifras reales; también la usa la suite de tests para generar su fixture."""
     return {clave: len(valores) for clave, valores in symbols_code(root).items()}
+
+
+def _python_de_la_raiz(root: Path) -> str:
+    """El intérprete que tiene pytest: el venv del repo si existe."""
+    venv = root / ".venv" / "bin" / "python"
+    return str(venv) if venv.is_file() else sys.executable
+
+
+def count_tests(root: Path) -> int:
+    """Tests que recolecta pytest, la misma cifra que `pytest --collect-only -q`."""
+    proc = subprocess.run(
+        [_python_de_la_raiz(root), "-m", "pytest", "--collect-only", "-q",
+         "-p", "no:cacheprovider"],
+        cwd=root, capture_output=True, text=True, check=False, timeout=600)
+    if proc.returncode not in (0, 5):
+        raise LecturaError(
+            "pytest --collect-only falló en {} (exit {}): {}".format(
+                root, proc.returncode, (proc.stdout + proc.stderr).strip()[:300]))
+    encontrado = re.search(r"(\d+) tests? collected", proc.stdout)
+    if encontrado:
+        return int(encontrado.group(1))
+    if proc.returncode == 5 or "no tests ran" in proc.stdout:
+        return 0
+    raise LecturaError(
+        "pytest --collect-only: salida inesperada: " + proc.stdout.strip()[:300])
+
+
+def _agents_md(root: Path) -> list[str]:
+    """AGENTS.md declara el recuento real de tests y el pytest que arranca."""
+    ruta = root / "AGENTS.md"
+    if not ruta.is_file():
+        return []
+    reales = count_tests(root)
+    hallazgos = []
+    for numero, linea in enumerate(leer(ruta).splitlines(), 1):
+        for texto in TESTS_RE.findall(linea):
+            if int(texto) != reales:
+                hallazgos.append(
+                    f"AGENTS.md:{numero}: declara {texto} tests, la suite tiene {reales} tests")
+        if PYTEST_Q_RE.search(linea) and "-m pytest" not in linea:
+            hallazgos.append(
+                f"AGENTS.md:{numero}: `pytest -q` no arranca; usa `python -m pytest -q`")
+    return hallazgos
 
 
 def _cifras_declaradas(ruta: Path, root: Path, reales: dict[str, int]) -> list[str]:
@@ -185,6 +232,7 @@ def check(root: Path) -> tuple[list[str], dict[str, set[str]]]:
         hallazgos.extend(_cifras_declaradas(ruta, root, reales))
     gui = root / "docs/GUI-PORTADA.md"
     hallazgos.extend(_en_curso(gui, root, simbolos))
+    hallazgos.extend(_agents_md(root))
     hallazgos.extend(_enlaces(root))
     hallazgos.extend(_secretos(root))
     return hallazgos, simbolos
