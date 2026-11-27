@@ -114,7 +114,7 @@ dependencias de terceros: sirve con la stdlib; Pillow y tesseract mejoran la cap
 Declaración de alcance: 12 áreas, 50 tools y 48 comandos, recalculados por `scripts/verify.py`.
 - El OCR lee bien 720x400 con fuente VGA; no espera texto pequeño.
 - Tests: 840 passed, cobertura 100 % de `gns3core.py` (996 sentencias, 0 miss) y 100 % de
-  `pfsense.py` (435 sentencias, 0 miss), con dobles
+  `pfsense.py` (465 sentencias, 0 miss), con dobles
   de HTTP, telnet y HMP y sin servidor GNS3. La matriz de lo que cubre cada
   endpoint está en [docs/API-COVERAGE.md](docs/API-COVERAGE.md).
 
