@@ -176,6 +176,42 @@ def test_batch_bloquea_tool_destructiva_sin_confirm(batch_api):
     assert batch_api.requests == []
 
 
+def test_batch_bloquea_todas_las_mutaciones_equivalentes_sin_confirm(batch_api):
+    """Hallazgo 1: la lista parcial dejaba pasar mutaciones equivalentes sin confirm."""
+    operaciones = [
+        {"tool": "gns3_nodes", "args": {"action": "delete", "node": "PC1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_nodes", "args": {"action": "stop", "node": "PC1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_nodes", "args": {"action": "reload", "node": "PC1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_node_edit", "args": {"action": "disk-resize", "node": "PC1", "size": 2048,
+                                            "project_name": "lab-prueba"}},
+        {"tool": "gns3_node_edit", "args": {"action": "delete", "node": "PC1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_console_control", "args": {"action": "reset", "node": "PC1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_console_control", "args": {"action": "reset-all", "project_name": "lab-prueba"}},
+        {"tool": "gns3_monitor", "args": {"action": "reset", "node": "PC1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_snapshots", "args": {"action": "restore", "snapshot_id": "s1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_snapshots", "args": {"action": "delete", "snapshot_id": "s1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_drawings", "args": {"action": "clear", "project_name": "lab-prueba"}},
+        {"tool": "gns3_drawings", "args": {"action": "delete", "drawing_id": "d1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_links", "args": {"action": "delete", "link_id": "link-1", "project_name": "lab-prueba"}},
+        {"tool": "gns3_nio", "args": {"action": "delete", "node": "PC1", "adapter": 0, "port": 0,
+                                      "project_name": "lab-prueba"}},
+        {"tool": "gns3_project_io", "args": {"action": "load", "path": "/tmp/x.gns3p"}},
+        {"tool": "gns3_project_io", "args": {"action": "duplicate", "project_name": "lab-prueba"}},
+        {"tool": "gns3_template", "args": {"action": "delete", "name": "tpl"}},
+        {"tool": "gns3_compute", "args": {"action": "delete", "cid": "local"}},
+        {"tool": "gns3_gns3vm", "args": {"action": "set", "body": {}}},
+        {"tool": "gns3_emulator", "args": {"action": "img-config", "body": {}}},
+        {"tool": "gns3_symbols", "args": {"action": "upload", "symbol_id": "s", "content": "x"}},
+        {"tool": "gns3_iou_license", "args": {"action": "set", "body": {}}},
+    ]
+    for op in operaciones:
+        result = _call(server.gns3_batch, [op])
+        item = result["results"][0]
+        assert item["ok"] is False, op
+        assert "confirm" in _fold(str(item.get("error", ""))), op
+    assert batch_api.requests == []
+
+
 def test_batch_ejecuta_tool_destructiva_confirmada_sobre_el_doble(
     batch_api, monkeypatch
 ):
@@ -228,6 +264,18 @@ def test_informe_devuelve_path_bytes_y_contenido_sin_exponer_datos(
     )
     assert not re.search(r"https?://[^/\s:@]+:[^/@\s]+@", result["content"])
     assert not re.search(r"\bbasic\s+[a-z0-9+/=]{8,}", folded)
+
+
+def test_redact_informe_ordena_secretos_mas_largos_primero_sin_residuos(monkeypatch):
+    """Hallazgo 2: `_redact_informe` redactaba usuario antes que contraseña."""
+    monkeypatch.setattr(server, "_conf", lambda: {"user": "admin", "password": "admin12345"})
+    texto = "password admin12345 y usuario admin"
+
+    resultado = server._redact_informe(texto)
+
+    assert "admin12345" not in resultado
+    assert "12345" not in resultado
+    assert "admin" not in resultado.replace("[redactado]", "")
 
 
 def test_informe_refleja_como_error_literal_un_dato_ilegible(batch_api, tmp_path):

@@ -121,14 +121,15 @@ def _http_client(origin: str, auth: tuple[str, str]):
 
 
 def _drop_http_client(origin: str, auth: tuple[str, str], client) -> None:
-    """Saca del pool un cliente con la conexión muerta antes de reintentar."""
+    """Saca del pool un cliente con la conexión muerta antes de reintentar.
+
+    No se cierra el cliente prestado: otros hilos pueden tener la referencia y estar
+    usándola; cerrarlo sin sincronizar rompería sus peticiones. Solo se retira del pool
+    bajo el lock; el reintento usa un cliente nuevo.
+    """
     with _http_client_lock:
         if _http_clients.get((origin, auth)) is client:
             _http_clients.pop((origin, auth), None)
-            try:
-                client.close()
-            except OSError:
-                pass
 
 
 def _api_get(c: dict[str, str], url: str, auth: tuple[str, str], timeout: float):
@@ -569,10 +570,11 @@ def _labspec_module():
 def _lab_redact(text: Any) -> str:
     """Quita credenciales de errores y salidas sin alterar el resto del literal."""
     value = str(text)
+    secrets: list[str] = []
     for key in ("GNS3_USER", "GNS3_PASSWORD", "PFSENSE_USER", "PFSENSE_PASSWORD"):
         secret = os.environ.get(key)
         if secret:
-            value = value.replace(secret, "[redactado]")
+            secrets.append(secret)
     try:
         conf = _conf()
     except Exception:
@@ -580,7 +582,10 @@ def _lab_redact(text: Any) -> str:
     for key in ("user", "password"):
         secret = str(conf.get(key) or "")
         if secret:
-            value = value.replace(secret, "[redactado]")
+            secrets.append(secret)
+    # Secretos más largos primero: una contraseña que contiene el usuario no deja residuo.
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        value = value.replace(secret, "[redactado]")
     value = re.sub(r"(?i)\b(?:https?|wss?)://[^/@\s]+@",
                    lambda match: match.group(0).split("://", 1)[0] + "://", value)
     return re.sub(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}", "Basic [redactado]", value)
@@ -2120,12 +2125,31 @@ def gns3_capture(
                 return {"error": "no se pudo descargar el pcap", "detail": download_error,
                         "project_error": str(e)}
             base = Path(proj.get("path", "")) if isinstance(proj, dict) else None
+            # No atribuir un PCAP ajeno: solo un fichero de ESTE enlace.
+            nombres = {f"capture-{link_id[:8]}.pcap", f"capture-{link_id}.pcap",
+                       f"capture-{link_id[:8]}", file_name}
+            try:
+                st_links, links = client.get(f"/v2/projects/{pid}/links")
+            except (ConnectionError, RuntimeError):
+                st_links, links = 0, []
+            if st_links == 200 and isinstance(links, list):
+                for l in links:
+                    if isinstance(l, dict) and l.get("link_id") == link_id:
+                        cap = l.get("capture_file_name")
+                        if cap:
+                            nombres.add(Path(str(cap)).name)
+                            nombres.add(str(cap))
+                        break
+            nombres = {n for n in nombres if n}
+            cap_dir = base / "project-files" / "captures" if base and base.exists() else None
             cands = sorted(
-                (base / "project-files" / "captures").glob("*.pcap"),
+                (p for p in cap_dir.glob("*.pcap")
+                 if p.name in nombres or p.stem in nombres or link_id[:8] in p.stem),
                 key=lambda p: p.stat().st_mtime, reverse=True,
-            ) if base and base.exists() else []
+            ) if cap_dir else []
             if not cands:
-                return {"error": "no se pudo descargar el pcap y no hay ficheros en project-files/captures",
+                return {"error": "no se pudo descargar el pcap y no hay fichero de este enlace "
+                                 "en project-files/captures",
                         "detail": download_error}
             pcap = cands[0].read_bytes()
         out_dir = Path(os.path.expanduser("~/GNS3/captures"))
@@ -3030,6 +3054,31 @@ def gns3_project_io(
         except ConnectionError as e:
             return {"error": str(e)}
         return res if st in (200, 201) else _err_msg(st, res, "cargar proyecto")
+    if action == "import":
+        # import crea un proyecto nuevo: no exige un proyecto previo.
+        if not path:
+            return {"error": "action=import exige path"}
+        src = Path(path).expanduser()
+        if not src.is_file():
+            return {"error": f"no existe {src}"}
+        body = src.read_bytes()
+        new_name = name
+        nuevo = str(uuid.uuid4())
+        st, res = client.req("POST", f"/v2/projects/{nuevo}/import", data=body,
+                             ctype="application/gns3project", timeout=600)
+        if st not in (200, 201):
+            msg = res.get("message") if isinstance(res, dict) else res
+            return {"error": f"import falló: [{st}] {msg}"}
+        imported_name = res.get("name") if isinstance(res, dict) else None
+        if new_name:
+            client.put(f"/v2/projects/{nuevo}", {"name": new_name})
+        opened = False
+        if open_after:
+            s2, _ = client.post(f"/v2/projects/{nuevo}/open", timeout=300)
+            opened = s2 in (200, 201)
+        return {"project_id": nuevo, "name": new_name or imported_name,
+                "kb": round(len(body) / 1024), "opened": opened,
+                "nodes": len(client.nodes(nuevo)) if opened else None}
     proj, err = _pid_or_error(client, project_id, project_name)
     if err:
         return err
@@ -3042,20 +3091,40 @@ def gns3_project_io(
         arrancados; se paran, se exporta y se vuelven a arrancar los que estaban.
         """
         estaban: list[str] = []
-        if stop_nodes:
-            for n in client.nodes(pid):
-                if n.get("status") == "started":
-                    estaban.append(n["node_id"])
-                    client.post(f"/v2/projects/{pid}/nodes/{n['node_id']}/stop", timeout=180)
-            if estaban:
-                time.sleep(1)
+        restart_failed: list[str] = []
         try:
+            if stop_nodes:
+                for n in client.nodes(pid):
+                    if n.get("status") != "started":
+                        continue
+                    nid = n["node_id"]
+                    try:
+                        st_stop, _ = client.post(
+                            f"/v2/projects/{pid}/nodes/{nid}/stop", timeout=180)
+                        parado = st_stop in (200, 201, 204)
+                    except (ConnectionError, RuntimeError):
+                        parado = False
+                    # Solo se rearranca lo que de verdad se paró.
+                    if parado:
+                        estaban.append(nid)
+                if estaban:
+                    time.sleep(1)
             st, body = client.get(f"/v2/projects/{pid}/export", raw=True, timeout=300)
         finally:
+            # Rearranque por nodo, aislado: un fallo no impide rearrancar los demás.
             for nid in estaban:
-                client.post(f"/v2/projects/{pid}/nodes/{nid}/start", timeout=180)
+                try:
+                    st_start, _ = client.post(
+                        f"/v2/projects/{pid}/nodes/{nid}/start", timeout=180)
+                    if st_start not in (200, 201, 204):
+                        restart_failed.append(nid)
+                except (ConnectionError, RuntimeError):
+                    restart_failed.append(nid)
         if st != 200 or not isinstance(body, bytes) or not body.startswith(b"PK"):
             raise RuntimeError(f"export falló: [{st}] {body[:200]!r}")
+        if restart_failed:
+            raise RuntimeError(
+                "export ok pero no se pudo rearrancar: " + ", ".join(restart_failed))
         return body
 
     if action == "export":
@@ -3076,30 +3145,6 @@ def gns3_project_io(
         except ConnectionError as e:
             return {"error": str(e)}
         return res if st in (200, 201) else _err_msg(st, res, "duplicar proyecto")
-
-    if action == "import":
-        if not path:
-            return {"error": "action=import exige path"}
-        src = Path(path).expanduser()
-        if not src.is_file():
-            return {"error": f"no existe {src}"}
-        body = src.read_bytes()
-        new_name = name
-        nuevo = str(uuid.uuid4())
-        st, res = client.req("POST", f"/v2/projects/{nuevo}/import", data=body,
-                             ctype="application/gns3project", timeout=600)
-        if st not in (200, 201):
-            msg = res.get("message") if isinstance(res, dict) else res
-            return {"error": f"import falló: [{st}] {msg}"}
-        if new_name:
-            client.put(f"/v2/projects/{nuevo}", {"name": new_name})
-        opened = False
-        if open_after:
-            s2, _ = client.post(f"/v2/projects/{nuevo}/open", timeout=300)
-            opened = s2 in (200, 201)
-        return {"project_id": nuevo, "name": new_name or proj["name"],
-                "kb": round(len(body) / 1024), "opened": opened,
-                "nodes": len(client.nodes(nuevo)) if opened else None}
 
     return _unknown_action(action, ["export", "import", "duplicate", "load"])
 
@@ -3781,24 +3826,71 @@ def _accepts_tool_arg(params: dict, name: str) -> bool:
                                  for param in params.values())
 
 
+# Operaciones mutadoras que en el batch exigen "confirm": true, igual que sus equivalentes
+# individuales. `None` bloquea todas las acciones de la tool. La confirmación vive en la
+# operación del batch, no en `args`.
+_BATCH_BLOCKED: dict[str, Optional[set[str]]] = {
+    # servidor y compute
+    "gns3_server": None,
+    "gns3_compute": {"add", "update", "delete", "call"},
+    "gns3_gns3vm": {"set"},
+    "gns3_emulator": {"udp", "img-config", "vmware-vmnet"},
+    "gns3_iou_license": {"set"},
+    # proyectos
+    "gns3_projects": {"create", "open", "close", "update", "delete"},
+    "gns3_project_io": {"import", "duplicate", "load", "delete"},
+    "gns3_project_files": {"put"},
+    "gns3_node_files": None,  # sin acción propia; se bloquea aparte por `content`
+    # nodos
+    "gns3_nodes": {"add", "start", "stop", "reload", "suspend", "delete"},
+    "gns3_nodes_bulk": None,
+    "gns3_node_action": {"start", "stop", "reload", "suspend", "resume", "pause", "unpause"},
+    "gns3_node_edit": {"create", "update", "switch", "delete", "duplicate", "clone_disk",
+                       "disk-resize"},
+    "gns3_template": {"create", "update", "delete", "apply", "duplicate", "base-config"},
+    "gns3_upload": None,
+    # enlaces y NIO
+    "gns3_links": {"add", "update", "delete"},
+    "gns3_link_edit": {"add", "delete"},
+    "gns3_nio": {"set", "delete"},
+    # capturas y snapshots
+    "gns3_capture": {"start", "stop"},
+    "gns3_port_capture": {"start", "stop"},
+    "gns3_snapshots": {"create", "restore", "delete"},
+    # consola / monitor
+    "gns3_console_control": {"reset", "reset-all"},
+    "gns3_monitor": {"type", "key", "cmd", "reset"},
+    # canvas
+    "gns3_drawings": {"text", "rect", "update", "clear", "delete"},
+    # símbolos
+    "gns3_symbols": {"upload"},
+    # lab
+    "gns3_lab": {"apply"},
+}
+
+# gns3_node_files no tiene `action`; escribe si lleva `content`.
+# gns3_template base-config solo escribe si lleva `content`; sin él lee.
+
+
 def _batch_block_reason(tool: str, args: dict) -> Optional[str]:
     """Capa de seguridad del batch: la confirmación vive en la operación, no en args."""
     action = str(args.get("action", "")).lower()
     blocked = False
-    if tool == "gns3_server":
-        blocked = True
-    elif tool == "gns3_project_io":
-        blocked = action in ("delete", "import")
-    elif tool == "gns3_projects":
-        blocked = action == "delete"
-    elif tool == "gns3_node_edit":
-        blocked = action == "delete"
-    elif tool == "gns3_node_action":
-        blocked = action in ("stop", "reload")
-    elif tool == "gns3_nodes_bulk":
-        blocked = True
-    elif tool == "gns3_lab":
-        blocked = action == "apply" and args.get("yes") is True
+    if tool in _BATCH_BLOCKED:
+        allowed = _BATCH_BLOCKED[tool]
+        if tool == "gns3_lab":
+            # apply sin yes=True no escribe; solo bloquea la aplicación real.
+            blocked = action == "apply" and args.get("yes") is True
+        elif tool == "gns3_template" and action == "base-config":
+            # base-config sin content lee; con content sobrescribe.
+            blocked = args.get("content") is not None
+        elif tool == "gns3_compute" and action == "call":
+            # call con body escribe (POST); sin body solo consulta.
+            blocked = args.get("body") is not None
+        elif tool == "gns3_node_files":
+            blocked = args.get("content") is not None
+        else:
+            blocked = allowed is None or action in allowed
     if not blocked:
         return None
     suffix = f" (action={action})" if action else ""
@@ -4003,10 +4095,14 @@ def _redact_informe(text: str) -> str:
         conf = _conf()
     except Exception:
         conf = {}
+    secrets = []
     for key in ("user", "password"):
         value = str(conf.get(key) or "")
         if value:
-            text = text.replace(value, "[redactado]")
+            secrets.append(value)
+    # Secretos más largos primero: una contraseña que contiene el usuario no deja residuo.
+    for value in sorted(set(secrets), key=len, reverse=True):
+        text = text.replace(value, "[redactado]")
     text = re.sub(r"(?i)\b(?:https?|wss?)://[^/@\s]+@", lambda m: m.group(0).split("://", 1)[0] + "://", text)
     text = re.sub(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}", "Basic [redactado]", text)
     text = re.sub(r"(?i)/(?:home|users)/[^/\s]+", "~", text)

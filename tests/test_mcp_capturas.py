@@ -364,3 +364,58 @@ def test_accion_desconocida_lista_las_cuatro_validas():
 
     assert result["valid"] == ["phases", "console", "webui", "index"]
     assert "gns3_capturas" in result["hint"]
+
+
+def _capture_fake_client(monkeypatch, proj_root):
+    class FakeCaptureClient:
+        def link_capture(self, pid, lid, action, file_name=None):
+            return (409, {"message": "captura parada"})  # 409: fichero en disco
+
+        def project_get(self, pid):
+            return {"path": str(proj_root)}
+
+        def get(self, url, **_kwargs):
+            return (200, [{"link_id": "link-1", "capture_file_name": "capture-link-1.pcap"}])
+
+    monkeypatch.setattr(server, "_resolve_project", lambda _pid, _name: ("p1", {}))
+    monkeypatch.setattr(server, "_ensure_open", lambda _pid: None)
+    monkeypatch.setattr(server, "_client", lambda: FakeCaptureClient())
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+
+
+def test_capture_read_fallback_no_atribuye_pcap_ajeno(monkeypatch, tmp_path):
+    """Hallazgo 4: el fallback no etiqueta la captura más reciente como el enlace pedido."""
+    proj_root = tmp_path / "proj"
+    cap_dir = proj_root / "project-files" / "captures"
+    cap_dir.mkdir(parents=True)
+    propio = cap_dir / "capture-link-1.pcap"
+    propio.write_bytes(b"PROPIO")
+    ajeno = cap_dir / "capture-otro-99.pcap"
+    ajeno.write_bytes(b"AJENO")
+    # el ajeno es el más reciente
+    import os as _os
+    _os.utime(ajeno, (2_000_000_000, 2_000_000_000))
+    _os.utime(propio, (1_000_000_000, 1_000_000_000))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _capture_fake_client(monkeypatch, proj_root)
+
+    result = server.gns3_capture(action="read", project_id="p1", link_id="link-1")
+
+    assert "error" not in result
+    from pathlib import Path as _P
+    assert _P(result["path"]).read_bytes() == b"PROPIO"
+
+
+def test_capture_read_fallback_solo_pcap_ajeno_da_error(monkeypatch, tmp_path):
+    proj_root = tmp_path / "proj"
+    cap_dir = proj_root / "project-files" / "captures"
+    cap_dir.mkdir(parents=True)
+    ajeno = cap_dir / "capture-otro-99.pcap"
+    ajeno.write_bytes(b"AJENO")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    _capture_fake_client(monkeypatch, proj_root)
+
+    result = server.gns3_capture(action="read", project_id="p1", link_id="link-1")
+
+    assert "error" in result
+    assert "enlace" in result["error"].lower() or "pcap" in result["error"].lower()
