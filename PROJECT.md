@@ -17,7 +17,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 - `gns3lab verify qemu|pf|vpcs` y `gns3_verify`: verificación solo lectura por componente, con
   checks y problemas accionables (`docs/VERIFICACION.md`).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 828 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
+- **Tests: 840 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (435 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
 - MCP: 50 tools, **6 resources + 1 resource template** (`gns3://project/{project}/topology`) y
@@ -141,7 +141,7 @@ PRs mergeados: #2 y #5 (errores HTTP de plantillas en CLI y MCP), #8 (capturas H
 #9 (WebUI headless solo lectura con fallback a consola), #10 (tool `gns3_capturas`), #11 y #12
 (docs/skill y `find_monitor_port`). Issues abiertos: #1 y #3 y #4 (este último cerrado por #12).
 
-Verificado en `master`: 828 passed, 100 % de `gns3core.py` y `pfsense.py`; 50 tools, 48 comandos,
+Verificado en `master`: 840 passed, 100 % de `gns3core.py` y `pfsense.py`; 50 tools, 48 comandos,
 6 resources; `verify.py` y `check-links.py` limpios. Última revisión de Codex bloqueada por
 `usage limit` (11:17 PM): se sustituyó por revisión manual del diff final y pasada anterior.
 
@@ -157,7 +157,7 @@ Una segunda pasada del mismo revisor encontró tres regresiones, corregidas y ve
 `master`: rechazo de topología de otro proyecto, HTTP 500 al leer enlaces ya no se interpreta
 como lista vacía y `verify` compara `porta/portb`.
 
-Verificado en `master`: 828 passed, 100 % de `gns3core.py` y `pfsense.py` (1431 sentencias),
+Verificado en `master`: 840 passed, 100 % de `gns3core.py` y `pfsense.py` (1431 sentencias),
 50 tools, 48 comandos, 6 resources, `verify.py` y `check-links.py` limpios.
 
 ### Séptima tanda: pfSense nativo y MCP más rápido (2026-11-25)
