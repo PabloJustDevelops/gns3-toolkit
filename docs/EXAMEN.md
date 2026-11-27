@@ -6,7 +6,7 @@ Secuencia para montar y entregar el escenario sin GUI, en el orden en que se hac
 lleva el comando exacto y la salida que confirma que salió bien. Si un paso no imprime lo que
 pone aquí, no sigas: está en [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-Referencia de flags: [COMANDOS.md](COMANDOS.md). El proyecto se llama `examen` en todo el guion.
+Referencia de flags: [COMANDOS.md](COMANDOS.md). El proyecto se llama `Kit de examen` en todo el guion: es el nombre por defecto de `gns3lab examen` (`EXAMEN_NAME` en `cli/gns3lab`, salvo `--name`).
 
 ## Atajo: el kit en tres comandos
 
@@ -29,7 +29,7 @@ se guardan, con un máximo de cinco, y el resultado es un `indice.md` con fase, 
 no se genera un documento final de capturas.
 
 ```bash
-gns3lab shot PF1 -p examen-kit                        # HMP con OCR, hoy disponible
+gns3lab shot PF1 -p Kit de examen                        # HMP con OCR, hoy disponible
 gns3lab lab apply --spec examples/lab-ejemplo.yaml --captures --yes   # previsto en capcore
 gns3lab examen capturas --out ~/GNS3/capturas          # previsto en capweb
 gns3lab examen capturas --webui --out ~/GNS3/capturas  # previsto en capweb, sólo lectura
@@ -66,19 +66,19 @@ los nodos NAT no se crean: `sudo systemctl start libvirtd`.
 ## 2. Levantar el kit
 
 ```bash
-gns3lab status examen-kit
-gns3lab up examen-kit
-gns3lab status examen-kit
+gns3lab status Kit de examen
+gns3lab up Kit de examen
+gns3lab status Kit de examen
 ```
 
 Confirma, en el segundo `status`, cada nodo con `started` y su consola (`telnet:5011`,
-`vnc:5901`). `up` imprime `examen-kit: N nodos, arranco N` y la lista final de estados; código 0
+`vnc:5901`). `up` imprime `Kit de examen: N nodos, arranco N` y la lista final de estados; código 0
 es que todos los `start` fueron aceptados.
 
 Antes de tocar nada, red de seguridad:
 
 ```bash
-gns3lab snap create antes-examen examen-kit
+gns3lab snap create antes-examen Kit de examen
 ```
 
 Confirma: `crear 'antes-examen' -> [200]`. La CLI para y re-arranca los nodos sola.
@@ -86,7 +86,7 @@ Confirma: `crear 'antes-examen' -> [200]`. La CLI para y re-arranca los nodos so
 ## 3. Leer el menú de pfSense por OCR
 
 ```bash
-gns3lab shot PF1 -p examen-kit
+gns3lab shot PF1 -p Kit de examen
 ```
 
 Confirma: una ruta `~/GNS3/captures/screen-...png`, su tamaño en KB y, debajo, el texto de la
@@ -108,8 +108,8 @@ proceso no es visible desde tu usuario. Vuelve al paso 2.
 Se hace a ciegas entre captura y captura. Primero la opción del menú:
 
 ```bash
-gns3lab type PF1 "1" --enter -p examen-kit
-gns3lab shot PF1 -p examen-kit
+gns3lab type PF1 "1" --enter -p Kit de examen
+gns3lab shot PF1 -p Kit de examen
 ```
 
 Confirma: la captura ya no muestra el menú, sino las preguntas de asignación (VLANs, WAN, LAN)
@@ -120,10 +120,10 @@ adaptadores suele ser `em0`/`em1` o `vtnet0`/`vtnet1`, según el `adapter_type` 
 ejemplo, si pide la WAN y el disco trae `em0`:
 
 ```bash
-gns3lab type PF1 "em0" --enter -p examen-kit
-gns3lab shot PF1 -p examen-kit
-gns3lab type PF1 "em1" --enter -p examen-kit
-gns3lab shot PF1 -p examen-kit
+gns3lab type PF1 "em0" --enter -p Kit de examen
+gns3lab shot PF1 -p Kit de examen
+gns3lab type PF1 "em1" --enter -p Kit de examen
+gns3lab shot PF1 -p Kit de examen
 ```
 
 Confirma: la última captura muestra el resumen con `WAN (wan) -> em0` y `LAN (lan) -> em1`, y
@@ -134,9 +134,9 @@ Si el disco trae `em0/em1` y el nodo arranca con `virtio-net-pci`, pfSense entra
 «interface mismatch»: páralo y cambia el adaptador.
 
 ```bash
-gns3lab down examen-kit --keep-open
-gns3lab node props PF1 -p examen-kit --set adapter_type=e1000
-gns3lab up examen-kit
+gns3lab down Kit de examen --keep-open
+gns3lab node props PF1 -p Kit de examen --set adapter_type=e1000
+gns3lab up Kit de examen
 ```
 
 Confirma: `PF1: {..."adapter_type": "e1000"} -> OK`, y tras `up`, el menú en vez del bucle.
@@ -146,7 +146,7 @@ Confirma: `PF1: {..."adapter_type": "e1000"} -> OK`, y tras `up`, el menú en ve
 El switch de GNS3 se configura por API con el mapa de puertos:
 
 ```bash
-gns3lab node switch SW1 -p examen-kit --port 0=dot1q:43 --port 1=access:20 --port 2=access:30
+gns3lab node switch SW1 -p Kit de examen --port 0=dot1q:43 --port 1=access:20 --port 2=access:30
 ```
 
 Confirma: `SW1: N puertos -> OK`. Cada `--port` es `número_de_puerto=tipo[:vlan]`; el troncal
@@ -155,7 +155,7 @@ lleva `dot1q` y los de acceso, `access`. Los puertos no listados conservan su va
 El enlace del firewall al switch debe ir por el puerto troncal:
 
 ```bash
-gns3lab link list -p examen-kit
+gns3lab link list -p Kit de examen
 ```
 
 Confirma: la línea `PF1:1/0 <-> SW1:0/0` (adaptador 1 del firewall contra el adaptador 0 del
@@ -167,9 +167,9 @@ configurar VLANs, elegir la interfaz padre (la LAN) y el tag `43`; después asig
 a `OPT1`. Se lee igual que el paso 4:
 
 ```bash
-gns3lab shot PF1 -p examen-kit
-gns3lab type PF1 "1" --enter -p examen-kit
-gns3lab shot PF1 -p examen-kit
+gns3lab shot PF1 -p Kit de examen
+gns3lab type PF1 "1" --enter -p Kit de examen
+gns3lab shot PF1 -p Kit de examen
 ```
 
 Confirma: el resumen de interfaces incluye `OPT1 (opt1) -> vtnet1.43` (o el nombre que use el
@@ -178,10 +178,10 @@ disco) y vuelve al menú.
 La OPT bloquea todo por defecto. Para que pase tráfico, en la shell (opción `8`):
 
 ```bash
-gns3lab type PF1 "8" --enter -p examen-kit
-gns3lab shot PF1 -p examen-kit
-gns3lab type PF1 "easyrule pass opt1 any any any" --enter -p examen-kit
-gns3lab shot PF1 -p examen-kit
+gns3lab type PF1 "8" --enter -p Kit de examen
+gns3lab shot PF1 -p Kit de examen
+gns3lab type PF1 "easyrule pass opt1 any any any" --enter -p Kit de examen
+gns3lab shot PF1 -p Kit de examen
 ```
 
 Confirma: la captura muestra la regla creada, sin `Missing parameters`. `easyrule` con un
@@ -193,7 +193,7 @@ tu `pass`.
 Conectividad de las VPCS, que es lo que se enseña:
 
 ```bash
-gns3lab test examen-kit
+gns3lab test Kit de examen
 ```
 
 Confirma: el bloque `gateway` con la IP real (`192.168.1.1`) y el bloque `conectividad` con
@@ -202,7 +202,7 @@ Confirma: el bloque `gateway` con la IP real (`192.168.1.1`) y el bloque `conect
 Ping explícito desde un PC:
 
 ```bash
-gns3lab exec PC1 "ip dhcp" "show ip" "ping 192.168.1.1" "ping 8.8.8.8" -p examen-kit
+gns3lab exec PC1 "ip dhcp" "show ip" "ping 192.168.1.1" "ping 8.8.8.8" -p Kit de examen
 ```
 
 Confirma: `show ip` con `IP/MASK` distinta de `0.0.0.0`, y en cada ping `0% packet loss`. Si el
@@ -212,7 +212,7 @@ gateway bueno es el `DHCP SERVER` del mismo `show ip`.
 Chequeo integral:
 
 ```bash
-gns3lab doctor examen-kit
+gns3lab doctor Kit de examen
 ```
 
 Confirma: todos los nodos `started`, `console=...` en cada uno, y `resumen` con `sin hallazgos`.
@@ -221,13 +221,13 @@ Código 0. Cualquier línea `- ...` es un problema que hay que resolver antes de
 ## 7. Llevarlo al servidor del aula
 
 ```bash
-gns3lab -s clase port examen-kit --from local --name "Pablo Rodriguez" --start
+gns3lab -s clase port Kit de examen --from local --name "Pablo Rodriguez" --start
 ```
 
 Confirma, en este orden:
 
 ```text
-origen : local — examen-kit (xxxxxxxx)
+origen : local — Kit de examen (xxxxxxxx)
 destino: clase — http://192.168.71.250:80
   export: N KB, N nodos, N enlaces
   discos que faltan en el destino: pfSense-examen.qcow2
@@ -261,11 +261,11 @@ repunta a un `empty*.qcow2` e instala desde el ISO, que son los 40 minutos que e
 | # | Comprobación | Comando | Señal de OK |
 |---|---|---|---|
 | 1 | servidor | `gns3lab servers` | `[OK ] local` |
-| 2 | kit arrancado | `gns3lab status examen-kit` | todos `started` |
-| 3 | menú pfSense | `gns3lab shot PF1 -p examen-kit` | opciones 1/2/8 en el texto |
+| 2 | kit arrancado | `gns3lab status Kit de examen` | todos `started` |
+| 3 | menú pfSense | `gns3lab shot PF1 -p Kit de examen` | opciones 1/2/8 en el texto |
 | 4 | interfaces | `gns3lab shot PF1` tras cada respuesta | `WAN -> em0`, `LAN -> em1` |
 | 5 | VLANs | `gns3lab node switch SW1 ...` | `SW1: N puertos -> OK` |
-| 6 | conectividad | `gns3lab test examen-kit` | todo `OK`, 0 % pérdida |
-| 7 | integral | `gns3lab doctor examen-kit` | `sin hallazgos` |
+| 6 | conectividad | `gns3lab test Kit de examen` | todo `OK`, 0 % pérdida |
+| 7 | integral | `gns3lab doctor Kit de examen` | `sin hallazgos` |
 | 8 | portado | `gns3lab -s clase port ...` | `importado como ...`, nodos `started` |
 | 9 | aula | `gns3lab -s clase doctor ...` | `sin hallazgos` |
