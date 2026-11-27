@@ -103,6 +103,7 @@ no hay ninguno abierto, el único existente.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -1855,6 +1856,8 @@ def cmd_snap(args, conf):
         snap = _resolve_id(snaps, args.name, "snapshot_id", "snapshot")
         sid = str(snap["snapshot_id"])
         if args.action == "delete":
+            if not _confirm(args, f"borrar el snapshot '{args.name}'"):
+                return 1
             st, body = c.snapshot_delete(pid, sid)
             if st not in (200, 204):
                 print(f"no se pudo borrar '{args.name}': [{st}] {_err(body)}", file=sys.stderr)
@@ -1929,6 +1932,11 @@ def cmd_exec(args, conf):
                 fails += 1
             print()
         return 1 if fails else 0
+    except core.ConsoleError as e:
+        # El socket puede cerrarse también en wait_ready()/run_many(), no sólo
+        # al obtener la consola: sin esto sale un traceback en vez de un error.
+        print(str(e), file=sys.stderr)
+        return 1
     finally:
         con.close()
 
@@ -2259,6 +2267,8 @@ def cmd_node(args, conf):
         return 0
 
     if act == "rm":
+        if not _confirm(args, f"borrar el nodo '{node['name']}'"):
+            return 1
         st, _ = c.delete(f"/v2/projects/{pid}/nodes/{nid}", timeout=120)
         print(f"{node['name']} borrado={st in (200, 204)}")
         return 0 if st in (200, 204) else 1
@@ -2423,6 +2433,8 @@ def cmd_draw(args, conf):
         nota = _resolve_id(c.drawings(pid), palabras[1], "drawing_id", "nota")
         did = nota["drawing_id"]
         if act == "rm":
+            if not _confirm(args, f"borrar la nota {did[:8]}"):
+                return 1
             st, res = c.drawing_delete(pid, did)
             if st not in (200, 204):
                 print(f"no se pudo borrar la nota {did[:8]}: [{st}] {_err(res)}",
@@ -2512,6 +2524,8 @@ def cmd_link(args, conf):
         enlace = _resolve_id(enlaces, args.nodes[0], "link_id", "enlace")
         lid = enlace["link_id"]
         if args.action == "rm":
+            if not _confirm(args, f"borrar el enlace {lid[:8]}"):
+                return 1
             st, res = c.link_delete(pid, lid)
             print(f"borrado={st in (200, 204)}"
                   + ("" if st in (200, 204) else f" [{st}] {_err(res)}"))
@@ -2716,15 +2730,22 @@ def cmd_all(args, conf):
     c.ensure_open(pid)
     st, res = _core_call(c.nodes_action, pid, args.action)
     if not _ok(st) and st != 200:
-        print(f"{proj['name']}: {args.action} masivo -> [{st}] {_err_literal(res)}",
-              file=sys.stderr)
+        mensaje = f"{proj['name']}: {args.action} masivo -> [{st}] {_err_literal(res)}"
+        print(mensaje, file=sys.stderr)
+        if getattr(args, "json", False):
+            _json_out({"ok": False, "project": proj["name"], "action": args.action,
+                       "status": st, "error": _err_literal(res)})
         return 1
     estados: dict[str, int] = {}
     for node in _core_call(c.nodes, pid):
         estado = str(node.get("status") or "-")
         estados[estado] = estados.get(estado, 0) + 1
     resumen = ", ".join(f"{k}={v}" for k, v in sorted(estados.items()))
-    print(f"{proj['name']}: {args.action} [{st}] — {resumen}")
+    if getattr(args, "json", False):
+        _json_out({"ok": True, "project": proj["name"], "action": args.action,
+                   "status": st, "states": estados, "resumen": resumen})
+    else:
+        print(f"{proj['name']}: {args.action} [{st}] — {resumen}")
     return 0
 
 
@@ -2762,15 +2783,20 @@ def cmd_vm(args, conf):
             if engine not in motores:
                 raise SystemExit(f"motor desconocido: {engine!r} (virtualbox, vmware)")
         fallos = 0
+        salida: dict = {}
         for engine in elegidos:
             st, res = _core_call(motores[engine])
             if st != 200:
-                print(f"VMs de {engine} -> [{st}] {_err_literal(res)}", file=sys.stderr)
+                mensaje = f"VMs de {engine} -> [{st}] {_err_literal(res)}"
+                print(mensaje, file=sys.stderr)
+                salida[engine] = {"error": mensaje}
                 fallos += 1
             elif args.json:
-                _json_out({engine: res})
+                salida[engine] = res
             else:
                 _print_data(f"VMs de {engine}", res)
+        if args.json:
+            _json_out(salida)
         return 1 if fallos else 0
     body = _set_body(args.set)
     if not _confirm(args, "crear una interfaz vmnet en VMware"):
@@ -2914,7 +2940,8 @@ def cmd_watch(args, conf):
             else:
                 print(f"  {evento}")
             eventos += 1
-        print(f"{eventos} evento(s) en {args.seconds:g} s")
+        resumen = f"{eventos} evento(s) en {args.seconds:g} s"
+        print(resumen, file=sys.stderr if args.json else sys.stdout)
     finally:
         sock.close()
     return 0
@@ -4410,6 +4437,44 @@ def _lab_out(args, accion: str, ok: bool, data, texto: str | None = None,
     return rc if rc is not None else (0 if ok else 1)
 
 
+@contextlib.contextmanager
+def _progreso_a_stderr():
+    """Desvía a stderr el progreso humano de `lab apply` cuando se pide JSON.
+
+    `labspec.aplicar_deseado` imprime por stdout y lanza subprocesos que heredan
+    el descriptor 1; hay que mover ambos para no mezclar texto con el resultado.
+    """
+    import io
+
+    buf = io.StringIO()
+    copia = None
+    try:
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+    try:
+        copia = os.dup(1)
+        os.dup2(2, 1)
+    except OSError:
+        copia = None
+    try:
+        with contextlib.redirect_stdout(buf):
+            yield
+    finally:
+        try:
+            sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+        if copia is not None:
+            try:
+                os.dup2(copia, 1)
+            finally:
+                os.close(copia)
+        texto = buf.getvalue().rstrip("\n")
+        if texto:
+            print(texto, file=sys.stderr)
+
+
 def _lab_spec(L, ruta: str) -> dict:
     """Lee y valida el YAML deseado; devuelve la forma normalizada."""
     datos = L.leer(ruta)
@@ -4586,10 +4651,17 @@ def cmd_lab(args, conf) -> int:
                       file=sys.stderr)
                 return _lab_out(args, accion, False, datos, rc=2)
             aplicar = getattr(L, "aplicar_deseado", None)
-            if callable(aplicar):
-                rc = aplicar(deseado, actual, server, True)
+
+            def ejecutar_plan():
+                if callable(aplicar):
+                    return aplicar(deseado, actual, server, True)
+                return L.aplicar(deseado, server, True)
+
+            if _lab_json(args):
+                with _progreso_a_stderr():
+                    rc = ejecutar_plan()
             else:
-                rc = L.aplicar(deseado, server, True)
+                rc = ejecutar_plan()
             datos = {"plan": comandos, "yes": True, "rc": rc,
                      "project": deseado["project"]}
             return _lab_out(args, accion, rc == 0, datos, rc=rc)
@@ -4633,7 +4705,7 @@ def cmd_lab(args, conf) -> int:
 
         raise ValueError(f"acción lab desconocida: {accion}")
     except errores as exc:
-        return _lab_out(args, accion, False, {"error": str(exc)})
+        return _lab_out(args, accion, False, {"error": str(exc)}, texto=str(exc))
 
 
 def _lab_actual_crudo(ruta: str) -> dict:
@@ -4919,6 +4991,7 @@ def main() -> int:
     p.add_argument("action", choices=["list", "create", "restore", "delete"])
     p.add_argument("name", nargs="?")
     p.add_argument("project", nargs="?")
+    p.add_argument("--yes", action="store_true", help="delete: no pedir confirmación")
 
     # -- consola sin VNC ---------------------------------------------------- #
     p = sub.add_parser("console", help="abre la consola del nodo o la reinicia")
@@ -4998,6 +5071,7 @@ def main() -> int:
                    help="start/stop/reload/suspend: segundos a esperar el estado")
     p.add_argument("-x", "--x", type=int, default=0)
     p.add_argument("-y", "--y", type=int, default=0)
+    p.add_argument("--yes", action="store_true", help="rm: no pedir confirmación")
 
     p = sub.add_parser("upload", help="sube un disco o imagen al servidor")
     p.add_argument("file")
@@ -5012,6 +5086,7 @@ def main() -> int:
     p.add_argument("-x", "--x", type=int, default=0)
     p.add_argument("-y", "--y", type=int, default=0)
     p.add_argument("--color", default="#ffffff")
+    p.add_argument("--yes", action="store_true", help="rm: no pedir confirmación")
 
     p = sub.add_parser("capture", help="captura el tráfico de un enlace")
     p.add_argument("link", help="link_id o prefijo (míralos con `gns3lab link list`)")
@@ -5028,6 +5103,7 @@ def main() -> int:
     p.add_argument("--pb", type=int, default=0, help="adapter del segundo nodo")
     p.add_argument("--ppa", type=int, default=0, help="puerto del primer nodo")
     p.add_argument("--ppb", type=int, default=0, help="puerto del segundo nodo")
+    p.add_argument("--yes", action="store_true", help="rm: no pedir confirmación")
 
     p = sub.add_parser("doctor", help="comprueba servidor, proyecto, nodos y herramientas")
     p.add_argument("project", nargs="?")
