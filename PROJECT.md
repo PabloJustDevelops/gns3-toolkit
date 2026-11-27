@@ -17,7 +17,7 @@ clientes) desde la terminal, con el VNC sólo como último recurso.
 - `gns3lab verify qemu|pf|vpcs` y `gns3_verify`: verificación solo lectura por componente, con
   checks y problemas accionables (`docs/VERIFICACION.md`).
 - `scripts/verify.py` recuenta cifras desde el código y detecta deriva: `OK: sin deriva`.
-- **Tests: 840 passed, 100 % de `gns3core.py`** (996 sentencias, 0 miss) y 100 % de `pfsense.py` (465 sentencias, 0 miss).
+- **Tests: 862 passed, 100 % de `gns3core.py`** (1009 sentencias, 0 miss) y 100 % de `pfsense.py` (465 sentencias, 0 miss).
 - Kit `examen-kit` arrancado (5/5 nodos) y `doctor` → **sin hallazgos**. Importado al servidor
   del aula como proyecto nuevo `Pablo Rodriguez Garijo - Kit` sin tocar el original.
 - MCP: 50 tools, **6 resources + 1 resource template** (`gns3://project/{project}/topology`) y

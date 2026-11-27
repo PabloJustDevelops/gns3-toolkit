@@ -28,12 +28,15 @@ Salida con `--json` (y la misma estructura desde el MCP):
     {"name": "proyecto abierto", "ok": true, "detail": "examen-kit (11111111)"},
     {"name": "estado", "ok": false, "detail": "status=stopped"}
   ],
-  "problems": ["estado: status=stopped"]
+  "problems": ["estado: status=stopped"],
+  "warnings": []
 }
 ```
 
 `ok` es `true` solo si todos los `checks` están en verde. `problems` repite los checks rojos
-con su nombre para que un agente no tenga que recorrer el array.
+con su nombre para que un agente no tenga que recorrer el array. `warnings` recoge avisos que
+no cambian `ok`: por ejemplo, un nodo pfSense QEMU con consola `vnc`/`spice`, con el comando
+para dejarla en `telnet` y la nota de hacerlo con el nodo parado.
 
 ## Checks por componente
 

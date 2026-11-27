@@ -3,9 +3,19 @@
 Secciones: Estado en este árbol · 1. Detectar los nombres de interfaz · 2. Credenciales: sólo variables de entorno · 3. Orden de la configuración nativa · 4. El menú: sólo cuando aún no hay SSH · 5. Verificación con salida real · 6. Errores literales y su causa.
 
 La vía nativa habla el formato que pfSense entiende de verdad: `/conf/config.xml` y sus
-comandos (`pfctl`, `ifconfig`, `easyrule`, `/etc/rc.reload_all`) por SSH. El VNC queda para el
-primer arranque sin SSH y para instaladores con ratón; antes de abrirlo, agota consola telnet y
-monitor HMP ([EXAMEN.md](EXAMEN.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
+comandos (`pfctl`, `ifconfig`, `easyrule`, `/etc/rc.reload_all`) por SSH. El VNC sólo hace falta
+para instalar el ISO inicial; después, la consola telnet basta para todo el flujo nativo
+`assign → ip → dhcp → rule → nat → ssh`. Antes de abrir VNC, agota telnet y el monitor HMP
+([EXAMEN.md](EXAMEN.md), [TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
+
+`gns3lab examen setup` crea PF1 con `console_type=telnet`. Para una instalación inicial que
+necesite VNC/SPICE, usa `--console-type vnc` o `--console-type spice`. Los nodos que ya existen
+no se cambian automáticamente: `verify` y `doctor` avisan y muestran el comando exacto. Con el
+nodo parado:
+
+```bash
+gns3lab node props PF1 --set console_type=telnet -p examen-kit
+```
 
 ## Estado en este árbol
 
