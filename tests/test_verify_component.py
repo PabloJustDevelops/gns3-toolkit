@@ -308,6 +308,39 @@ def test_vpcs_verde_por_consola_telnet(fake_api, telnet_factory):
     assert "show ip" in fake.lines
 
 
+@pytest.mark.parametrize("gateway", ["192.168.10.255", "192.168.11.0"])
+def test_vpcs_acepta_gateway_de_host_en_red_23(fake_api, telnet_factory, gateway):
+    salida = (
+        "PC1> show ip\r\nIP/MASK     : 192.168.10.10/23\r\n"
+        f"GATEWAY     : {gateway}\r\nPC1> "
+    )
+    fake = telnet_factory(on_line=lambda linea: salida.encode() if linea.strip() == "show ip" else b"")
+    _setup(fake_api, [_vpcs(fake.port)])
+
+    resultado = core.verify_component(core.Client(fake_api.url), "lab-prueba", "vpcs")
+
+    assert resultado["ok"] is True, resultado
+    check = _checks(resultado)["gateway"]
+    assert check["ok"] is True
+    assert gateway in check["detail"]
+    assert "máscara" not in check["detail"]
+
+
+@pytest.mark.parametrize("gateway", ["192.168.10.0", "192.168.10.255"])
+def test_vpcs_rechaza_direccion_de_red_y_difusion_en_red_24(fake_api, telnet_factory, gateway):
+    salida = (
+        "PC1> show ip\r\nIP/MASK     : 192.168.10.10/24\r\n"
+        f"GATEWAY     : {gateway}\r\nPC1> "
+    )
+    fake = telnet_factory(on_line=lambda linea: salida.encode() if linea.strip() == "show ip" else b"")
+    _setup(fake_api, [_vpcs(fake.port)])
+
+    resultado = core.verify_component(core.Client(fake_api.url), "lab-prueba", "vpcs")
+
+    assert resultado["ok"] is False
+    assert _checks(resultado)["gateway"]["ok"] is False
+
+
 def test_vpcs_sin_ip_no_se_da_por_listo(fake_api, telnet_factory):
     fake = telnet_factory(on_line=lambda linea: (
         "PC1> show ip\r\nIP/MASK     : 0.0.0.0/0\r\nGATEWAY     : 0.0.0.0\r\nPC1> "

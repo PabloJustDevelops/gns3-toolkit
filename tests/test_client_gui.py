@@ -275,6 +275,22 @@ def test_project_file_read_decodifica_bytes_y_quita_barra_inicial(fake_api):
     assert fake_api.last("GET", path)
 
 
+def test_project_file_read_codifica_caracteres_reservados(fake_api):
+    path = f"/v2/projects/{P1}/files/dir/100%25%20%231%3F.txt"
+    fake_api.route("GET", path, 200, b"contenido")
+
+    assert Client(fake_api.url).project_file_read(P1, "/dir/100% #1?.txt") == "contenido"
+    assert fake_api.last("GET", path)
+
+
+def test_project_file_write_codifica_caracteres_reservados(fake_api):
+    path = f"/v2/projects/{P1}/files/dir/100%25%20%231%3F.txt"
+    fake_api.route("POST", path, 201, b"")
+
+    assert Client(fake_api.url).project_file_write(P1, "/dir/100% #1?.txt", "dato") == (201, None)
+    assert fake_api.last("POST", path)["body"] == b"dato"
+
+
 @pytest.mark.parametrize("status", [404, 500])
 def test_project_file_read_devuelve_error_http(fake_api, status):
     path = f"/v2/projects/{P1}/files/config.txt"

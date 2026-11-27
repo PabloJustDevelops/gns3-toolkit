@@ -165,7 +165,8 @@ class Client:
         if self.auth:
             tok = base64.b64encode(f"{self.auth[0]}:{self.auth[1]}".encode()).decode()
             headers["Authorization"] = "Basic " + tok
-        req = urllib.request.Request(self.url + path, data=data, headers=headers, method=method)
+        url = self.url + urllib.parse.quote(path, safe="/")
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 body = r.read()
@@ -974,11 +975,12 @@ class Console:
     def run(self, cmd: str, expect: Optional[str] = None, timeout: float = 20.0,
             idle: float = 0.9, more: bool = True, answers: Optional[list[str]] = None,
             password: Optional[str] = None, strip_echo: bool = True) -> dict:
-        """Ejecuta un comando y devuelve ``{cmd, output, ok, ms, timed_out}``.
+        """Ejecuta un comando y devuelve ``{cmd, output, ok, eof, matched, ms, timed_out, more_pages}``.
 
         - `expect`: regex que marca el fin (por defecto, quietud de `idle` segundos).
         - `answers`: respuestas para `[y/n]` en orden (por defecto `y`).
         - `password`: se envía cuando aparece un prompt de contraseña.
+        - `eof`: la consola se cerró; `matched`: no había `expect` o apareció en la salida.
         """
         answers = list(answers or [])
         start = time.time()
@@ -1026,6 +1028,8 @@ class Console:
                 break
         ms = int((time.time() - start) * 1000)
         out = buf
+        eof = self.closed
+        matched = not expect or re.search(expect, buf) is not None
         if strip_echo:
             first, _, rest = out.partition("\n")
             if first.strip().endswith(cmd.strip()[-20:]) or cmd.strip() in first:
@@ -1033,7 +1037,9 @@ class Console:
         # quita el prompt final duplicado
         if self.prompt:
             out = re.sub(re.escape(self.prompt) + r"\s*$", "", out)
-        return {"cmd": cmd, "output": out.strip("\n"), "ok": not timed_out,
+        return {"cmd": cmd, "output": out.strip("\n"),
+                "ok": not timed_out and not eof and matched,
+                "eof": eof, "matched": matched,
                 "timed_out": timed_out, "ms": ms, "more_pages": more_hits}
 
     def run_many(self, cmds: list[str], **kw) -> list[dict]:
@@ -1043,7 +1049,7 @@ class Console:
         for c in cmds:
             r = self.run(c, expect=expect, **kw)
             res.append(r)
-            if r["timed_out"]:
+            if not r["ok"] or r["eof"]:
                 break
         return res
 
@@ -1553,20 +1559,29 @@ def _verify_vpcs_checks(client: Client, pid: str, node: dict) -> list[dict]:
     gw = gateway.group(1) if gateway else None
     if not gw:
         checks.append(_vcheck("gateway", False, "show ip no devuelve GATEWAY"))
-    elif gw.endswith((".0", ".255")):
-        checks.append(_vcheck(
-            "gateway", False,
-            f"gateway={gw} parece la máscara (bug de VPCS tras ip dhcp); "
-            "fija la IP a mano con la gateway del DHCP SERVER"))
     else:
         try:
-            same_net = bool(ip) and ipaddress.IPv4Address(gw) in ipaddress.ip_network(
-                f"{ip}/{bits}", strict=False)
+            network = (ipaddress.ip_network(f"{ip}/{bits}", strict=False)
+                       if ip and 0 < bits <= 32 else None)
+            gw_addr = ipaddress.IPv4Address(gw)
         except ValueError:
-            same_net = False
-        checks.append(_vcheck("gateway", same_net,
-                              f"gateway={gw}" + ("" if same_net
-                                                 else f" fuera de {ip}/{bits}")))
+            network = None
+            gw_addr = None
+        netmask = (ipaddress.IPv4Network(f"0.0.0.0/{bits}").netmask
+                   if 0 < bits <= 32 else None)
+        if gw_addr is not None and gw_addr == netmask:
+            checks.append(_vcheck(
+                "gateway", False,
+                f"gateway={gw} parece la máscara (bug de VPCS tras ip dhcp); "
+                "fija la IP a mano con la gateway del DHCP SERVER"))
+        else:
+            same_net = bool(
+                network is not None and gw_addr in network
+                and (network.prefixlen >= 31
+                     or gw_addr not in (network.network_address, network.broadcast_address)))
+            checks.append(_vcheck("gateway", same_net,
+                                  f"gateway={gw}" + ("" if same_net
+                                                     else f" fuera de {ip}/{bits}")))
     return checks
 
 
