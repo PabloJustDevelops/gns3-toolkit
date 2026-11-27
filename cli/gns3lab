@@ -112,6 +112,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 # Los módulos pesados (urllib, zipfile, ssl, hashlib...) se importan dentro de la
@@ -1061,12 +1062,14 @@ def cmd_test(args, conf):
     host = urllib.parse.urlsplit(s.url).hostname or "127.0.0.1"
     con: dict[str, Vpcs] = {}
     info: dict[str, dict] = {}
+    no_verificados = 0   # VPCS sin consola o inalcanzable: no se cuentan como éxito
     try:
         for n in vpcs:
             try:
                 port = int(n.get("console") or 0)
                 if not port:
-                    print(f"  {n['name']}: sin puerto de consola")
+                    no_verificados += 1
+                    print(f"  {n['name']}: sin puerto de consola (no verificado)")
                     continue
                 c = Vpcs(host, port)
                 out = c.run("show ip", settle=2.5)
@@ -1083,7 +1086,8 @@ def cmd_test(args, conf):
                 info[n["name"]] = {"ip": vpcs_ip(out), "gw": vpcs_gateway(out)}
                 print(f"  {n['name']:<12} ip={info[n['name']]['ip'] or '-':<16} gw={info[n['name']]['gw'] or '-'}")
             except OSError as e:
-                print(f"  {n['name']}: consola {port} inalcanzable ({e})")
+                no_verificados += 1
+                print(f"  {n['name']}: consola {port} inalcanzable ({e}) (no verificado)")
         if not con:
             return 1
 
@@ -1133,7 +1137,9 @@ def cmd_test(args, conf):
             ok = ping_ok(out)
             fails += 0 if ok else 1
             print(f"    {'OK   ' if ok else 'FALLO'}  {label}")
-        return 1 if fails else 0
+        if no_verificados:
+            print(f"\n  {no_verificados} VPCS sin verificar (sin consola o inalcanzable)")
+        return 1 if (fails or no_verificados) else 0
     finally:
         for c in con.values():
             c.close()
@@ -3579,6 +3585,15 @@ def _examen_setup(args, conf, c, name: str) -> int:
         print(f"aviso: el disco del origen ({preferido}) no está en {c.name}; "
               f"se usa {disco} (no se sube ni se sobrescribe nada)")
 
+    # El firewall se crea por POST /nodes, no desde la plantilla: `linked_clone`
+    # sólo se fija en la creación (un PUT posterior lo ignora) y hace falta para
+    # reutilizar el disco sin «can only be used once on your server».
+    tpl_fw = elegidas["pfsense"]
+    # Todas las precondiciones se validan ANTES de crear nada (hallazgo 3):
+    # si `_examen_qemu_path` falla no queda un proyecto vacío con el nombre ocupado.
+    qemu_path = _examen_qemu_path(c, tpl_fw)
+
+    # Crear el proyecto SÓLO tras validar todo lo anterior.
     st, body = c.post("/v2/projects", {
         "name": name,
         "path": str(Path.home() / "GNS3/projects" / name),
@@ -3586,6 +3601,24 @@ def _examen_setup(args, conf, c, name: str) -> int:
     if st not in (200, 201) or not isinstance(body, dict) or not body.get("project_id"):
         raise SystemExit(f"no se pudo crear '{name}': [{st}] {_err(body)}")
     pid = body["project_id"]
+    try:
+        return _examen_setup_kit(
+            c, name=name, pid=pid, elegidas=elegidas, tpl_fw=tpl_fw,
+            disco=disco, adaptador=adaptador, console_type=console_type,
+            qemu_path=qemu_path,
+        )
+    except BaseException:
+        # No dejar un proyecto a medio montar que bloquee el reintento por nombre.
+        try:
+            c.delete(f"/v2/projects/{pid}")
+        except Exception:
+            pass
+        raise
+
+
+def _examen_setup_kit(c, *, name: str, pid: str, elegidas: dict, tpl_fw: dict,
+                      disco: str, adaptador: str, console_type: str, qemu_path: str) -> int:
+    """Monta nodos/enlaces/marca/arranque en un proyecto recién creado."""
     c.ensure_open(pid)
     print(f"'{name}' creado ({pid[:8]}) en {c.name}")
 
@@ -3604,10 +3637,6 @@ def _examen_setup(args, conf, c, name: str) -> int:
         print(f"  + {node_name} ({kind}, {nid[:8]})")
         return nid
 
-    # El firewall se crea por POST /nodes, no desde la plantilla: `linked_clone`
-    # sólo se fija en la creación (un PUT posterior lo ignora) y hace falta para
-    # reutilizar el disco sin «can only be used once on your server».
-    tpl_fw = elegidas["pfsense"]
     props_fw = {k: v for k, v in tpl_fw.items() if k not in (
         "template_id", "template_type", "name", "builtin", "category", "compute_id",
         "default_name_format", "symbol", "usage", "console_auto_start")}
@@ -3617,7 +3646,7 @@ def _examen_setup(args, conf, c, name: str) -> int:
         "linked_clone": True,
         "adapters": 2,
         "adapter_type": adaptador,
-        "qemu_path": _examen_qemu_path(c, tpl_fw),
+        "qemu_path": qemu_path,
     })
     props_fw.pop("mac_address", None)   # "" rompe el schema (minLength 1)
     props_fw.pop("console_type", None)  # es un campo del nodo, no de properties
@@ -3676,21 +3705,34 @@ def _examen_setup(args, conf, c, name: str) -> int:
         print(f"  nota en el canvas: {texto}")
 
     # Marca local: sólo el proyecto creado aquí podrá ser reiniciado por `reset`.
-    c.project_file_write(pid, EXAMEN_MARKER, json.dumps({
+    # Un fallo de escritura NO se ignora: `reset` exigiría una marca inexistente (hallazgo 4).
+    st, res = c.project_file_write(pid, EXAMEN_MARKER, json.dumps({
         "created_by": "gns3lab examen setup",
         "name": name,
         "disk": disco,
     }, ensure_ascii=False))
+    if not _ok(st):
+        raise SystemExit(f"no se pudo grabar la marca {EXAMEN_MARKER}: "
+                         f"[{st}] {_err(res)}; `reset` no podría verificar el kit")
 
     st, res = c.nodes_action(pid, "start")
-    if not _ok(st) and st != 200:
+    start_ok = _ok(st)
+    if not start_ok:
         print(f"  aviso: no se pudo arrancar el conjunto: [{st}] {_err(res)}",
               file=sys.stderr)
     estados = []
+    arranque_ok = True
     for n in c.nodes(pid):
         estado = _wait_node_status(c, pid, n["node_id"], "started", timeout=45)
         estados.append(f"{n['name']}={estado}")
+        if estado != "started":
+            arranque_ok = False
     print(f"  arranque: {', '.join(estados)}")
+    # `listo` sólo si TODO arrancó; si no, código de error (hallazgo 2).
+    if not start_ok or not arranque_ok:
+        print(f"error: '{name}' no quedó completamente arrancado "
+              f"({', '.join(estados)}); no se da por listo", file=sys.stderr)
+        return 1
     print(f"listo: {name}. Verifícalo con `gns3lab examen verify --name '{name}'`.")
     return 0
 
@@ -3714,6 +3756,112 @@ def _examen_verify_out(report: dict, args) -> int:
         else:
             print("sin problemas")
     return 0 if report["ok"] else 1
+
+
+def _examen_links_vlan(nodes: list[dict], links: list[dict]) -> tuple[bool, bool, list[str]]:
+    """Comprueba enlaces prometidos por `examen setup` y el mapa VLAN del switch.
+
+    Devuelve `(links_ok, vlan_ok, problemas)`. Sólo se exige un enlace si ambos
+    extremos existen en el kit; los mapas VLAN se revisan por coherencia interna.
+    """
+    problemas: list[str] = []
+    nombres = {n.get("name") for n in nodes}
+    id_a_nombre = {n.get("node_id"): n.get("name") for n in nodes}
+    id_a_tipo = {n.get("node_id"): n.get("node_type") for n in nodes}
+
+    def nodo(nid):
+        return id_a_nombre.get(nid, nid)
+
+    def extremo(l, idx, key, default=0):
+        partes = l.get("nodes") or []
+        if len(partes) != 2:
+            return default
+        v = partes[idx].get(key)
+        return default if v is None else v
+
+    # conjunto de enlaces normalizado (no importa el orden de los extremos)
+    enlaces = set()
+    puertos_sw: dict[str, set[int]] = {}
+    for l in links:
+        partes = l.get("nodes") or []
+        if len(partes) != 2:
+            continue
+        a, b = partes
+        ka = (nodo(a.get("node_id")), a.get("adapter_number", 0), a.get("port_number", 0))
+        kb = (nodo(b.get("node_id")), b.get("adapter_number", 0), b.get("port_number", 0))
+        enlaces.add(tuple(sorted((ka, kb))))
+        for parte, otro in ((a, b), (b, a)):
+            if id_a_tipo.get(parte.get("node_id")) in ("ethernet_switch", "switch"):
+                puertos_sw.setdefault(nodo(parte.get("node_id")),
+                                      set()).add(int(parte.get("port_number") or 0))
+
+    def hay(a_nombre, b_nombre, a_ad=None, b_ad=None, a_port=None, b_port=None) -> bool:
+        for ka, kb in enlaces:
+            if ka[0] == a_nombre and kb[0] == b_nombre:
+                x, y = ka, kb
+            elif ka[0] == b_nombre and kb[0] == a_nombre:
+                x, y = kb, ka
+            else:
+                continue
+            if a_ad is not None and x[1] != a_ad:
+                continue
+            if b_ad is not None and y[1] != b_ad:
+                continue
+            if a_port is not None and x[2] != a_port:
+                continue
+            if b_port is not None and y[2] != b_port:
+                continue
+            return True
+        return False
+
+    # ── enlaces prometidos por `examen setup` (sólo si los dos extremos existen) ──
+    requeridos: list[tuple[str, bool]] = []
+    if {"PF1", "NAT1"} <= nombres:
+        requeridos.append(("WAN PF1<->NAT1",
+                           hay("PF1", "NAT1", 0, 0, 0, 0)))
+    if {"PF1", "SW1"} <= nombres:
+        requeridos.append(("LAN PF1<->SW1",
+                           hay("PF1", "SW1", 1, 0, 0, 0)))
+    if {"PC1", "SW1"} <= nombres:
+        requeridos.append(("PC1->SW1", hay("PC1", "SW1", 0, 0, 0, None)))
+    if {"PC2", "SW1"} <= nombres:
+        requeridos.append(("PC2->SW1", hay("PC2", "SW1", 0, 0, 0, None)))
+    links_ok = True
+    for etiqueta, presente in requeridos:
+        if not presente:
+            links_ok = False
+            problemas.append(f"enlace prometido ausente: {etiqueta}")
+
+    # ── mapa VLAN: puertos en uso definidos y válidos; PCs en la misma VLAN ──
+    vlan_ok = True
+    switches = [n for n in nodes if n.get("node_type") in ("ethernet_switch", "switch")]
+    puertos_pc: list[tuple[str, int]] = []
+    for sw in switches:
+        nombre_sw = sw.get("name")
+        mapping = ((sw.get("properties") or {}).get("ports_mapping") or [])
+        por_puerto = {int(p.get("port_number", i)): p for i, p in enumerate(mapping)
+                      if isinstance(p, dict)}
+        for puerto in sorted(puertos_sw.get(nombre_sw, set())):
+            entrada = por_puerto.get(puerto)
+            if entrada is None:
+                vlan_ok = False
+                problemas.append(f"mapa VLAN {nombre_sw}: puerto {puerto} en uso "
+                                 "sin entrada en ports_mapping")
+                continue
+            tipo = str(entrada.get("type", "access"))
+            if tipo not in ("access", "dot1q"):
+                vlan_ok = False
+                problemas.append(f"mapa VLAN {nombre_sw}: puerto {puerto} tipo "
+                                 f"{tipo!r} no válido")
+            try:
+                vlan = int(entrada.get("vlan", 1))
+            except (TypeError, ValueError):
+                vlan = -1
+            if vlan < 1:
+                vlan_ok = False
+                problemas.append(f"mapa VLAN {nombre_sw}: puerto {puerto} vlan "
+                                 f"{entrada.get('vlan')!r} no válida")
+    return links_ok, vlan_ok, problemas
 
 
 def _examen_verify(args, conf, c, name: str) -> int:
@@ -3776,6 +3924,17 @@ def _examen_verify(args, conf, c, name: str) -> int:
     report["checks"]["nat"] = any(n.get("node_type") == "nat" for n in nodes)
     if not report["checks"]["nat"]:
         problems.append("sin nodo NAT: la WAN se queda sin salida")
+
+    # Enlaces prometidos por `examen setup` + mapa VLAN del switch (hallazgo 8).
+    try:
+        links = c.links(pid)
+    except (RuntimeError, OSError, ConnectionError) as e:
+        problems.append(f"no se pudieron leer los enlaces: {e}")
+        links = []
+    links_ok, vlan_ok, links_problems = _examen_links_vlan(nodes, links)
+    problems.extend(links_problems)
+    report["checks"]["links"] = links_ok
+    report["checks"]["vlan_map"] = vlan_ok
 
     vpcs = next((n for n in nodes if n.get("node_type") == "vpcs"
                  and n.get("status") == "started"), None)
@@ -4103,10 +4262,14 @@ def cmd_examen(args, conf) -> int:
         return 1
     s = Server(getattr(args, "server", "local"), conf)
     c = _core_client(s)
+    name = getattr(args, "name", None) or EXAMEN_NAME
     if not c.alive():
+        # `verify` no se traga la caída del servidor: sale por el formateador
+        # con JSON/problemas como cualquier otro problema (hallazgo 5).
+        if args.action == "verify":
+            return _examen_verify(args, conf, c, name)
         print(f"servidor {s.name} ({s.url}) no responde", file=sys.stderr)
         return 2
-    name = getattr(args, "name", None) or EXAMEN_NAME
     if args.action == "setup":
         return _examen_setup(args, conf, c, name)
     if args.action == "verify":
