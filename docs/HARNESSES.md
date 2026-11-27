@@ -71,6 +71,27 @@ codex mcp add gns3 -- "$(pwd)/.venv/bin/python" "$(pwd)/gns3_mcp_server.py"
 - Ninguno de los cinco se ha conectado al MCP `gns3` en esta tarea; el registro es configuración
   local y no se ejecuta aquí.
 
+## WebUI de pfSense desde el host
+
+La WebUI del firewall no está en la red del host, así que no se abre por IP. Cualquier harness
+puede levantar la misma puerta local por nombre, en primer plano o en segundo plano:
+
+```bash
+env -u PYTHONPATH -u VIRTUAL_ENV .venv/bin/python scripts/pf_webui_proxy.py \
+  examples/pf-perfiles/ --port 8080
+# http://127.0.0.1:8080/pfsense-ejemplo-a/
+# http://127.0.0.1:8080/pfsense-ejemplo-b/
+```
+
+Cada ruta sale de `pfsense.webui_name` y `pfsense.pfsense_ip` del YAML; los dos ejemplos usan
+subredes distintas y no llevan credenciales. Un nombre desconocido da `404` y un redirect a otro
+host no se sigue (`502`). El certificado autofirmado se acepta sólo en este proxy de laboratorio.
+
+La WebUI del controller GNS3 es otra cosa: `GET /v2/servers` responde `404` con el controller
+2.2.61 y la lista de servidores de la UI queda vacía. Para configurar pfSense sigue mandando la
+consola telnet (`gns3lab exec`, `gns3lab type`, `gns3lab key`) y los comandos `gns3lab pf`; el VNC
+es el último recurso.
+
 ## Límites reales
 
 - **freebuff no tiene modo headless.** Su `--help` no lista `-p` ni `--print`; cualquier trabajo

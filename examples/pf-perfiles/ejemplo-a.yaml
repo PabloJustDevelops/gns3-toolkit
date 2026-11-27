@@ -1,0 +1,16 @@
+# Perfil de pfSense del laboratorio de ejemplo A.
+# Sin credenciales: la contraseña se lee de PFSENSE_PASSWORD en tiempo de ejecución.
+version: 1
+project: ejemplo-a
+pfsense:
+  node: PF1
+  lan_cidr: 192.168.1.0/24
+  pfsense_ip: 192.168.1.1
+  dhcp_from: 192.168.1.100
+  dhcp_to: 192.168.1.200
+  wan: NAT1
+  adapter_type: e1000
+  console_type: telnet
+  bridge: br-gns3-ejemplo-a
+  host_ip: 192.168.1.254
+  webui_name: pfsense-ejemplo-a
