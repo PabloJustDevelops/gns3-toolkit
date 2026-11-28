@@ -94,3 +94,58 @@ def test_timeout_acotado_si_la_consola_no_responde(telnet_factory):
     assert res["timed_out"] is True
     assert res["ok"] is False
     assert transcurrido < 4, f"tardó {transcurrido:.1f}s con timeout=1.0"
+
+
+# ─────────────────────── prompts terminados en `:` (#37) ───────────────────────
+PFSENSE_PROMPT = b"[2.7.2-RELEASE][root@pfSense.home.arpa]/root: "
+
+
+def test_wait_ready_detecta_el_shell_de_pfsense(telnet_factory):
+    srv = telnet_factory(on_connect=PFSENSE_PROMPT, on_line=lambda line: PFSENSE_PROMPT)
+    with _open(srv) as con:
+        res = con.wait_ready(timeout=5)
+    assert res["ready"] is True
+    assert res["prompt"] == "[2.7.2-RELEASE][root@pfSense.home.arpa]/root:"
+
+
+def test_wait_ready_detecta_un_shell_usuario_host_sin_corchetes(telnet_factory):
+    prompt = b"root@fw1:/root: "
+    srv = telnet_factory(on_connect=prompt, on_line=lambda line: prompt)
+    with _open(srv) as con:
+        res = con.wait_ready(timeout=5)
+    assert res["ready"] is True
+    assert res["prompt"] == "root@fw1:/root:"
+
+
+@pytest.mark.parametrize("banner,prompt", [
+    (b"Cisco IOS XE\r\nR1# ", "R1#"),
+    (b"R1>", "R1>"),
+    (b"VPCS v0.8.3\r\nPC1> ", "PC1>"),
+    (b"Switch(config)# ", "Switch(config)#"),
+    (b"[root@lab ~]# ", "[root@lab ~]#"),
+    (b"usuario@host:~$ ", "usuario@host:~$"),
+    (b"pablo% ", "pablo%"),
+])
+def test_wait_ready_conserva_los_prompts_de_siempre(telnet_factory, banner, prompt):
+    srv = telnet_factory(on_connect=banner, on_line=lambda line: banner)
+    with _open(srv) as con:
+        res = con.wait_ready(timeout=5)
+    assert res["ready"] is True
+    assert res["prompt"] == prompt
+
+
+@pytest.mark.parametrize("banner", [
+    b"Arrancando...\r\nStarting NTP client:\r\nlogin as: ",
+    b"login as: ",
+    b"Password: ",
+    b"Starting local daemons: nuage.",
+    b"[INFO][daemon] failed to start: ",
+    b"root@fw1's password: ",
+    b"root@fw1: login failed: ",
+])
+def test_wait_ready_no_confunde_lineas_con_dos_puntos_con_un_prompt(telnet_factory, banner):
+    srv = telnet_factory(on_connect=banner, on_line=lambda line: banner)
+    with _open(srv) as con:
+        res = con.wait_ready(timeout=2.0)
+    assert res["ready"] is False
+    assert res["prompt"] is None

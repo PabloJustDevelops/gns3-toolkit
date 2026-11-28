@@ -869,7 +869,18 @@ def node_summary(n: dict) -> dict:
 MORE_RE = re.compile(r"--\s*\(?more\)?\s*--|--More--|\(q\)\s*quit", re.I)
 ASK_RE = re.compile(r"\[y/n\]|\(y/n\)|\[confirm\]|\[yes/no\]|\(yes/no\)|are you sure", re.I)
 PASS_RE = re.compile(r"(?:password|passphrase|contraseña)\s*:\s*$", re.I)
-PROMPT_TAIL = re.compile(r"(?:^|\n)([^\n]{0,60}?[>#$%])\s*$")
+# Prompts aceptados al final de la salida. El primer patrón cubre IOS, VPCS y los
+# shells POSIX; pfSense termina en `:`, así que sólo se admiten las dos formas de
+# shell (`[ver][usuario@host]/ruta:` y `usuario@host:/ruta:`). El `@` y la ruta
+# absoluta son obligatorios para no confundir logs ni mensajes de login con un prompt.
+PROMPT_TAIL = re.compile(
+    r"(?:^|\n)("
+    r"[^\n]{0,60}?[>#$%]"                                      # IOS, VPCS, shells POSIX
+    r"|\[[^\]\n]+\]\[[^@\s\]\n]+@[^@\s\]\n]+\]/[^:\n]*:"    # pfSense: [ver][root@host]/ruta:
+    r"|[^@\s:]+@[^@\s:]+:/[^:\n]*:"                           # shell: usuario@host:/ruta
+    r")\s*$",
+    re.I,
+)
 
 
 class ConsoleError(RuntimeError):
