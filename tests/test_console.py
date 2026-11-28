@@ -108,15 +108,6 @@ def test_wait_ready_detecta_el_shell_de_pfsense(telnet_factory):
     assert res["prompt"] == "[2.7.2-RELEASE][root@pfSense.home.arpa]/root:"
 
 
-def test_wait_ready_detecta_el_menu_de_pfsense(telnet_factory):
-    menu = b"*** Welcome to pfSense ***\r\n\r\nEnter an option: "
-    srv = telnet_factory(on_connect=menu, on_line=lambda line: menu)
-    with _open(srv) as con:
-        res = con.wait_ready(timeout=5)
-    assert res["ready"] is True
-    assert res["prompt"] == "Enter an option:"
-
-
 def test_wait_ready_detecta_un_shell_usuario_host_sin_corchetes(telnet_factory):
     prompt = b"root@fw1:/root: "
     srv = telnet_factory(on_connect=prompt, on_line=lambda line: prompt)
@@ -148,10 +139,13 @@ def test_wait_ready_conserva_los_prompts_de_siempre(telnet_factory, banner, prom
     b"login as: ",
     b"Password: ",
     b"Starting local daemons: nuage.",
+    b"[INFO][daemon] failed to start: ",
+    b"root@fw1's password: ",
+    b"root@fw1: login failed: ",
 ])
 def test_wait_ready_no_confunde_lineas_con_dos_puntos_con_un_prompt(telnet_factory, banner):
     srv = telnet_factory(on_connect=banner, on_line=lambda line: banner)
     with _open(srv) as con:
-        res = con.wait_ready(timeout=0.8)
+        res = con.wait_ready(timeout=2.0)
     assert res["ready"] is False
     assert res["prompt"] is None

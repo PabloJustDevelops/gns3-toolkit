@@ -870,15 +870,14 @@ MORE_RE = re.compile(r"--\s*\(?more\)?\s*--|--More--|\(q\)\s*quit", re.I)
 ASK_RE = re.compile(r"\[y/n\]|\(y/n\)|\[confirm\]|\[yes/no\]|\(yes/no\)|are you sure", re.I)
 PASS_RE = re.compile(r"(?:password|passphrase|contraseña)\s*:\s*$", re.I)
 # Prompts aceptados al final de la salida. El primer patrón cubre IOS, VPCS y los
-# shells POSIX; pfSense termina en `:`, así que se admiten sus dos formas (shell
-# `[ver][usuario@host]/ruta:` y menú `Enter an option:`) sin aceptar un `password:`
-# ni cualquier línea de arranque que acabe en dos puntos.
+# shells POSIX; pfSense termina en `:`, así que sólo se admiten las dos formas de
+# shell (`[ver][usuario@host]/ruta:` y `usuario@host:/ruta:`). El `@` y la ruta
+# absoluta son obligatorios para no confundir logs ni mensajes de login con un prompt.
 PROMPT_TAIL = re.compile(
     r"(?:^|\n)("
-    r"[^\n]{0,60}?[>#$%]"                                # IOS, VPCS, shells POSIX
-    r"|\[[^\]\n]{0,40}\]\[[^\]\n]{0,60}\][^\n]{0,60}:"   # pfSense: [ver][root@host]/ruta:
-    r"|\S+@[^\s:]{1,60}[^\n]{0,60}:"                     # shell: usuario@host:/ruta
-    r"|Enter an option\s*:"                              # menú de consola de pfSense
+    r"[^\n]{0,60}?[>#$%]"                                      # IOS, VPCS, shells POSIX
+    r"|\[[^\]\n]+\]\[[^@\s\]\n]+@[^@\s\]\n]+\]/[^:\n]*:"    # pfSense: [ver][root@host]/ruta:
+    r"|[^@\s:]+@[^@\s:]+:/[^:\n]*:"                           # shell: usuario@host:/ruta
     r")\s*$",
     re.I,
 )
