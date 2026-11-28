@@ -226,7 +226,7 @@ def test_borrados_exigen_confirmacion(monkeypatch, handler, args, fragment):
                     reason="falta gns3core para comprobar ConsoleError")
 def test_exec_cierra_la_consola_al_enviar_sin_traceback(monkeypatch, capsys):
     class FakeConsole:
-        def wait_ready(self, timeout):
+        def wait_ready(self, timeout, expect=None):
             return {"prompt": ">", "ready": True}
 
         def run_many(self, *_a, **_kw):

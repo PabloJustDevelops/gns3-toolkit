@@ -1925,7 +1925,7 @@ def cmd_exec(args, conf):
         print(str(e), file=sys.stderr)
         return 1
     try:
-        ready = con.wait_ready(timeout=args.ready_timeout)
+        ready = con.wait_ready(timeout=args.ready_timeout, expect=args.expect)
         print(f"{proj['name']} / {node['name']}  prompt={ready.get('prompt')!r} "
               f"ready={ready.get('ready')}", file=sys.stderr)
         fails = 0

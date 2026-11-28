@@ -869,7 +869,19 @@ def node_summary(n: dict) -> dict:
 MORE_RE = re.compile(r"--\s*\(?more\)?\s*--|--More--|\(q\)\s*quit", re.I)
 ASK_RE = re.compile(r"\[y/n\]|\(y/n\)|\[confirm\]|\[yes/no\]|\(yes/no\)|are you sure", re.I)
 PASS_RE = re.compile(r"(?:password|passphrase|contraseña)\s*:\s*$", re.I)
-PROMPT_TAIL = re.compile(r"(?:^|\n)([^\n]{0,60}?[>#$%])\s*$")
+# Prompts aceptados al final de la salida. El primer patrón cubre IOS, VPCS y los
+# shells POSIX; pfSense termina en `:`, así que se admiten sus dos formas (shell
+# `[ver][usuario@host]/ruta:` y menú `Enter an option:`) sin aceptar un `password:`
+# ni cualquier línea de arranque que acabe en dos puntos.
+PROMPT_TAIL = re.compile(
+    r"(?:^|\n)("
+    r"[^\n]{0,60}?[>#$%]"                                # IOS, VPCS, shells POSIX
+    r"|\[[^\]\n]{0,40}\]\[[^\]\n]{0,60}\][^\n]{0,60}:"   # pfSense: [ver][root@host]/ruta:
+    r"|\S+@[^\s:]{1,60}[^\n]{0,60}:"                     # shell: usuario@host:/ruta
+    r"|Enter an option\s*:"                              # menú de consola de pfSense
+    r")\s*$",
+    re.I,
+)
 
 
 class ConsoleError(RuntimeError):
